@@ -29,6 +29,19 @@ jobs:
           mkdir -p .cargo
           cp ci/dev-cargo-config.toml .cargo/config.toml
 
+      - name: Commit dev overrides
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git add .cargo/config.toml
+          if git diff --staged --quiet; then
+            echo "No changes to commit"
+          else
+            git commit -m "chore: enable dev overrides [skip ci]"
+            # We don't push the commit to develop here to avoid triggering another workflow
+            # But we want the tag to be on this commit.
+          fi
+
       - name: Configure Git authentication
         env:
           GH_TOKEN: ${{ secrets.GH_TOKEN }}
@@ -67,4 +80,7 @@ jobs:
           else
             git tag "${tag}"
             git push origin "${tag}"
+            
+            # Now push the commit to develop as well
+            git push origin HEAD:develop
           fi
