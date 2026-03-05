@@ -1,8 +1,11 @@
-version: 2
+﻿version: 2
 updates:
   - package-ecosystem: "cargo"
     directory: "/"
     schedule:
       interval: "daily"
-    open-pull-requests-limit: 10
-    rebase-strategy: "auto"
+    commit-message:
+      prefix: "chore"
+    allow: 
+      - dependency-name: "greentic-*"
+      - dependency-name: "qa-spec"
