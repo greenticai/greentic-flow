@@ -56,17 +56,79 @@ jobs:
           cargo build --workspace --all-features
           cargo test --workspace --all-features -- --nocapture
 
+<<<<<<< Updated upstream
       - name: Setup GitVersion
         uses: gittools/actions/gitversion/setup@v1
+=======
+  publish-dev:
+    name: Publish dev crate to Cloudsmith
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    needs: build-test
+    runs-on: ubuntu-latest
+    env:
+      CLOUDSMITH_API_KEY: ${{ secrets.CLOUDSMITH_API_KEY || secrets.GH_PAT }}
+      CARGO_REGISTRIES_CLOUDSMITH_TOKEN: ${{ secrets.CLOUDSMITH_API_KEY || secrets.GH_PAT }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+>>>>>>> Stashed changes
         with:
           versionSpec: "5.x"
 
+<<<<<<< Updated upstream
       - name: Determine version
         id: gitversion
         uses: gittools/actions/gitversion/execute@v1
         with:
           useConfigFile: true
           configFilePath: GitVersion.yml
+=======
+      - name: Configure Cloudsmith Registry
+        run: |
+          mkdir -p .cargo
+          cat > .cargo/config.toml <<EOF
+          [registries.cloudsmith]
+          index = "sparse+https://cargo.cloudsmith.io/dmytrogreen/dev/"
+          EOF
+
+      - name: Apply Cloudsmith patches for internal dependencies
+        shell: bash
+        run: |
+          echo "" >> Cargo.toml
+          echo "[patch.crates-io]" >> Cargo.toml
+          
+          # List of internal crates to patch from Cloudsmith
+          INTERNAL_CRATES=("greentic-types" "greentic-interfaces-host" "greentic-interfaces-wasmtime" "greentic-distributor-client" "greentic-qa-lib" "greentic-i18n-translator")
+          
+          for crate in "${INTERNAL_CRATES[@]}"; do
+            echo "Searching for latest $crate in Cloudsmith..."
+            # Try to get the latest version from Cloudsmith API
+            VERSION=$(curl -s -H "X-Api-Key: $CLOUDSMITH_API_KEY" \
+              "https://api.cloudsmith.io/v1/packages/dmytrogreen/dev/?q=name:$crate" \
+              | jq -r 'if .[0] then .[0].version else empty end')
+            
+            if [ ! -z "$VERSION" ] && [ "$VERSION" != "null" ]; then
+              echo "Patching $crate to version $VERSION from Cloudsmith"
+              echo "$crate = { version = \"$VERSION\", registry = \"cloudsmith\" }" >> Cargo.toml
+            else
+              echo "Warning: $crate not found in Cloudsmith dev repository, skipping patch."
+            fi
+          done
+
+      - name: Update package version to dev
+        shell: bash
+        run: |
+          # Simple dev versioning: base_version-dev.run_number
+          BASE_VERSION=$(grep '^version =' Cargo.toml | head -1 | cut -d '"' -f 2)
+          DEV_VERSION="${BASE_VERSION}-dev.${GITHUB_RUN_NUMBER}"
+          sed -i "s/^version = \".*\"/version = \"$DEV_VERSION\"/" Cargo.toml
+          echo "New dev version: $DEV_VERSION"
+
+      - name: Publish to Cloudsmith
+        run: |
+          # Use --allow-dirty because we edited Cargo.toml for patching/versioning
+          cargo publish --registry cloudsmith --allow-dirty
+>>>>>>> Stashed changes
 
       - name: Create Tag
         env:
