@@ -1,53 +1,24 @@
-name: Dev CI & Tag (Flow)
+name: Dev Publish crates
 
 on:
   push:
     branches: [ develop ]
   workflow_dispatch: {}
 
-permissions:
-  contents: write
-
 jobs:
-  build-test-tag:
-    name: Build, Test & Tag
+  build-test:
+    name: CI (lint/test/build)
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - uses: dtolnay/rust-toolchain@master
+      - uses: dtolnay/rust-toolchain@1.90.0
         with:
           toolchain: 1.90.0
+          override: true
           components: rustfmt, clippy
-
       - uses: Swatinem/rust-cache@v2
-
-      - name: Enable dev overrides (develop only)
-        run: |
-          mkdir -p .cargo
-          cp ci/dev-cargo-config.toml .cargo/config.toml
-
-      - name: Commit dev overrides
-        run: |
-          git config --global user.name "github-actions[bot]"
-          git config --global user.email "github-actions[bot]@users.noreply.github.com"
-          git add .cargo/config.toml
-          if git diff --staged --quiet; then
-            echo "No changes to commit"
-          else
-            git commit -m "chore: enable dev overrides [skip ci]"
-            # We don't push the commit to develop here to avoid triggering another workflow
-            # But we want the tag to be on this commit.
-          fi
-
-      - name: Configure Git authentication
-        env:
-          GH_TOKEN: ${{ secrets.GH_TOKEN }}
-        run: |
-          git config --global url."https://${GH_TOKEN}@github.com/".insteadOf "https://github.com/"
-
       - name: Lint & Test
         run: |
           ci/check_interfaces_alignment.sh
@@ -56,10 +27,6 @@ jobs:
           cargo build --workspace --all-features
           cargo test --workspace --all-features -- --nocapture
 
-<<<<<<< Updated upstream
-      - name: Setup GitVersion
-        uses: gittools/actions/gitversion/setup@v1
-=======
   publish-dev:
     name: Publish dev crate to Cloudsmith
     if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
@@ -70,19 +37,14 @@ jobs:
       CARGO_REGISTRIES_CLOUDSMITH_TOKEN: ${{ secrets.CLOUDSMITH_API_KEY || secrets.GH_PAT }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
->>>>>>> Stashed changes
         with:
-          versionSpec: "5.x"
+          toolchain: stable
+          override: true
+      - uses: Swatinem/rust-cache@v2
 
-<<<<<<< Updated upstream
-      - name: Determine version
-        id: gitversion
-        uses: gittools/actions/gitversion/execute@v1
-        with:
-          useConfigFile: true
-          configFilePath: GitVersion.yml
-=======
       - name: Configure Cloudsmith Registry
         run: |
           mkdir -p .cargo
@@ -98,7 +60,7 @@ jobs:
           echo "[patch.crates-io]" >> Cargo.toml
           
           # List of internal crates to patch from Cloudsmith
-          INTERNAL_CRATES=("greentic-types" "greentic-interfaces-host" "greentic-interfaces-wasmtime" "greentic-distributor-client" "greentic-qa-lib" "greentic-i18n-translator")
+          INTERNAL_CRATES=("greentic-types" "greentic-interfaces-host" "greentic-interfaces-wasmtime" "greentic-distributor-client" "greentic-qa-lib" "greentic-i18n-translator" "qa-spec")
           
           for crate in "${INTERNAL_CRATES[@]}"; do
             echo "Searching for latest $crate in Cloudsmith..."
@@ -115,20 +77,28 @@ jobs:
             fi
           done
 
+      - name: Setup GitVersion
+        uses: gittools/actions/gitversion/setup@v1
+        with:
+          versionSpec: "5.x"
+      - name: Determine dev version
+        id: gitversion
+        uses: gittools/actions/gitversion/execute@v1
+        with:
+          useConfigFile: true
+          configFilePath: GitVersion.yml
+
       - name: Update package version to dev
         shell: bash
         run: |
-          # Simple dev versioning: base_version-dev.run_number
-          BASE_VERSION=$(grep '^version =' Cargo.toml | head -1 | cut -d '"' -f 2)
-          DEV_VERSION="${BASE_VERSION}-dev.${GITHUB_RUN_NUMBER}"
-          sed -i "s/^version = \".*\"/version = \"$DEV_VERSION\"/" Cargo.toml
-          echo "New dev version: $DEV_VERSION"
+          dev_version="${{ steps.gitversion.outputs.MajorMinorPatch }}-${{ steps.gitversion.outputs.PreReleaseTag }}"
+          echo "Using dev version: ${dev_version}"
+          sed -i "s/^version = \".*\"/version = \"$dev_version\"/" Cargo.toml
 
       - name: Publish to Cloudsmith
         run: |
           # Use --allow-dirty because we edited Cargo.toml for patching/versioning
           cargo publish --registry cloudsmith --allow-dirty
->>>>>>> Stashed changes
 
       - name: Create Tag
         env:
@@ -140,9 +110,8 @@ jobs:
           if git rev-parse -q --verify "refs/tags/${tag}" >/dev/null; then
             echo "Tag ${tag} already exists. Skipping."
           else
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
             git tag "${tag}"
             git push origin "${tag}"
-            
-            # Now push the commit to develop as well
-            git push origin HEAD:develop
           fi
