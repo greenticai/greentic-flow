@@ -1,2 +1,3 @@
 [registries.cloudsmith]
 index = "sparse+https://cargo.cloudsmith.io/dmytrogreen/dev/"
+credential-provider = "cargo:token"
