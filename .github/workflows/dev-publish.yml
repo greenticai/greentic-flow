@@ -91,7 +91,8 @@ jobs:
         run: |
           dev_version="${{ steps.gitversion.outputs.MajorMinorPatch }}-${{ steps.gitversion.outputs.PreReleaseTag }}"
           echo "Using dev version: ${dev_version}"
-          sed -i "s/^version = \".*\"/version = \"$dev_version\"/" Cargo.toml
+          # Update package version safely (first instance)
+          sed -i -E "0,/^version = \"[^\"]+\"/s//version = \"${dev_version}\"/" Cargo.toml
 
       - name: Publish to Cloudsmith
         run: |
