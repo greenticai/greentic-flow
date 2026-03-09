@@ -37,10 +37,9 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: stable
-          override: true
       - uses: Swatinem/rust-cache@v2
 
       - name: Configure Cloudsmith Registry (via template)
