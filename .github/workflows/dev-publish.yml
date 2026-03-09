@@ -56,18 +56,37 @@ jobs:
           # We search for crates listed in the patch file template.
           PATCHED_CRATES=$(grep -E '^[a-z0-9_-]+\s*=' ci/cargo-patch-dev.toml | cut -d '=' -f 1 | tr -d ' ')
           
+          # Pre-fetch registry index to ensure we know what's actually available to Cargo
+          cargo update --registry cloudsmith || true
+          
           for crate in $PATCHED_CRATES; do
-            echo "Searching for latest $crate in Cloudsmith..."
+            echo "Searching for latest $crate in Cloudsmith (API)..."
             # Fetch latest package version from Cloudsmith API
             VERSION=$(curl -s -H "X-Api-Key: $CLOUDSMITH_API_KEY" \
               "https://api.cloudsmith.io/v1/packages/dmytrogreen/dev/?q=name:$crate" \
               | jq -r 'if .[0] then .[0].version else empty end')
             
             if [ ! -z "$VERSION" ] && [ "$VERSION" != "null" ]; then
-              echo "Injecting patch: $crate = { version = \"$VERSION\", registry = \"cloudsmith\" }"
-              echo "$crate = { version = \"$VERSION\", registry = \"cloudsmith\" }" >> Cargo.toml
+              # CRITICAL: Verify if this version is actually known to Cargo yet
+              # Sparse index propagation can take a minute.
+              echo "API says $VERSION is latest. Checking if Cargo index knows it..."
+              
+              # Using a subshell to avoid 'cargo search' output pollution
+              if cargo search "$crate" --registry cloudsmith | grep -q "$VERSION"; then
+                echo "Injecting patch: $crate = { version = \"$VERSION\", registry = \"cloudsmith\" }"
+                echo "$crate = { version = \"$VERSION\", registry = \"cloudsmith\" }" >> Cargo.toml
+              else
+                echo "Version $VERSION not yet in Cargo index. Falling back to latest available in index..."
+                INDEX_VERSION=$(cargo search "$crate" --registry cloudsmith | grep "^$crate =" | sed -E 's/.*"([^"]+)".*/\1/')
+                if [ ! -z "$INDEX_VERSION" ]; then
+                  echo "Injecting patch from index: $crate = { version = \"$INDEX_VERSION\", registry = \"cloudsmith\" }"
+                  echo "$crate = { version = \"$INDEX_VERSION\", registry = \"cloudsmith\" }" >> Cargo.toml
+                else
+                  echo "No version of $crate found in Cargo index. Skipping patch."
+                fi
+              fi
             else
-              echo "Crate $crate not found in Cloudsmith. Skipping patch for this dependency."
+              echo "Crate $crate not found in Cloudsmith API. Skipping patch."
             fi
           done
           
