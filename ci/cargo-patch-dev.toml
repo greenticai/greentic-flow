@@ -1,0 +1,9 @@
+[patch.crates-io]
+# Internal crates to be patched from Cloudsmith in dev/develop
+greentic-types = { registry = "cloudsmith" }
+greentic-interfaces-host = { registry = "cloudsmith" }
+greentic-interfaces-wasmtime = { registry = "cloudsmith" }
+greentic-distributor-client = { registry = "cloudsmith" }
+greentic-qa-lib = { registry = "cloudsmith" }
+greentic-i18n-translator = { registry = "cloudsmith" }
+qa-spec = { registry = "cloudsmith" }
