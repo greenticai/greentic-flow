@@ -51,26 +51,28 @@ jobs:
         shell: bash
         run: |
           echo "" >> Cargo.toml
-          # Append the patch template
-          cat ci/cargo-patch-dev.toml >> Cargo.toml
+          echo "[patch.crates-io]" >> Cargo.toml
           
-          # Now, dynamically find the latest version for each patched crate
-          # and inject it into the patch entries if needed.
-          # We search for crates listed in the patch file.
+          # We search for crates listed in the patch file template.
           PATCHED_CRATES=$(grep -E '^[a-z0-9_-]+\s*=' ci/cargo-patch-dev.toml | cut -d '=' -f 1 | tr -d ' ')
           
           for crate in $PATCHED_CRATES; do
             echo "Searching for latest $crate in Cloudsmith..."
+            # Fetch latest package version from Cloudsmith API
             VERSION=$(curl -s -H "X-Api-Key: $CLOUDSMITH_API_KEY" \
               "https://api.cloudsmith.io/v1/packages/dmytrogreen/dev/?q=name:$crate" \
               | jq -r 'if .[0] then .[0].version else empty end')
             
             if [ ! -z "$VERSION" ] && [ "$VERSION" != "null" ]; then
-              echo "Injecting version $VERSION for $crate in patches"
-              # Use sed to add the version to the patch entry
-              sed -i "s/$crate\s*=\s*{\s*registry\s*=\s*\"cloudsmith\"\s*}/$crate = { version = \"$VERSION\", registry = \"cloudsmith\" }/" Cargo.toml
+              echo "Injecting patch: $crate = { version = \"$VERSION\", registry = \"cloudsmith\" }"
+              echo "$crate = { version = \"$VERSION\", registry = \"cloudsmith\" }" >> Cargo.toml
+            else
+              echo "Crate $crate not found in Cloudsmith. Skipping patch for this dependency."
             fi
           done
+          
+          echo "Final Cargo.toml tail:"
+          tail -n 20 Cargo.toml
 
       - name: Setup GitVersion
         uses: gittools/actions/gitversion/setup@v1
