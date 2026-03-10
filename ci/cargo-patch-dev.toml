@@ -1,6 +1,6 @@
 [patch.crates-io]
 # Internal crates to be patched from Cloudsmith in dev/develop
-greentic-types = { version = "0.4.55-dev.1", registry = "cloudsmith" }
+greentic-types = { version = "0.4.56-dev.122", registry = "cloudsmith" }
 # greentic-interfaces-host = { registry = "cloudsmith" }
 # greentic-interfaces-wasmtime = { registry = "cloudsmith" }
 # greentic-distributor-client = { registry = "cloudsmith" }
