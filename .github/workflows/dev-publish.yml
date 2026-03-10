@@ -56,33 +56,7 @@ jobs:
         shell: bash
         run: |
           echo "" >> Cargo.toml
-          echo "[patch.crates-io]" >> Cargo.toml
-          
-          # We search for crates listed in the patch file template.
-          PATCHED_CRATES=$(grep -E '^[a-z0-9_-]+\s*=' ci/cargo-patch-dev.toml | cut -d '=' -f 1 | tr -d ' ')
-          
-          for crate in $PATCHED_CRATES; do
-            echo "Searching for latest $crate in Cloudsmith (API)..."
-            # Fetch latest package version from Cloudsmith API
-            # Packages must be 'Synchronized' to be reliable.
-            RESPONSE=$(curl -s -H "X-Api-Key: $CLOUDSMITH_API_KEY" \
-              "https://api.cloudsmith.io/v1/packages/dmytrogreen/dev/?q=name:$crate")
-            
-            VERSION=$(echo "$RESPONSE" | jq -r 'if .[0] and .[0].is_sync_completed then .[0].version else empty end')
-            
-            if [ ! -z "$VERSION" ] && [ "$VERSION" != "null" ]; then
-              echo "Injecting patch: $crate = { version = \"$VERSION\", registry = \"cloudsmith\" }"
-              echo "$crate = { version = \"$VERSION\", registry = \"cloudsmith\" }" >> Cargo.toml
-            else
-              echo "Crate $crate not found or not synchronized in Cloudsmith API. Skipping patch."
-            fi
-          done
-          
-          echo "Final Cargo.toml tail:"
-          tail -n 20 Cargo.toml
-          
-          echo "Final Cargo.toml tail:"
-          tail -n 20 Cargo.toml
+          cat ci/cargo-patch-dev.toml >> Cargo.toml
 
       - name: Setup GitVersion
         uses: gittools/actions/gitversion/setup@v1
