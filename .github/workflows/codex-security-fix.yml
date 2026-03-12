@@ -21,6 +21,7 @@ permissions:
 
 jobs:
   codex-fix:
+    if: github.actor != 'dependabot[bot]'
     runs-on: ubuntu-latest
     permissions:
       contents: write
