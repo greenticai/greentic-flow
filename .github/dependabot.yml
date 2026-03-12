@@ -6,6 +6,12 @@ updates:
       interval: "daily"
     commit-message:
       prefix: "chore"
-    allow: 
+    allow:
       - dependency-name: "greentic-*"
       - dependency-name: "qa-spec"
+    groups:
+      greentic-interfaces-stack:
+        patterns:
+          - "greentic-interfaces"
+          - "greentic-interfaces-host"
+          - "greentic-interfaces-wasmtime"

@@ -22,23 +22,31 @@ jobs:
           script: |
             const pr = context.payload.pull_request;
 
-            // Approve the PR (required in many repos with branch protections)
-            await github.rest.pulls.createReview({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              pull_number: pr.number,
-              event: "APPROVE",
-              body: "Auto-approving Dependabot PR."
-            });
+            try {
+              // Approve the PR (required in many repos with branch protections)
+              await github.rest.pulls.createReview({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                pull_number: pr.number,
+                event: "APPROVE",
+                body: "Auto-approving Dependabot PR."
+              });
+            } catch (error) {
+              core.warning(`Skipping Dependabot auto-approval: ${error.message}`);
+            }
 
-            // Enable auto-merge (merge occurs once required checks are green)
-            await github.graphql(`
-              mutation EnableAutoMerge($pullRequestId: ID!) {
-                enablePullRequestAutoMerge(input: {
-                  pullRequestId: $pullRequestId,
-                  mergeMethod: SQUASH
-                }) {
-                  pullRequest { number autoMergeRequest { enabledAt } }
+            try {
+              // Enable auto-merge when branch protection allows it.
+              await github.graphql(`
+                mutation EnableAutoMerge($pullRequestId: ID!) {
+                  enablePullRequestAutoMerge(input: {
+                    pullRequestId: $pullRequestId,
+                    mergeMethod: SQUASH
+                  }) {
+                    pullRequest { number autoMergeRequest { enabledAt } }
+                  }
                 }
-              }
-            `, { pullRequestId: pr.node_id });
+              `, { pullRequestId: pr.node_id });
+            } catch (error) {
+              core.warning(`Skipping Dependabot auto-merge: ${error.message}`);
+            }
