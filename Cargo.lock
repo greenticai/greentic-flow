@@ -1479,9 +1479,9 @@ dependencies = [
 
 [[package]]
 name = "greentic-interfaces-wasmtime"
-version = "0.4.107"
+version = "0.4.108"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "89bf67cbbd2698c739c2f9ffd6f9549bdc127ae81a3a694c14e25ff59980ca40"
+checksum = "371632e60af407b90519f9e88ea66e3eb27738dff73d4a2cba1b32ef5d3a0cc6"
 dependencies = [
  "anyhow",
  "camino",
