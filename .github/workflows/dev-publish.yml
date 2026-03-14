@@ -32,9 +32,6 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
-    env:
-      CLOUDSMITH_API_KEY: ${{ secrets.CLOUDSMITH_API_KEY || secrets.GH_PAT }}
-      CARGO_REGISTRIES_CLOUDSMITH_TOKEN: ${{ secrets.CLOUDSMITH_API_KEY || secrets.GH_PAT }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -44,15 +41,30 @@ jobs:
           toolchain: stable
       - uses: Swatinem/rust-cache@v2
 
-      - name: Configure Cloudsmith Registry (via template)
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Get CodeArtifact Token
+        run: |
+          token=$(aws codeartifact get-authorization-token \
+            --domain ${{ secrets.CODEARTIFACT_DOMAIN }} \
+            --domain-owner ${{ secrets.CODEARTIFACT_DOMAIN_OWNER }} \
+            --region ${{ secrets.AWS_REGION }} \
+            --query authorizationToken \
+            --output text)
+          echo "::add-mask::$token"
+          echo "CARGO_REGISTRIES_CORP_ARTIFACTS_GREENTIC_TOKEN=$token" >> $GITHUB_ENV
+
+      - name: Configure CodeArtifact Registry (via template)
         run: |
           mkdir -p .cargo
           cp ci/cargo-config-dev.toml .cargo/config.toml
-          # Ensure registries.cloudsmith.index is correct (remove sparse+ if needed or keep it if supported)
-          # Based on Cloudsmith docs, it should be sparse+https://cargo.cloudsmith.io/dmytrogreen/dev/
-          # but we'll ensure it's exactly as defined in the template.
 
-      - name: Apply Cloudsmith patches (via template)
+      - name: Apply CodeArtifact patches (via template)
         shell: bash
         run: |
           echo "" >> Cargo.toml
@@ -77,10 +89,10 @@ jobs:
           # Update package version safely (first instance)
           sed -i -E "0,/^version = \"[^\"]+\"/s//version = \"${dev_version}\"/" Cargo.toml
 
-      - name: Publish to Cloudsmith
+      - name: Publish to CodeArtifact
         run: |
           # Use --allow-dirty because we edited Cargo.toml for patching/versioning
-          cargo publish --registry cloudsmith --allow-dirty
+          cargo publish --registry corp-artifacts-greentic --allow-dirty
 
       - name: Create Tag
         env:
