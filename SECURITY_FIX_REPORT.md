@@ -1,34 +1,47 @@
-# SECURITY_FIX_REPORT
+# Security Fix Report
 
-Date: 2026-03-13 (UTC)
-Reviewer Role: CI Security Reviewer
+Date: 2026-03-15 (UTC)
+Repository: `greentic-flow`
 
-## Scope
-- Analyze provided security alerts.
-- Check for newly introduced PR dependency vulnerabilities.
-- Apply minimal safe remediation if vulnerabilities exist.
+## Inputs Reviewed
+- Dependabot alerts JSON: `0` alerts.
+- Code scanning alerts JSON: `0` alerts.
+- PR dependency vulnerabilities: `2` affected packages in `Cargo.lock`.
 
-## Input Data
-- Security alerts JSON:
-  - `dependabot`: `[]`
-  - `code_scanning`: `[]`
-- New PR dependency vulnerabilities: `[]`
+## PR Vulnerability Findings
+1. `aws-lc-sys@0.37.1` (high)
+   - GHSA-vw5v-4f2q-w9xf
+   - GHSA-65p9-r9h6-22vj
+   - GHSA-hfpc-8r3f-gw53
+   - Advisory indicates patched version starts at `0.38.0`.
+2. `wasmtime@41.0.3` (moderate)
+   - GHSA-xjhv-v822-pf94
+   - Advisory indicates patched version starts at `41.0.4`.
 
-## Repository Dependency Files Reviewed
+## Remediation Applied
+Updated dependency constraints in `Cargo.toml` to avoid exact-pinning interface crates that can keep older vulnerable transitive graphs locked:
+- `greentic-interfaces-host`: `=0.4.108` -> `0.4`
+- `greentic-interfaces-wasmtime`: `=0.4.108` -> `0.4`
+
+Rationale:
+- This is the minimal safe source-level change that allows Cargo to resolve patched transitive versions instead of being constrained by exact pins.
+- It reduces the likelihood of retaining vulnerable `wasmtime 41.0.3` in future lock resolution.
+
+## CI Environment Limitation
+A full lockfile remediation was not possible in this execution environment because crates.io index access is unavailable (offline DNS/network restriction), so `cargo update`/`cargo tree` dependency resolution against crates.io could not run.
+
+## Required Follow-up (Networked CI Runner)
+Run the following in a network-enabled CI step and commit the resulting `Cargo.lock` updates:
+
+```bash
+RUSTUP_TOOLCHAIN=stable cargo update
+RUSTUP_TOOLCHAIN=stable cargo update -p wasmtime --precise 41.0.4
+RUSTUP_TOOLCHAIN=stable cargo update -p aws-lc-sys --precise 0.38.0
+RUSTUP_TOOLCHAIN=stable cargo audit
+```
+
+If Cargo reports a transitive constraint conflict for `aws-lc-sys 0.38.0`, upgrade the parent crate(s) that require `aws-lc-sys 0.37.x` (commonly via newer `rustls`/`rustls-webpki`/`quinn-proto` chain) and regenerate `Cargo.lock`.
+
+## Files Changed
 - `Cargo.toml`
-- `Cargo.lock`
-
-## Findings
-- No Dependabot alerts to remediate.
-- No code scanning alerts to remediate.
-- No PR dependency vulnerabilities were reported.
-- No new dependency vulnerabilities were identified from the provided PR vulnerability input.
-
-## Remediation Performed
-- No code or dependency changes were required.
-- No security patches were applied.
-
-## Validation Notes
-- Attempted local Rust vulnerability tooling (`cargo audit`) for additional validation.
-- Tool execution was blocked in this CI sandbox due rustup temp-file permission restrictions under `/home/runner/.rustup`.
-- Final assessment is based on the provided alert inputs and repository dependency manifest review.
+- `SECURITY_FIX_REPORT.md`
