@@ -5,10 +5,6 @@ on:
     branches: [master]
   workflow_dispatch:
     inputs:
-      branch:
-        description: "Branch to scan and patch (only for manual run)"
-        required: false
-        default: ""
       max_alerts:
         description: "Maximum open alerts per source to include"
         required: true
@@ -36,7 +32,7 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.pull_request.head.ref || github.event.inputs.branch }}
+          ref: ${{ github.event.pull_request.head.ref || github.ref_name }}
           fetch-depth: 0
 
       - name: Dependency Review
@@ -135,7 +131,7 @@ jobs:
       - name: Commit and push fixes
         if: (steps.alerts.outputs.count != '0' || github.event_name == 'pull_request')
         env:
-          BRANCH: ${{ github.event.pull_request.head.ref || github.event.inputs.branch }}
+          BRANCH: ${{ github.event.pull_request.head.ref || github.ref_name }}
         run: |
           set -euo pipefail
           if git diff --quiet && [ ! -f SECURITY_FIX_REPORT.md ]; then
