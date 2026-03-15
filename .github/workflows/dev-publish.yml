@@ -13,127 +13,99 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.90.0
+      - uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: 1.90.0
-          override: true
+          toolchain: 1.91.0
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
       - name: Lint & Test
         run: |
-          ci/check_interfaces_alignment.sh
           cargo fmt --all -- --check
           cargo clippy --workspace --all-targets -- -D warnings
           cargo build --workspace --all-features
           cargo test --workspace --all-features -- --nocapture
 
   publish-dev:
-    name: Publish dev crate to crates.io
+    name: Publish dev crate to Cloudsmith
     if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
     needs: build-test
     runs-on: ubuntu-latest
     permissions:
-      contents: read
-      id-token: write
+      contents: write
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: stable
-          override: true
       - uses: Swatinem/rust-cache@v2
 
-      - name: Resolve latest greentic-types dev version
-        id: types
-        shell: bash
-        run: |
-          set -euo pipefail
-          types_dev_version=$(python3 - <<'PY'
-          import json
-          import re
-          import urllib.request
-
-          with urllib.request.urlopen('https://crates.io/api/v1/crates/greentic-types') as r:
-              data = json.load(r)
-
-          versions = []
-          for item in data.get('versions', []):
-              num = item.get('num', '')
-              m = re.match(r'^0\.4\.(\d+)-dev\.(\d+)\.(\d+)$', num)
-              if m:
-                  versions.append((tuple(int(x) for x in m.groups()), num))
-
-          if not versions:
-              raise SystemExit('no greentic-types dev versions found in crates.io for 0.4.x-dev.n.m')
-
-          versions.sort(key=lambda x: x[0])
-          print(versions[-1][1])
-          PY
-          )
-          echo "types_dev_version=${types_dev_version}" >> "$GITHUB_OUTPUT"
-          echo "Using greentic-types ${types_dev_version}"
-
-      - name: Apply dev versions
-        shell: bash
-        env:
-          TYPES_DEV_VERSION: ${{ steps.types.outputs.types_dev_version }}
-        run: |
-          set -euo pipefail
-          flow_base=$(python3 - <<'PY'
-          import re
-          text = open('Cargo.toml', 'r', encoding='utf-8').read()
-          m = re.search(r'^version\s*=\s*"([^"]+)"', text, re.M)
-          if not m:
-              raise SystemExit('package version not found')
-          print(m.group(1).split('-')[0])
-          PY
-          )
-          flow_dev="${flow_base}-dev.${GITHUB_RUN_NUMBER}.${GITHUB_RUN_ATTEMPT}"
-          echo "Using greentic-flow ${flow_dev}"
-
-          FLOW_DEV_VERSION="$flow_dev" TYPES_DEV_VERSION="$TYPES_DEV_VERSION" python3 - <<'PY'
-          import os
-          import re
-
-          path = 'Cargo.toml'
-          text = open(path, 'r', encoding='utf-8').read()
-
-          text, count1 = re.subn(
-              r'(^version\s*=\s*")([^"]+)(")',
-              r'\g<1>' + os.environ['FLOW_DEV_VERSION'] + r'\g<3>',
-              text,
-              count=1,
-              flags=re.M,
-          )
-          if count1 != 1:
-              raise SystemExit('failed to update package version')
-
-          text, count2 = re.subn(
-              r'(greentic-types\s*=\s*\{\s*version\s*=\s*")([^"]+)(")',
-              r'\g<1>' + os.environ['TYPES_DEV_VERSION'] + r'\g<3>',
-              text,
-              count=1,
-          )
-          if count2 != 1:
-              raise SystemExit('failed to update greentic-types dependency')
-
-          open(path, 'w', encoding='utf-8').write(text)
-          PY
-
-      - name: Refresh lockfile for pinned dev dependency
-        shell: bash
-        env:
-          TYPES_DEV_VERSION: ${{ steps.types.outputs.types_dev_version }}
-        run: |
-          set -euo pipefail
-          cargo update -p greentic-types --precise "$TYPES_DEV_VERSION"
-
-      - name: Publish changed crates
-        uses: katyo/publish-crates@v2
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
         with:
-          path: .
-          registry-token: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-          ignore-unpublished-changes: true
-          check-repo: false
-          dry-run: false
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
 
+      - name: Get CodeArtifact Token
+        run: |
+          token=$(aws codeartifact get-authorization-token \
+            --domain ${{ secrets.CODEARTIFACT_DOMAIN }} \
+            --domain-owner ${{ secrets.CODEARTIFACT_DOMAIN_OWNER }} \
+            --region ${{ secrets.AWS_REGION }} \
+            --query authorizationToken \
+            --output text)
+          echo "::add-mask::$token"
+          echo "CARGO_REGISTRIES_CORP_ARTIFACTS_GREENTIC_TOKEN=$token" >> $GITHUB_ENV
+
+      - name: Configure CodeArtifact Registry (via template)
+        run: |
+          mkdir -p .cargo
+          cp ci/cargo-config-dev.toml .cargo/config.toml
+
+      - name: Apply CodeArtifact patches (via template)
+        shell: bash
+        run: |
+          echo "" >> Cargo.toml
+          cat ci/cargo-patch-dev.toml >> Cargo.toml
+
+      - name: Setup GitVersion
+        uses: gittools/actions/gitversion/setup@v1
+        with:
+          versionSpec: "5.x"
+      - name: Determine dev version
+        id: gitversion
+        uses: gittools/actions/gitversion/execute@v1
+        with:
+          useConfigFile: true
+          configFilePath: GitVersion.yml
+
+      - name: Update package version to dev
+        shell: bash
+        run: |
+          dev_version="${{ steps.gitversion.outputs.MajorMinorPatch }}-${{ steps.gitversion.outputs.PreReleaseTag }}"
+          echo "Using dev version: ${dev_version}"
+          # Update package version safely (first instance)
+          sed -i -E "0,/^version = \"[^\"]+\"/s//version = \"${dev_version}\"/" Cargo.toml
+
+      - name: Publish to CodeArtifact
+        run: |
+          # Use --allow-dirty because we edited Cargo.toml for patching/versioning
+          cargo publish --registry corp-artifacts-greentic --allow-dirty
+
+      - name: Create Tag
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          tag="v${{ steps.gitversion.outputs.FullSemVer }}"
+          echo "Creating tag ${tag}"
+          
+          if git rev-parse -q --verify "refs/tags/${tag}" >/dev/null; then
+            echo "Tag ${tag} already exists. Skipping."
+          else
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git tag "${tag}"
+            git push origin "${tag}"
+          fi
