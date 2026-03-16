@@ -18,6 +18,36 @@ jobs:
           toolchain: 1.91.0
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Get CodeArtifact Token
+        run: |
+          token=$(aws codeartifact get-authorization-token \
+            --domain ${{ secrets.CODEARTIFACT_DOMAIN }} \
+            --domain-owner ${{ secrets.CODEARTIFACT_DOMAIN_OWNER }} \
+            --region ${{ secrets.AWS_REGION }} \
+            --query authorizationToken \
+            --output text)
+          echo "::add-mask::$token"
+          echo "CARGO_REGISTRIES_CORP_ARTIFACTS_GREENTIC_TOKEN=$token" >> $GITHUB_ENV
+
+      - name: Configure CodeArtifact Registry (via template)
+        run: |
+          mkdir -p .cargo
+          cp ci/cargo-config-dev.toml .cargo/config.toml
+
+      - name: Apply CodeArtifact patches (via template)
+        shell: bash
+        run: |
+          echo "" >> Cargo.toml
+          cat ci/cargo-patch-dev.toml >> Cargo.toml
+
       - name: Lint & Test
         run: |
           cargo fmt --all -- --check
@@ -26,7 +56,7 @@ jobs:
           cargo test --workspace --all-features -- --nocapture
 
   publish-dev:
-    name: Publish dev crate to Cloudsmith
+    name: Publish dev crate to CodeArtifact
     if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
     needs: build-test
     runs-on: ubuntu-latest
