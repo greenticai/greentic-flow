@@ -1,18 +1,19 @@
-﻿name: Codex Security Fix
+name: Codex Security Fix
 
 on:
   pull_request:
     branches: [master]
   workflow_dispatch:
     inputs:
-      branch:
-        description: "Branch to scan and patch (only for manual run)"
-        required: false
-        default: ""
       max_alerts:
         description: "Maximum open alerts per source to include"
         required: true
         default: "20"
+      include_all_alerts:
+        description: "Include all repository-wide alerts (ignores PR filtering)"
+        type: boolean
+        required: false
+        default: false
 
 permissions:
   contents: write
@@ -31,7 +32,7 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.pull_request.head.ref || github.event.inputs.branch }}
+          ref: ${{ github.event.pull_request.head.ref || github.ref_name }}
           fetch-depth: 0
 
       - name: Dependency Review
@@ -49,12 +50,13 @@ jobs:
           OWNER: ${{ github.repository_owner }}
           REPO: ${{ github.event.repository.name }}
           MAX_ALERTS: ${{ github.event.inputs.max_alerts || 20 }}
+          INCLUDE_ALL: ${{ github.event.inputs.include_all_alerts }}
           PR_VULN_CHANGES: ${{ steps.dependency_review.outputs.vulnerable-changes }}
           PR_COMMENT_CONTENT: ${{ steps.dependency_review.outputs.comment-content }}
         run: |
           set -euo pipefail
 
-          if [ "${{ github.event_name }}" == "pull_request" ]; then
+          if [ "${{ github.event_name }}" == "pull_request" ] && [ "${INCLUDE_ALL}" != "true" ]; then
             echo "$PR_VULN_CHANGES" > pr-vulnerable-changes.json
             echo "$PR_COMMENT_CONTENT" > pr-comment.md
             
@@ -129,7 +131,7 @@ jobs:
       - name: Commit and push fixes
         if: (steps.alerts.outputs.count != '0' || github.event_name == 'pull_request')
         env:
-          BRANCH: ${{ github.event.pull_request.head.ref || github.event.inputs.branch }}
+          BRANCH: ${{ github.event.pull_request.head.ref || github.ref_name }}
         run: |
           set -euo pipefail
           if git diff --quiet && [ ! -f SECURITY_FIX_REPORT.md ]; then
@@ -185,4 +187,3 @@ jobs:
             codex-prompt.txt
             SECURITY_FIX_REPORT.md
           if-no-files-found: ignore
-
