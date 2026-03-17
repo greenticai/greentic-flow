@@ -403,7 +403,7 @@
   "cli.qa.prompt.enter_number": "숫자를 입력하세요",
   "cli.qa.prompt.enter_text": "텍스트를 입력하세요",
   "cli.qa.prompt.enter_true_false": "true/false를 입력하세요",
-  "cli.qa.prompt.select_option": "옵션을 선택하세요",
+  "cli.qa.prompt.select_option": "옵션 선택",
   "cli.qa.required_field": "이 필드는 필수입니다.",
   "cli.qa.warning.unknown_answers_keys": "경고: 답변에 알 수 없는 키가 포함되어 있습니다: {}"
 }

@@ -16,12 +16,17 @@ const EMBEDDED_FLOW_SCHEMA: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/schemas/ygtc.flow.schema.json"
 ));
+const EMBEDDED_FREQUENT_COMPONENTS_JSON: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/frequent-components.json"
+));
 const EMBEDDED_I18N_DIR: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/i18n");
 const EMBEDDED_WIZARD_I18N_DIR: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/i18n/wizard");
 
 use greentic_distributor_client::{
-    DistClient, DistributorClient, DistributorClientConfig, DistributorEnvironmentId, EnvId,
-    HttpDistributorClient, ResolveComponentRequest, TenantCtx, TenantId,
+    CachePolicy, DistClient, DistributorClient, DistributorClientConfig, DistributorEnvironmentId,
+    EnvId, HttpDistributorClient, ResolveComponentRequest, ResolvePolicy, TenantCtx, TenantId,
+    save_login_default,
 };
 use greentic_flow::{
     add_step::{
@@ -71,8 +76,11 @@ use indexmap::IndexMap;
 use jsonschema::error::ValidationErrorKind;
 use jsonschema::{Draft, ReferencingError};
 use pathdiff::diff_paths;
+use reqwest::blocking::Client as BlockingHttpClient;
+use semver::Version;
 use serde_json::json;
 use sha2::{Digest, Sha256};
+use std::time::Duration;
 
 fn derive_contract_meta(
     describe_cbor: &[u8],
@@ -3167,6 +3175,34 @@ struct WizardStepSourceSelection {
     pin: bool,
 }
 
+#[derive(Debug, Clone, serde::Deserialize)]
+struct FrequentComponentsCatalog {
+    #[serde(default)]
+    schema_version: u32,
+    #[serde(default)]
+    catalog_version: Option<String>,
+    components: Vec<FrequentComponentEntry>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+struct FrequentComponentEntry {
+    id: String,
+    name: String,
+    #[serde(default)]
+    name_i18n_key: Option<String>,
+    description: String,
+    #[serde(default)]
+    description_i18n_key: Option<String>,
+    component_ref: String,
+}
+
+#[derive(Debug, Clone)]
+struct FrequentComponentChoice {
+    label: String,
+    description: String,
+    component_ref: String,
+}
+
 fn wizard_add_step_with_io<R: Read, W: Write>(
     pack_dir: &Path,
     flow_path: &Path,
@@ -3442,6 +3478,263 @@ fn wizard_select_setup_mode<R: Read, W: Write>(
     Ok(mapped)
 }
 
+fn frequent_components_latest_url() -> String {
+    env::var("GREENTIC_FLOW_FREQUENT_COMPONENTS_LATEST_URL").unwrap_or_else(|_| {
+        format!(
+            "{}/releases/latest/download/frequent-components.json",
+            env!("CARGO_PKG_REPOSITORY")
+        )
+    })
+}
+
+fn frequent_components_versioned_url() -> String {
+    env::var("GREENTIC_FLOW_FREQUENT_COMPONENTS_VERSIONED_URL").unwrap_or_else(|_| {
+        format!(
+            "{}/releases/download/v{}/frequent-components.json",
+            env!("CARGO_PKG_REPOSITORY"),
+            env!("CARGO_PKG_VERSION")
+        )
+    })
+}
+
+fn parse_frequent_components_catalog(text: &str) -> Result<FrequentComponentsCatalog> {
+    let catalog: FrequentComponentsCatalog =
+        serde_json::from_str(text).context("parse frequent-components.json")?;
+    if catalog.schema_version == 0 {
+        anyhow::bail!("frequent-components.json schema_version must be >= 1");
+    }
+    if catalog.components.is_empty() {
+        anyhow::bail!("frequent-components.json must contain at least one component");
+    }
+    for component in &catalog.components {
+        if component.id.trim().is_empty() {
+            anyhow::bail!("frequent-components.json contains a component with an empty id");
+        }
+        if component.name.trim().is_empty() {
+            anyhow::bail!(
+                "frequent-components.json component '{}' has an empty name",
+                component.id
+            );
+        }
+        if component.description.trim().is_empty() {
+            anyhow::bail!(
+                "frequent-components.json component '{}' has an empty description",
+                component.id
+            );
+        }
+        validate_component_ref(&component.component_ref).with_context(|| {
+            format!(
+                "frequent-components.json component '{}' has an invalid component_ref",
+                component.id
+            )
+        })?;
+    }
+    Ok(catalog)
+}
+
+fn load_frequent_components_catalog_from_location(
+    location: &str,
+) -> Result<FrequentComponentsCatalog> {
+    let trimmed = location.trim();
+    if trimmed.is_empty() {
+        anyhow::bail!("frequent component catalog location is empty");
+    }
+
+    let text = if let Some(path) = trimmed.strip_prefix("file://") {
+        fs::read_to_string(path)
+            .with_context(|| format!("read frequent component catalog {path}"))?
+    } else {
+        let path = Path::new(trimmed);
+        if path.exists() {
+            fs::read_to_string(path)
+                .with_context(|| format!("read frequent component catalog {}", path.display()))?
+        } else {
+            let client = BlockingHttpClient::builder()
+                .timeout(Duration::from_secs(3))
+                .build()
+                .context("build HTTP client for frequent-components.json")?;
+            let response = client
+                .get(trimmed)
+                .header(reqwest::header::USER_AGENT, "greentic-flow")
+                .send()
+                .with_context(|| format!("download frequent component catalog {trimmed}"))?;
+            response
+                .error_for_status()
+                .with_context(|| format!("download frequent component catalog {trimmed}"))?
+                .text()
+                .with_context(|| format!("read frequent component catalog response {trimmed}"))?
+        }
+    };
+
+    parse_frequent_components_catalog(&text)
+}
+
+fn embedded_frequent_components_catalog() -> FrequentComponentsCatalog {
+    parse_frequent_components_catalog(EMBEDDED_FREQUENT_COMPONENTS_JSON)
+        .expect("embedded frequent-components.json must be valid")
+}
+
+fn frequent_component_catalog_is_newer(
+    candidate: &FrequentComponentsCatalog,
+    baseline: &FrequentComponentsCatalog,
+) -> bool {
+    let Some(candidate_version) = candidate
+        .catalog_version
+        .as_deref()
+        .and_then(|value| Version::parse(value).ok())
+    else {
+        return true;
+    };
+    let Some(baseline_version) = baseline
+        .catalog_version
+        .as_deref()
+        .and_then(|value| Version::parse(value).ok())
+    else {
+        return true;
+    };
+    candidate_version >= baseline_version
+}
+
+fn load_frequent_components_catalog() -> FrequentComponentsCatalog {
+    if let Ok(override_location) = env::var("GREENTIC_FLOW_FREQUENT_COMPONENTS_URL")
+        && !override_location.trim().is_empty()
+        && let Ok(catalog) =
+            load_frequent_components_catalog_from_location(override_location.trim())
+    {
+        return catalog;
+    }
+
+    let embedded = embedded_frequent_components_catalog();
+    for location in [
+        frequent_components_latest_url(),
+        frequent_components_versioned_url(),
+    ] {
+        if let Ok(catalog) = load_frequent_components_catalog_from_location(&location)
+            && frequent_component_catalog_is_newer(&catalog, &embedded)
+        {
+            return catalog;
+        }
+    }
+    embedded
+}
+
+fn resolve_optional_wizard_text(
+    catalog: &I18nCatalog,
+    locale: &str,
+    key: Option<&str>,
+    fallback: &str,
+) -> String {
+    let Some(key) = key.map(str::trim).filter(|value| !value.is_empty()) else {
+        return fallback.to_string();
+    };
+    let resolved = resolve_cli_text(catalog, locale, key, "");
+    if resolved.is_empty() || resolved == key {
+        fallback.to_string()
+    } else {
+        resolved
+    }
+}
+
+fn frequent_component_choices_for_locale(locale: &str) -> Vec<FrequentComponentChoice> {
+    let catalog = load_frequent_components_catalog();
+    let i18n = wizard_catalog_for_locale(locale);
+    catalog
+        .components
+        .into_iter()
+        .map(|component| FrequentComponentChoice {
+            label: resolve_optional_wizard_text(
+                &i18n,
+                locale,
+                component.name_i18n_key.as_deref(),
+                &component.name,
+            ),
+            description: resolve_optional_wizard_text(
+                &i18n,
+                locale,
+                component.description_i18n_key.as_deref(),
+                &component.description,
+            ),
+            component_ref: component.component_ref,
+        })
+        .collect()
+}
+
+fn wizard_select_frequent_component<R: Read, W: Write>(
+    reader: &mut R,
+    writer: &mut W,
+) -> Result<Option<FrequentComponentChoice>> {
+    let locale = resolve_locale(None);
+    let choices = frequent_component_choices_for_locale(&locale);
+    if choices.is_empty() {
+        return Ok(None);
+    }
+
+    let mut prompt = String::new();
+    prompt.push_str(&wizard_t("wizard.step.source.frequent.prompt"));
+    prompt.push('\n');
+    for (idx, choice) in choices.iter().enumerate() {
+        prompt.push_str(&format!("{}) {}\n", idx + 1, choice.label));
+        prompt.push_str(&format!("   {}\n", choice.description));
+    }
+    prompt.push_str(&format!(
+        "{}) {}",
+        choices.len() + 1,
+        wizard_t("wizard.choice.common.cancel")
+    ));
+
+    let valid_choices = (1..=choices.len() + 1)
+        .map(|idx| idx.to_string())
+        .collect::<Vec<_>>();
+    let valid_choice_refs = valid_choices.iter().map(String::as_str).collect::<Vec<_>>();
+    let selected = wizard_menu_answer(
+        reader,
+        writer,
+        "step.source.frequent_choice",
+        &prompt,
+        &valid_choice_refs,
+    )?;
+    let selected_index = selected
+        .parse::<usize>()
+        .with_context(|| format!("parse frequent component choice {selected}"))?;
+    if selected_index == choices.len() + 1 {
+        return Ok(None);
+    }
+    Ok(choices.get(selected_index - 1).cloned())
+}
+
+fn wizard_prompt_for_remote_pin<R: Read, W: Write>(
+    reader: &mut R,
+    writer: &mut W,
+    ask_pin_for_remote: bool,
+) -> Result<bool> {
+    if !ask_pin_for_remote {
+        return Ok(false);
+    }
+    let pin_answers = run_questions_with_qa_lib_io(
+        &[Question {
+            id: "step.source.remote_pin".to_string(),
+            prompt: wizard_t("wizard.step.source.remote.pin.prompt"),
+            kind: greentic_flow::questions::QuestionKind::Choice,
+            required: true,
+            default: Some(serde_json::Value::String("yes".to_string())),
+            choices: vec![
+                serde_json::Value::String("yes".to_string()),
+                serde_json::Value::String("no".to_string()),
+            ],
+            show_if: None,
+            writes_to: None,
+        }],
+        HashMap::new(),
+        &mut *reader,
+        &mut *writer,
+    )?;
+    Ok(pin_answers
+        .get("step.source.remote_pin")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("yes")
+        == "yes")
+}
+
 fn wizard_generate_translations_with_io<R: Read, W: Write>(
     pack_dir: &Path,
     reader: &mut R,
@@ -3550,6 +3843,55 @@ fn generate_translations_stub(pack_dir: &Path, locales: &[String]) -> Result<()>
     Ok(())
 }
 
+fn store_ref_tenant(reference: &str) -> Option<&str> {
+    let rest = reference.strip_prefix("store://greentic-biz/")?;
+    let (tenant, _) = rest.split_once('/')?;
+    let tenant = tenant.trim();
+    if tenant.is_empty() {
+        None
+    } else {
+        Some(tenant)
+    }
+}
+
+fn prompt_store_token<R: Read, W: Write>(
+    tenant: &str,
+    reader: &mut R,
+    writer: &mut W,
+) -> Result<String> {
+    writeln!(
+        writer,
+        "{}",
+        wizard_t_with(
+            "wizard.step.source.store.token.prompt",
+            &[("tenant", tenant)]
+        )
+    )
+    .ok();
+    write!(writer, "> ").ok();
+    writer.flush().ok();
+    let token = read_input_line(reader)?;
+    if token.trim().is_empty() {
+        anyhow::bail!("{}", wizard_t("wizard.error.required_input"));
+    }
+    Ok(token)
+}
+
+fn ensure_store_auth_for_reference<R: Read, W: Write>(
+    reference: &str,
+    reader: &mut R,
+    writer: &mut W,
+) -> Result<()> {
+    let Some(tenant) = store_ref_tenant(reference) else {
+        return Ok(());
+    };
+    let token = prompt_store_token(tenant, reader, writer)?;
+    let rt = tokio::runtime::Runtime::new().context("create tokio runtime")?;
+    rt.block_on(save_login_default(tenant, token.trim()))
+        .map_err(|e| anyhow!("save store login for tenant {}: {e}", tenant))?;
+    Ok(())
+}
+
 fn wizard_select_step_source<R: Read, W: Write>(
     pack_dir: &Path,
     reader: &mut R,
@@ -3562,8 +3904,9 @@ fn wizard_select_step_source<R: Read, W: Write>(
             prompt: wizard_t("wizard.step.source.kind.prompt"),
             kind: greentic_flow::questions::QuestionKind::Choice,
             required: true,
-            default: Some(serde_json::Value::String("local".to_string())),
+            default: Some(serde_json::Value::String("frequent".to_string())),
             choices: vec![
+                serde_json::Value::String("frequent".to_string()),
                 serde_json::Value::String("local".to_string()),
                 serde_json::Value::String("remote".to_string()),
                 serde_json::Value::String("cancel".to_string()),
@@ -3581,6 +3924,18 @@ fn wizard_select_step_source<R: Read, W: Write>(
         .unwrap_or("cancel");
     if source_kind == "cancel" {
         return Ok(None);
+    }
+
+    if source_kind == "frequent" {
+        let Some(selected) = wizard_select_frequent_component(reader, writer)? else {
+            return Ok(None);
+        };
+        let pin = wizard_prompt_for_remote_pin(reader, writer, ask_pin_for_remote)?;
+        return Ok(Some(WizardStepSourceSelection {
+            local_wasm: None,
+            component_ref: Some(selected.component_ref),
+            pin,
+        }));
     }
 
     if source_kind == "local" {
@@ -3686,33 +4041,8 @@ fn wizard_select_step_source<R: Read, W: Write>(
         &mut *writer,
     )?;
     let remote_ref = answer_str(&ref_answers, "step.source.remote_ref")?.to_string();
-    let pin = if ask_pin_for_remote {
-        let pin_answers = run_questions_with_qa_lib_io(
-            &[Question {
-                id: "step.source.remote_pin".to_string(),
-                prompt: wizard_t("wizard.step.source.remote.pin.prompt"),
-                kind: greentic_flow::questions::QuestionKind::Choice,
-                required: true,
-                default: Some(serde_json::Value::String("yes".to_string())),
-                choices: vec![
-                    serde_json::Value::String("yes".to_string()),
-                    serde_json::Value::String("no".to_string()),
-                ],
-                show_if: None,
-                writes_to: None,
-            }],
-            HashMap::new(),
-            &mut *reader,
-            &mut *writer,
-        )?;
-        pin_answers
-            .get("step.source.remote_pin")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or("yes")
-            == "yes"
-    } else {
-        false
-    };
+    ensure_store_auth_for_reference(&remote_ref, reader, writer)?;
+    let pin = wizard_prompt_for_remote_pin(reader, writer, ask_pin_for_remote)?;
     Ok(Some(WizardStepSourceSelection {
         local_wasm: None,
         component_ref: Some(remote_ref),
@@ -5262,6 +5592,7 @@ mod tests {
             "wizard.step.update.done",
             "wizard.step.setup_mode.prompt",
             "wizard.step.source.kind.prompt",
+            "wizard.step.source.frequent.prompt",
             "wizard.step.source.local.prompt",
             "wizard.step.source.remote.prompt",
             "wizard.save.done",
@@ -5314,10 +5645,13 @@ mod tests {
             "wizard.choice.common.cancel",
             "wizard.choice.setup.default",
             "wizard.choice.setup.personalised",
+            "wizard.choice.source.frequent",
             "wizard.choice.source.local",
             "wizard.choice.source.remote",
             "wizard.choice.source.custom",
             "wizard.choice.step.after.auto",
+            "wizard.frequent_component.templates.name",
+            "wizard.frequent_component.templates.description",
         ];
         for key in keys {
             let value = super::wizard_t(key);
@@ -5616,7 +5950,7 @@ nodes: {}
         with_wizard_resolver_env(fixture_registry_resolver(), || {
             // Add step with fixture oci ref, try save (doctor should fail on sidecar ref validation), then exit.
             // No anchor prompt is shown when the flow has no steps.
-            let input = Cursor::new("2\n1\n3\n2\noci://acme/widget:1\n2\n1\n7\n\n0\n0\n0\nn\n");
+            let input = Cursor::new("2\n1\n3\n3\noci://acme/widget:1\n2\n1\n7\n\n0\n0\n0\nn\n");
             let mut output = Vec::new();
             super::run_wizard_menu_with_io(dir.path(), input, &mut output).expect("wizard run");
             let rendered = String::from_utf8(output).expect("utf8");
@@ -6111,6 +6445,46 @@ nodes:
         }
     }
 
+    fn with_frequent_components_env<F: FnOnce()>(location: &str, run: F) {
+        let previous = env::var("GREENTIC_FLOW_FREQUENT_COMPONENTS_URL").ok();
+        unsafe {
+            env::set_var("GREENTIC_FLOW_FREQUENT_COMPONENTS_URL", location);
+        }
+        run();
+        if let Some(value) = previous {
+            unsafe {
+                env::set_var("GREENTIC_FLOW_FREQUENT_COMPONENTS_URL", value);
+            }
+        } else {
+            unsafe {
+                env::remove_var("GREENTIC_FLOW_FREQUENT_COMPONENTS_URL");
+            }
+        }
+    }
+
+    fn write_frequent_components_fixture(path: &Path, component_ref: &str) {
+        fs::write(
+            path,
+            format!(
+                r#"{{
+  "schema_version": 1,
+  "catalog_version": "9.9.9",
+  "components": [
+    {{
+      "id": "fixture-widget",
+      "name": "Fixture Widget",
+      "name_i18n_key": "wizard.frequent_component.fixture_widget.name",
+      "description": "Fixture description",
+      "description_i18n_key": "wizard.frequent_component.fixture_widget.description",
+      "component_ref": "{component_ref}"
+    }}
+  ]
+}}"#
+            ),
+        )
+        .expect("write frequent component fixture");
+    }
+
     #[test]
     fn wizard_menu_add_step_remote_fixture() {
         let dir = tempdir().expect("temp dir");
@@ -6130,9 +6504,9 @@ nodes:
         .expect("seed flow");
 
         with_wizard_resolver_env(fixture_registry_resolver(), || {
-            // 2 flow list, 1 flow, 3 add step, 2 remote, ref, 2 no-pin, 1 default mode, then back/main/exit.
+            // 2 flow list, 1 flow, 3 add step, 3 remote, ref, 2 no-pin, 1 default mode, then back/main/exit.
             // No anchor prompt is shown when the flow has no steps.
-            let input = Cursor::new("2\n1\n3\n2\noci://acme/widget:1\n2\n1\n0\n0\n0\nn\n");
+            let input = Cursor::new("2\n1\n3\n3\noci://acme/widget:1\n2\n1\n0\n0\n0\nn\n");
             let mut output = Vec::new();
             super::run_wizard_menu_with_io(dir.path(), input, &mut output)
                 .expect("wizard menu add step");
@@ -6146,6 +6520,24 @@ nodes:
             flow_ir.nodes.is_empty(),
             "changes should not persist without save"
         );
+    }
+
+    #[test]
+    fn wizard_menu_add_step_frequent_component_fixture() {
+        let dir = tempdir().expect("temp dir");
+        let catalog_path = dir.path().join("frequent-components.json");
+        write_frequent_components_fixture(&catalog_path, "oci://ghcr.io/acme/widget:1");
+        with_frequent_components_env(catalog_path.to_str().expect("fixture path"), || {
+            let mut input = Cursor::new("1\n");
+            let mut output = Vec::new();
+            let selected = super::wizard_select_frequent_component(&mut input, &mut output)
+                .expect("select frequent component")
+                .expect("selected component");
+            assert_eq!(selected.component_ref, "oci://ghcr.io/acme/widget:1");
+            let rendered = String::from_utf8(output).expect("utf8");
+            assert!(rendered.contains("Frequently used components"));
+            assert!(rendered.contains("Fixture Widget"));
+        });
     }
 
     #[test]
@@ -6263,12 +6655,96 @@ nodes:
         .expect("add step");
 
         with_wizard_resolver_env(fixture_registry_resolver(), || {
-            // 2 flow list, 1 flow, 4 update step, 1 step, 2 remote, ref, 1 default mode, 7 save, then back/main/exit.
-            let input = Cursor::new("2\n1\n4\n1\n2\nrepo://acme/widget:1\n1\n7\n\n0\n0\n0\n");
+            // 2 flow list, 1 flow, 4 update step, 1 step, 3 remote, ref, 1 default mode, 7 save, then back/main/exit.
+            let input = Cursor::new("2\n1\n4\n1\n3\nrepo://acme/widget:1\n1\n7\n\n0\n0\n0\n");
             let mut output = Vec::new();
             super::run_wizard_menu_with_io(dir.path(), input, &mut output)
                 .expect("wizard menu update step");
             let _rendered = String::from_utf8(output).expect("utf8");
+        });
+        let doc = load_ygtc_from_path(&flow_path).expect("load flow");
+        let flow_ir = FlowIr::from_doc(doc).expect("flow ir");
+        assert!(flow_ir.nodes.contains_key("widget"));
+    }
+
+    #[test]
+    fn wizard_menu_update_step_frequent_component_fixture() {
+        let dir = tempdir().expect("temp dir");
+        let flow_path = dir.path().join("flows/global/messaging/welcome.ygtc");
+        let catalog_path = dir.path().join("frequent-components.json");
+        write_frequent_components_fixture(&catalog_path, "repo://acme/widget:1");
+        handle_new(
+            NewArgs {
+                flow_path: flow_path.clone(),
+                flow_id: "welcome".to_string(),
+                flow_type: "messaging".to_string(),
+                schema_version: 2,
+                name: None,
+                description: None,
+                force: true,
+            },
+            false,
+        )
+        .expect("seed flow");
+        let resolver = fixture_registry_resolver();
+        handle_add_step(
+            AddStepArgs {
+                component_id: None,
+                flow_path: flow_path.clone(),
+                after: None,
+                mode: AddStepMode::Default,
+                pack_alias: None,
+                wizard_mode: Some(WizardModeArg::Default),
+                operation: None,
+                payload: "{}".to_string(),
+                routing_out: true,
+                routing_reply: false,
+                routing_next: None,
+                routing_multi_to: None,
+                routing_json: None,
+                routing_to_anchor: false,
+                config_flow: None,
+                answers: None,
+                answers_file: None,
+                answers_dir: None,
+                overwrite_answers: false,
+                reask: false,
+                locale: None,
+                interactive: false,
+                allow_cycles: false,
+                dry_run: false,
+                write: false,
+                validate_only: false,
+                manifests: Vec::new(),
+                node_id: Some("widget".to_string()),
+                component_ref: Some("oci://acme/widget:1".to_string()),
+                local_wasm: None,
+                distributor_url: None,
+                auth_token: None,
+                tenant: None,
+                env: None,
+                pack: None,
+                component_version: None,
+                abi_version: None,
+                resolver: Some(resolver),
+                pin: false,
+                allow_contract_change: false,
+            },
+            SchemaMode::Strict,
+            OutputFormat::Human,
+            false,
+        )
+        .expect("add step");
+
+        with_wizard_resolver_env(fixture_registry_resolver(), || {
+            with_frequent_components_env(catalog_path.to_str().expect("fixture path"), || {
+                let input = Cursor::new("2\n1\n4\n1\n1\n1\n1\n7\n\n0\n0\n0\n");
+                let mut output = Vec::new();
+                super::run_wizard_menu_with_io(dir.path(), input, &mut output)
+                    .expect("wizard menu update step with frequent component");
+                let rendered = String::from_utf8(output).expect("utf8");
+                assert!(rendered.contains("Fixture Widget"));
+            });
         });
         let doc = load_ygtc_from_path(&flow_path).expect("load flow");
         let flow_ir = FlowIr::from_doc(doc).expect("flow ir");
@@ -6345,7 +6821,7 @@ nodes:
         with_wizard_resolver_env(fixture_registry_resolver(), || {
             // Update same step twice in default mode, then save.
             let input = Cursor::new(
-                "2\n1\n4\n1\n2\nrepo://acme/widget:1\n1\n4\n1\n2\nrepo://acme/widget:1\n1\n7\n\n0\n0\n0\n",
+                "2\n1\n4\n1\n3\nrepo://acme/widget:1\n1\n4\n1\n3\nrepo://acme/widget:1\n1\n7\n\n0\n0\n0\n",
             );
             let mut output = Vec::new();
             super::run_wizard_menu_with_io(dir.path(), input, &mut output)
@@ -6609,6 +7085,55 @@ nodes:
         let mut input = Cursor::new(b"oci://abc\x1b[D\x1b[DXY\n".to_vec());
         let line = super::read_input_line(&mut input).expect("read edited line");
         assert_eq!(line, "oci://aXYbc");
+    }
+
+    #[test]
+    fn store_ref_tenant_extracts_greentic_biz_tenant() {
+        assert_eq!(
+            super::store_ref_tenant("store://greentic-biz/acme/demo-component:latest"),
+            Some("acme")
+        );
+        assert_eq!(
+            super::store_ref_tenant("store://other/acme/demo-component:latest"),
+            None
+        );
+    }
+
+    #[test]
+    fn ensure_store_auth_for_reference_saves_token_for_tenant() {
+        let _guard = env_test_lock();
+        let dir = tempdir().expect("temp dir");
+        let secrets_path = dir.path().join("store-auth.json");
+        let previous = env::var("GREENTIC_DIST_STORE_SECRETS_PATH").ok();
+        unsafe {
+            env::set_var("GREENTIC_DIST_STORE_SECRETS_PATH", &secrets_path);
+        }
+
+        let mut input = Cursor::new("secret-token\n");
+        let mut output = Vec::new();
+        super::ensure_store_auth_for_reference(
+            "store://greentic-biz/acme/demo-component:latest",
+            &mut input,
+            &mut output,
+        )
+        .expect("save store auth");
+
+        let rt = tokio::runtime::Runtime::new().expect("runtime");
+        let creds = rt
+            .block_on(greentic_distributor_client::load_login_default("acme"))
+            .expect("load saved auth");
+        assert_eq!(creds.tenant, "acme");
+        assert_eq!(creds.token, "secret-token");
+
+        if let Some(value) = previous {
+            unsafe {
+                env::set_var("GREENTIC_DIST_STORE_SECRETS_PATH", value);
+            }
+        } else {
+            unsafe {
+                env::remove_var("GREENTIC_DIST_STORE_SECRETS_PATH");
+            }
+        }
     }
 
     #[test]
@@ -9216,10 +9741,29 @@ fn resolve_remote_digest(reference: &str) -> Result<String> {
     }
     let rt = tokio::runtime::Runtime::new().context("create tokio runtime")?;
     let client = DistClient::new(Default::default());
+    let descriptor = client
+        .parse_source(reference)
+        .map_err(|e| anyhow::anyhow!("failed to resolve reference {reference}: {e}"))?;
     let resolved = rt
-        .block_on(client.resolve_ref(reference))
+        .block_on(client.resolve(descriptor, ResolvePolicy))
         .map_err(|e| anyhow::anyhow!("failed to resolve reference {reference}: {e}"))?;
     Ok(resolved.digest)
+}
+
+fn ensure_cached_component_path(client: &DistClient, reference: &str) -> Result<PathBuf> {
+    let rt = tokio::runtime::Runtime::new().context("create tokio runtime")?;
+    let source = client
+        .parse_source(reference)
+        .map_err(|e| anyhow::anyhow!("resolve component {}: {e}", reference))?;
+    let descriptor = rt
+        .block_on(client.resolve(source, ResolvePolicy))
+        .map_err(|e| anyhow::anyhow!("resolve component {}: {e}", reference))?;
+    let resolved = rt
+        .block_on(client.fetch(&descriptor, CachePolicy))
+        .map_err(|e| anyhow::anyhow!("resolve component {}: {e}", reference))?;
+    resolved
+        .cache_path
+        .ok_or_else(|| anyhow::anyhow!("resolved component {} without cache path", reference))
 }
 
 fn normalize_local_wasm_path(local: &Path, flow_path: &Path) -> Result<(PathBuf, String)> {
@@ -9499,16 +10043,18 @@ fn resolve_ref_to_bytes(reference: &str, resolver: Option<&String>) -> Result<Re
 
     let rt = tokio::runtime::Runtime::new().context("create tokio runtime")?;
     let client = DistClient::new(Default::default());
-    let resolved = rt
-        .block_on(client.resolve_ref(reference))
+    let path = ensure_cached_component_path(&client, reference)
         .map_err(|e| anyhow::anyhow!("resolve reference {reference}: {e}"))?;
-    let path = resolved
-        .cache_path
-        .ok_or_else(|| anyhow::anyhow!("resolved reference {reference} without cache path"))?;
+    let source = client
+        .parse_source(reference)
+        .map_err(|e| anyhow::anyhow!("resolve reference {reference}: {e}"))?;
+    let descriptor = rt
+        .block_on(client.resolve(source, ResolvePolicy))
+        .map_err(|e| anyhow::anyhow!("resolve reference {reference}: {e}"))?;
     let bytes = fs::read(&path).with_context(|| format!("read {}", path.display()))?;
     Ok(ResolvedRefBytes {
         bytes,
-        digest: Some(resolved.digest),
+        digest: Some(descriptor.digest),
     })
 }
 
@@ -9762,16 +10308,15 @@ fn ensure_sidecar_source_available(source: &ComponentSourceRefV1, flow_path: &Pa
         | ComponentSourceRefV1::Repo { r#ref, digest }
         | ComponentSourceRefV1::Store { r#ref, digest, .. } => {
             let client = DistClient::new(Default::default());
-            let rt = tokio::runtime::Runtime::new().context("create tokio runtime")?;
             if let Some(d) = digest {
-                rt.block_on(client.fetch_digest(d)).map_err(|e| {
+                client.open_cached(d).map_err(|e| {
                     anyhow::anyhow!(
                         "component digest {} not cached; pull or pin locally first: {e}",
                         d
                     )
                 })?;
             } else {
-                rt.block_on(client.ensure_cached(r#ref)).map_err(|e| {
+                ensure_cached_component_path(&client, r#ref).map_err(|e| {
                     anyhow::anyhow!(
                         "component reference {} not available locally; pull or pin digest: {e}",
                         r#ref
@@ -9799,12 +10344,13 @@ fn resolve_component_manifest_path(
             }),
         ComponentSourceRefV1::Oci { r#ref, digest } => {
             let client = DistClient::new(Default::default());
-            let rt = tokio::runtime::Runtime::new().context("create tokio runtime")?;
-            let cached = if let Some(d) = digest {
-                rt.block_on(client.fetch_digest(d))
+            let cached: Result<PathBuf> = if let Some(d) = digest {
+                client
+                    .open_cached(d)
+                    .map(|artifact| artifact.local_path)
+                    .map_err(anyhow::Error::from)
             } else {
-                rt.block_on(client.ensure_cached(r#ref))
-                    .map(|r| r.cache_path.unwrap_or_default())
+                ensure_cached_component_path(&client, r#ref)
             };
             let mut candidate = cached
                 .ok()
@@ -9822,12 +10368,9 @@ fn resolve_component_manifest_path(
             } else {
                 r#ref.to_string()
             };
-            let resolved = rt
-                .block_on(client.resolve_ref(&resolved_ref))
+            let path = ensure_cached_component_path(&client, &resolved_ref)
                 .map_err(|e| anyhow::anyhow!("resolve component {}: {e}", resolved_ref))?;
-            if let Some(path) = resolved.cache_path
-                && let Some(parent) = path.parent()
-            {
+            if let Some(parent) = path.parent() {
                 candidate = parent.join("component.manifest.json");
             }
             candidate
@@ -9835,12 +10378,13 @@ fn resolve_component_manifest_path(
         ComponentSourceRefV1::Repo { r#ref, digest }
         | ComponentSourceRefV1::Store { r#ref, digest, .. } => {
             let client = DistClient::new(Default::default());
-            let rt = tokio::runtime::Runtime::new().context("create tokio runtime")?;
             let artifact = if let Some(d) = digest {
-                rt.block_on(client.fetch_digest(d))
+                client
+                    .open_cached(d)
+                    .map(|artifact| artifact.local_path)
+                    .map_err(anyhow::Error::from)
             } else {
-                rt.block_on(client.ensure_cached(r#ref))
-                    .map(|r| r.cache_path.unwrap_or_default())
+                ensure_cached_component_path(&client, r#ref)
             }
             .map_err(|e| anyhow::anyhow!("resolve component {}: {e}", r#ref))?;
             artifact
@@ -9878,12 +10422,13 @@ fn load_component_payload(
         | ComponentSourceRefV1::Repo { r#ref, digest }
         | ComponentSourceRefV1::Store { r#ref, digest, .. } => {
             let client = DistClient::new(Default::default());
-            let rt = tokio::runtime::Runtime::new().context("create tokio runtime")?;
             let artifact = if let Some(d) = digest {
-                rt.block_on(client.fetch_digest(d))
+                client
+                    .open_cached(d)
+                    .map(|artifact| artifact.local_path)
+                    .map_err(anyhow::Error::from)
             } else {
-                rt.block_on(client.ensure_cached(r#ref))
-                    .map(|r| r.cache_path.unwrap_or_default())
+                ensure_cached_component_path(&client, r#ref)
             }
             .map_err(|e| anyhow::anyhow!("resolve component {}: {e}", r#ref))?;
             artifact

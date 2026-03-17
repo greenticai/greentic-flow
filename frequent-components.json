@@ -1,0 +1,38 @@
+{
+  "schema_version": 1,
+  "catalog_version": "0.4.54",
+  "components": [
+    {
+      "id": "templates",
+      "name": "Templates",
+      "name_i18n_key": "wizard.frequent_component.templates.name",
+      "description": "Show a dynamic message",
+      "description_i18n_key": "wizard.frequent_component.templates.description",
+      "component_ref": "oci://ghcr.io/greenticai/components/templates:latest"
+    },
+    {
+      "id": "adaptive-card",
+      "name": "Adaptive Card",
+      "name_i18n_key": "wizard.frequent_component.adaptive_card.name",
+      "description": "Use cards inside flows",
+      "description_i18n_key": "wizard.frequent_component.adaptive_card.description",
+      "component_ref": "oci://ghcr.io/greenticai/components/component-adaptive-card:latest"
+    },
+    {
+      "id": "questions-and-answers",
+      "name": "Questions & Answers",
+      "name_i18n_key": "wizard.frequent_component.questions_and_answers.name",
+      "description": "Ask multiple questions and record answers",
+      "description_i18n_key": "wizard.frequent_component.questions_and_answers.description",
+      "component_ref": "oci://ghcr.io/greenticai/components/component-qa:latest"
+    },
+    {
+      "id": "jump-to-flow",
+      "name": "Jump to a Flow",
+      "name_i18n_key": "wizard.frequent_component.jump_to_flow.name",
+      "description": "Jump from one flow to another",
+      "description_i18n_key": "wizard.frequent_component.jump_to_flow.description",
+      "component_ref": "oci://ghcr.io/greenticai/component/component-pack2flow:latest"
+    }
+  ]
+}

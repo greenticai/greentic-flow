@@ -397,7 +397,7 @@
   "cli.help.command.wizard.update_step.about": "Oppdater en eksisterende node (veivisermodus)",
   "cli.help.option.backup": "Sikkerhetskopier flytfiler før overskriving (suffiks .bak)",
   "cli.help.option.format": "Utdataformat (menneskelig eller json)",
-  "cli.help.option.locale": "Diagnostikklokalisering (BCP47)",
+  "cli.help.option.locale": "Diagnostisk språkversjon (BCP47)",
   "cli.help.option.permissive": "Aktiver permissiv skjemahåndtering (standard: strict)",
   "cli.help.top.about": "Hjelpere for flytstillas",
   "cli.qa.prompt.enter_number": "Skriv inn nummer",

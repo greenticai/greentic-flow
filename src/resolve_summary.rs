@@ -1,5 +1,5 @@
 use anyhow::{Context, Result, anyhow};
-use greentic_distributor_client::DistClient;
+use greentic_distributor_client::{CachePolicy, DistClient, ResolvePolicy};
 use greentic_types::ComponentId;
 use greentic_types::flow_resolve::{ComponentSourceRefV1, FlowResolveV1};
 use greentic_types::flow_resolve_summary::{
@@ -171,20 +171,39 @@ fn resolve_remote(
     let digest = match digest_hint {
         Some(d) => d.to_string(),
         None => {
-            rt.block_on(client.resolve_ref(reference))
+            let source = client
+                .parse_source(reference)
+                .map_err(|e| anyhow!("failed to resolve reference {reference}: {e}"))?;
+            rt.block_on(client.resolve(source, ResolvePolicy))
                 .map_err(|e| anyhow!("failed to resolve reference {reference}: {e}"))?
                 .digest
         }
     };
-    let mut wasm_path = if let Ok(path) = rt.block_on(client.fetch_digest(&digest)) {
-        path
+    let mut wasm_path = if let Ok(artifact) = client.open_cached(&digest) {
+        artifact.local_path
     } else {
-        let resolved = rt.block_on(client.ensure_cached(reference)).map_err(|e| {
+        let source = client.parse_source(reference).map_err(|e| {
             anyhow!(
                 "component reference {} not available locally: {e}",
                 reference
             )
         })?;
+        let descriptor = rt
+            .block_on(client.resolve(source, ResolvePolicy))
+            .map_err(|e| {
+                anyhow!(
+                    "component reference {} not available locally: {e}",
+                    reference
+                )
+            })?;
+        let resolved = rt
+            .block_on(client.fetch(&descriptor, CachePolicy))
+            .map_err(|e| {
+                anyhow!(
+                    "component reference {} not available locally: {e}",
+                    reference
+                )
+            })?;
         resolved
             .cache_path
             .ok_or_else(|| anyhow!("component reference {} has no cache path", reference))?

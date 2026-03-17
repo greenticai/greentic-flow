@@ -388,7 +388,7 @@
   "cli.help.command.update.about": "Оновити метадані потоку на місці без перезапису вузлів",
   "cli.help.command.update_step": "Оновити наявний вузол (повторно запустити config/default із перевизначеннями)",
   "cli.help.command.update_step.about": "Оновити наявний вузол (повторно запустити config/default із перевизначеннями)",
-  "cli.help.command.wizard": "Помічники майстра потоку (інтерактивно за замовчуванням)",
+  "cli.help.command.wizard": "Помічники майстра потоків (інтерактивні за замовчуванням)",
   "cli.help.command.wizard.about": "Помічники майстра потоку (інтерактивно за замовчуванням)",
   "cli.help.command.wizard.add_step.about": "Вставити крок після якірного вузла (режим майстра)",
   "cli.help.command.wizard.edit.about": "Оновити метадані потоку на місці без перезапису вузлів",
