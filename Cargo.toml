@@ -14,7 +14,7 @@ toml = ["dep:toml"]
 [dependencies]
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
-greentic-interfaces-host = "=0.4.108"
+greentic-interfaces-host = "=0.4.109"
 greentic-types = { version = "0.4", features = ["telemetry-autoinit", "schema"] }
 serde = { version = "1", features = ["derive"] }
 serde_yaml_bw = {package="serde_yaml_gtc", version="2.5.2"}
@@ -43,7 +43,7 @@ unic-langid = "0.9"
 include_dir = "0.7"
 greentic-i18n-translator = { version = "0.4" }
 greentic-qa-lib = "=0.4.10"
-greentic-interfaces-wasmtime = "=0.4.108"
+greentic-interfaces-wasmtime = "=0.4.109"
 
 [dev-dependencies]
 assert_cmd = "2"
