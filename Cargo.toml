@@ -44,7 +44,7 @@ unic-langid = "0.9"
 include_dir = "0.7"
 greentic-i18n-translator = { version = "0.4" }
 greentic-qa-lib = "0.4"
-greentic-interfaces-wasmtime = "0.4"
+greentic-interfaces-wasmtime = "=0.4.109"
 
 [dev-dependencies]
 assert_cmd = "2"

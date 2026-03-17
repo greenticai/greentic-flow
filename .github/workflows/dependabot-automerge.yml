@@ -11,28 +11,31 @@ permissions:
 jobs:
   automerge:
     if: >
-      github.actor == 'dependabot[bot]' &&
+      (github.event.pull_request.user.login == 'dependabot[bot]' || github.event.pull_request.user.login == 'app/dependabot') &&
       github.event.pull_request.draft == false
     runs-on: ubuntu-latest
     steps:
       - name: Enable auto-merge for Dependabot PRs
         uses: actions/github-script@v7
         with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
+          github-token: ${{ secrets.GH_PAT || secrets.GITHUB_TOKEN }}
           script: |
             const pr = context.payload.pull_request;
 
-            // Approve the PR (required in many repos with branch protections)
-            await github.rest.pulls.createReview({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              pull_number: pr.number,
-              event: "APPROVE",
-              body: "Auto-approving Dependabot PR."
-            });
+            try {
+              // Approve the PR (required in many repos with branch protections)
+              await github.rest.pulls.createReview({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                pull_number: pr.number,
+                event: "APPROVE",
+                body: "Auto-approving Dependabot PR."
+              });
+            } catch (error) {
+              core.warning(`Skipping Dependabot auto-approval: ${error.message}`);
+            }
 
-            // Enable auto-merge (merge occurs once required checks are green)
-            await github.graphql(`
+            const mutation = `
               mutation EnableAutoMerge($pullRequestId: ID!) {
                 enablePullRequestAutoMerge(input: {
                   pullRequestId: $pullRequestId,
@@ -41,4 +44,26 @@ jobs:
                   pullRequest { number autoMergeRequest { enabledAt } }
                 }
               }
-            `, { pullRequestId: pr.node_id });
+            `;
+
+            const maxAttempts = 20;
+
+            for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+              try {
+                await github.graphql(mutation, { pullRequestId: pr.node_id });
+                core.info(`Enabled auto-merge on attempt ${attempt}.`);
+                break;
+              } catch (error) {
+                const message = error.message || String(error);
+                const isUnstable = message.includes("unstable status");
+                const isLastAttempt = attempt === maxAttempts;
+
+                if (!isUnstable || isLastAttempt) {
+                  core.warning(`Skipping Dependabot auto-merge: ${message}`);
+                  break;
+                }
+
+                core.warning(`PR not stable yet (attempt ${attempt}/${maxAttempts}); retrying in 15 seconds.`);
+                await new Promise((resolve) => setTimeout(resolve, 15000));
+              }
+            }
