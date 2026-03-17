@@ -4,7 +4,16 @@ on:
   push:
     branches: [ develop ]
   pull_request: {}
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      patch_mode:
+        description: "How to resolve versions for ci/cargo-patch-dev.toml"
+        required: true
+        default: latest-codeartifact
+        type: choice
+        options:
+          - latest-codeartifact
+          - from-ci-patch-file
 
 jobs:
   build-test:
@@ -62,6 +71,7 @@ jobs:
           echo "CARGO_REGISTRIES_CORP_ARTIFACTS_GREENTIC_TOKEN=$token" >> $GITHUB_ENV
 
       - name: Resolve latest greentic-types dev version
+        if: github.event_name != 'workflow_dispatch' || github.event.inputs.patch_mode != 'from-ci-patch-file'
         shell: bash
         run: |
           set -euo pipefail
@@ -85,11 +95,25 @@ jobs:
           cp ci/cargo-config-dev.toml .cargo/config.toml
 
       - name: Apply CodeArtifact patches (via template)
+        if: github.event_name != 'workflow_dispatch' || github.event.inputs.patch_mode != 'from-ci-patch-file'
         shell: bash
         run: |
           set -euo pipefail
           echo "" >> Cargo.toml
           sed "s/__GREENTIC_TYPES_DEV_VERSION__/${GREENTIC_TYPES_DEV_VERSION}/g" ci/cargo-patch-dev.toml >> Cargo.toml
+
+      - name: Apply CodeArtifact patches (from ci file)
+        if: github.event_name == 'workflow_dispatch' && github.event.inputs.patch_mode == 'from-ci-patch-file'
+        shell: bash
+        run: |
+          set -euo pipefail
+          if grep -q "__GREENTIC_TYPES_DEV_VERSION__" ci/cargo-patch-dev.toml; then
+            echo "ci/cargo-patch-dev.toml still contains __GREENTIC_TYPES_DEV_VERSION__."
+            echo "Set an explicit version in ci/cargo-patch-dev.toml for 'from-ci-patch-file' mode."
+            exit 1
+          fi
+          echo "" >> Cargo.toml
+          cat ci/cargo-patch-dev.toml >> Cargo.toml
 
       - name: Setup GitVersion
         uses: gittools/actions/gitversion/setup@v1
