@@ -2,13 +2,13 @@ mode: ContinuousDeployment
 branches:
   develop:
     regex: ^develop$
-    tag: dev
+    label: dev
     increment: Patch
   master:
     regex: ^master$
-    tag: ''
+    label: ''
     increment: Patch
   main:
     regex: ^main$
-    tag: ''
+    label: ''
     increment: Patch
