@@ -9766,6 +9766,46 @@ fn ensure_cached_component_path(client: &DistClient, reference: &str) -> Result<
         .ok_or_else(|| anyhow::anyhow!("resolved component {} without cache path", reference))
 }
 
+fn distribution_cache_root() -> PathBuf {
+    std::env::var("GREENTIC_CACHE_DIR")
+        .or_else(|_| std::env::var("GREENTIC_DIST_CACHE_DIR"))
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| {
+            if let Ok(root) = std::env::var("GREENTIC_HOME") {
+                return PathBuf::from(root).join("cache").join("distribution");
+            }
+            if let Ok(home) = std::env::var("HOME") {
+                return PathBuf::from(home)
+                    .join(".greentic")
+                    .join("cache")
+                    .join("distribution");
+            }
+            PathBuf::from(".greentic")
+                .join("cache")
+                .join("distribution")
+        })
+}
+
+fn trim_sha256_prefix(digest: &str) -> &str {
+    digest.strip_prefix("sha256:").unwrap_or(digest)
+}
+
+fn cached_component_manifest_from_digest(digest: &str) -> Option<PathBuf> {
+    let trimmed = trim_sha256_prefix(digest);
+    let (prefix, rest) = trimmed.split_at(trimmed.len().min(2));
+    let cache_root = distribution_cache_root();
+    let candidates = [
+        cache_root
+            .join("artifacts")
+            .join("sha256")
+            .join(prefix)
+            .join(rest)
+            .join("component.manifest.json"),
+        cache_root.join(trimmed).join("component.manifest.json"),
+    ];
+    candidates.into_iter().find(|path| path.exists())
+}
+
 fn normalize_local_wasm_path(local: &Path, flow_path: &Path) -> Result<(PathBuf, String)> {
     let raw = local.to_string_lossy();
     let trimmed = raw.strip_prefix("file://").unwrap_or(&raw);
@@ -10344,6 +10384,12 @@ fn resolve_component_manifest_path(
             }),
         ComponentSourceRefV1::Oci { r#ref, digest } => {
             let client = DistClient::new(Default::default());
+            if let Some(manifest_path) = digest
+                .as_deref()
+                .and_then(cached_component_manifest_from_digest)
+            {
+                return Ok(manifest_path);
+            }
             let cached: Result<PathBuf> = if let Some(d) = digest {
                 client
                     .open_cached(d)
@@ -10378,6 +10424,12 @@ fn resolve_component_manifest_path(
         ComponentSourceRefV1::Repo { r#ref, digest }
         | ComponentSourceRefV1::Store { r#ref, digest, .. } => {
             let client = DistClient::new(Default::default());
+            if let Some(manifest_path) = digest
+                .as_deref()
+                .and_then(cached_component_manifest_from_digest)
+            {
+                return Ok(manifest_path);
+            }
             let artifact = if let Some(d) = digest {
                 client
                     .open_cached(d)
