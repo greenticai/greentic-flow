@@ -11,7 +11,7 @@ permissions:
 jobs:
   automerge:
     if: >
-      github.actor == 'dependabot[bot]' &&
+      (github.event.pull_request.user.login == 'dependabot[bot]' || github.event.pull_request.user.login == 'app/dependabot') &&
       github.event.pull_request.draft == false
     runs-on: ubuntu-latest
     steps:
@@ -35,18 +35,35 @@ jobs:
               core.warning(`Skipping Dependabot auto-approval: ${error.message}`);
             }
 
-            try {
-              // Enable auto-merge when branch protection allows it.
-              await github.graphql(`
-                mutation EnableAutoMerge($pullRequestId: ID!) {
-                  enablePullRequestAutoMerge(input: {
-                    pullRequestId: $pullRequestId,
-                    mergeMethod: SQUASH
-                  }) {
-                    pullRequest { number autoMergeRequest { enabledAt } }
-                  }
+            const mutation = `
+              mutation EnableAutoMerge($pullRequestId: ID!) {
+                enablePullRequestAutoMerge(input: {
+                  pullRequestId: $pullRequestId,
+                  mergeMethod: SQUASH
+                }) {
+                  pullRequest { number autoMergeRequest { enabledAt } }
                 }
-              `, { pullRequestId: pr.node_id });
-            } catch (error) {
-              core.warning(`Skipping Dependabot auto-merge: ${error.message}`);
+              }
+            `;
+
+            const maxAttempts = 20;
+
+            for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+              try {
+                await github.graphql(mutation, { pullRequestId: pr.node_id });
+                core.info(`Enabled auto-merge on attempt ${attempt}.`);
+                break;
+              } catch (error) {
+                const message = error.message || String(error);
+                const isUnstable = message.includes("unstable status");
+                const isLastAttempt = attempt === maxAttempts;
+
+                if (!isUnstable || isLastAttempt) {
+                  core.warning(`Skipping Dependabot auto-merge: ${message}`);
+                  break;
+                }
+
+                core.warning(`PR not stable yet (attempt ${attempt}/${maxAttempts}); retrying in 15 seconds.`);
+                await new Promise((resolve) => setTimeout(resolve, 15000));
+              }
             }
