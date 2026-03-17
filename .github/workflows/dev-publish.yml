@@ -51,19 +51,7 @@ jobs:
               --package greentic-types \
               --region "${{ secrets.AWS_REGION }}" \
               --status Published \
-              --output json | python3 -c "import json, re, sys; data=json.load(sys.stdin); best=None; best_key=None
-for item in data.get('versions', []):
-    ver=item.get('version', '')
-    match=re.fullmatch(r'(\\d+)\\.(\\d+)\\.(\\d+)-dev\\.(\\d+)', ver)
-    if not match:
-        continue
-    key=tuple(int(part) for part in match.groups())
-    if best_key is None or key > best_key:
-        best_key=key
-        best=ver
-if best is None:
-    raise SystemExit('no greentic-types dev versions found in CodeArtifact')
-print(best)"
+              --output json | python3 -c "import json,re,sys; data=json.load(sys.stdin); versions=[((int(m.group(1)),int(m.group(2)),int(m.group(3)),int(m.group(4))), item['version']) for item in data.get('versions', []) for m in [re.fullmatch(r'(\\d+)\\.(\\d+)\\.(\\d+)-dev\\.(\\d+)', item.get('version', ''))] if m]; print(max(versions)[1] if versions else (_ for _ in ()).throw(SystemExit('no greentic-types dev versions found in CodeArtifact')))"
           )
           echo "Using greentic-types dev version: ${version}"
           echo "GREENTIC_TYPES_DEV_VERSION=${version}" >> "$GITHUB_ENV"
@@ -134,19 +122,7 @@ print(best)"
               --package greentic-types \
               --region "${{ secrets.AWS_REGION }}" \
               --status Published \
-              --output json | python3 -c "import json, re, sys; data=json.load(sys.stdin); best=None; best_key=None
-for item in data.get('versions', []):
-    ver=item.get('version', '')
-    match=re.fullmatch(r'(\\d+)\\.(\\d+)\\.(\\d+)-dev\\.(\\d+)', ver)
-    if not match:
-        continue
-    key=tuple(int(part) for part in match.groups())
-    if best_key is None or key > best_key:
-        best_key=key
-        best=ver
-if best is None:
-    raise SystemExit('no greentic-types dev versions found in CodeArtifact')
-print(best)"
+              --output json | python3 -c "import json,re,sys; data=json.load(sys.stdin); versions=[((int(m.group(1)),int(m.group(2)),int(m.group(3)),int(m.group(4))), item['version']) for item in data.get('versions', []) for m in [re.fullmatch(r'(\\d+)\\.(\\d+)\\.(\\d+)-dev\\.(\\d+)', item.get('version', ''))] if m]; print(max(versions)[1] if versions else (_ for _ in ()).throw(SystemExit('no greentic-types dev versions found in CodeArtifact')))"
           )
           echo "Using greentic-types dev version: ${version}"
           echo "GREENTIC_TYPES_DEV_VERSION=${version}" >> "$GITHUB_ENV"
