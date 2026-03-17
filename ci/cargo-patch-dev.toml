@@ -1,6 +1,6 @@
 [patch.crates-io]
 # Internal crates to be patched from AWS CodeArtifact in dev/develop
-greentic-types = { version = "0.4.56-dev.122", registry = "corp-artifacts-greentic" }
+greentic-types = { version = "__GREENTIC_TYPES_DEV_VERSION__", registry = "corp-artifacts-greentic" }
 # greentic-interfaces-host = { registry = "corp-artifacts-greentic" }
 # greentic-interfaces-wasmtime = { registry = "corp-artifacts-greentic" }
 # greentic-distributor-client = { registry = "corp-artifacts-greentic" }

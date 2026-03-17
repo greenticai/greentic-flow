@@ -37,6 +37,36 @@ jobs:
           echo "::add-mask::$token"
           echo "CARGO_REGISTRIES_CORP_ARTIFACTS_GREENTIC_TOKEN=$token" >> $GITHUB_ENV
 
+      - name: Resolve latest greentic-types dev version
+        shell: bash
+        run: |
+          set -euo pipefail
+          version=$(
+            aws codeartifact list-package-versions \
+              --domain "${{ secrets.CODEARTIFACT_DOMAIN }}" \
+              --domain-owner "${{ secrets.CODEARTIFACT_DOMAIN_OWNER }}" \
+              --repository greentic \
+              --format cargo \
+              --package greentic-types \
+              --region "${{ secrets.AWS_REGION }}" \
+              --status Published \
+              --output json | python3 -c "import json, re, sys; data=json.load(sys.stdin); best=None; best_key=None
+for item in data.get('versions', []):
+    ver=item.get('version', '')
+    match=re.fullmatch(r'(\\d+)\\.(\\d+)\\.(\\d+)-dev\\.(\\d+)', ver)
+    if not match:
+        continue
+    key=tuple(int(part) for part in match.groups())
+    if best_key is None or key > best_key:
+        best_key=key
+        best=ver
+if best is None:
+    raise SystemExit('no greentic-types dev versions found in CodeArtifact')
+print(best)"
+          )
+          echo "Using greentic-types dev version: ${version}"
+          echo "GREENTIC_TYPES_DEV_VERSION=${version}" >> "$GITHUB_ENV"
+
       - name: Configure CodeArtifact Registry (via template)
         run: |
           mkdir -p .cargo
@@ -45,8 +75,9 @@ jobs:
       - name: Apply CodeArtifact patches (via template)
         shell: bash
         run: |
+          set -euo pipefail
           echo "" >> Cargo.toml
-          cat ci/cargo-patch-dev.toml >> Cargo.toml
+          sed "s/__GREENTIC_TYPES_DEV_VERSION__/${GREENTIC_TYPES_DEV_VERSION}/g" ci/cargo-patch-dev.toml >> Cargo.toml
 
       - name: Lint & Test
         run: |
@@ -89,6 +120,36 @@ jobs:
           echo "::add-mask::$token"
           echo "CARGO_REGISTRIES_CORP_ARTIFACTS_GREENTIC_TOKEN=$token" >> $GITHUB_ENV
 
+      - name: Resolve latest greentic-types dev version
+        shell: bash
+        run: |
+          set -euo pipefail
+          version=$(
+            aws codeartifact list-package-versions \
+              --domain "${{ secrets.CODEARTIFACT_DOMAIN }}" \
+              --domain-owner "${{ secrets.CODEARTIFACT_DOMAIN_OWNER }}" \
+              --repository greentic \
+              --format cargo \
+              --package greentic-types \
+              --region "${{ secrets.AWS_REGION }}" \
+              --status Published \
+              --output json | python3 -c "import json, re, sys; data=json.load(sys.stdin); best=None; best_key=None
+for item in data.get('versions', []):
+    ver=item.get('version', '')
+    match=re.fullmatch(r'(\\d+)\\.(\\d+)\\.(\\d+)-dev\\.(\\d+)', ver)
+    if not match:
+        continue
+    key=tuple(int(part) for part in match.groups())
+    if best_key is None or key > best_key:
+        best_key=key
+        best=ver
+if best is None:
+    raise SystemExit('no greentic-types dev versions found in CodeArtifact')
+print(best)"
+          )
+          echo "Using greentic-types dev version: ${version}"
+          echo "GREENTIC_TYPES_DEV_VERSION=${version}" >> "$GITHUB_ENV"
+
       - name: Configure CodeArtifact Registry (via template)
         run: |
           mkdir -p .cargo
@@ -97,8 +158,9 @@ jobs:
       - name: Apply CodeArtifact patches (via template)
         shell: bash
         run: |
+          set -euo pipefail
           echo "" >> Cargo.toml
-          cat ci/cargo-patch-dev.toml >> Cargo.toml
+          sed "s/__GREENTIC_TYPES_DEV_VERSION__/${GREENTIC_TYPES_DEV_VERSION}/g" ci/cargo-patch-dev.toml >> Cargo.toml
 
       - name: Setup GitVersion
         uses: gittools/actions/gitversion/setup@v1
