@@ -15,6 +15,9 @@ on:
           - latest-codeartifact
           - from-ci-patch-file
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
 jobs:
   build-test:
     name: CI (lint/test/build)
