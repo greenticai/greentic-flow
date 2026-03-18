@@ -37,8 +37,10 @@ jobs:
           cargo fetch --locked || cargo fetch
 
       - name: Codex CI auto-fix (PR to develop only)
+        id: codex_autofix
         if: github.event_name == 'pull_request'
         timeout-minutes: 4
+        continue-on-error: true
         uses: openai/codex-action@v1
         with:
           openai-api-key: ${{ secrets.OPENAI_API_KEY }}
@@ -148,7 +150,7 @@ jobs:
           fi
 
       - name: Commit and push Codex fixes (PR to develop only)
-        if: github.event_name == 'pull_request'
+        if: github.event_name == 'pull_request' && steps.codex_autofix.outcome == 'success'
         shell: bash
         env:
           BRANCH: ${{ github.event.pull_request.head.ref }}
@@ -179,6 +181,7 @@ jobs:
           {
             echo "## Codex-fix summary"
             echo ""
+            echo "- Codex step outcome: \`${{ steps.codex_autofix.outcome }}\`"
             echo "- Event: \`${{ github.event_name }}\`"
             echo "- Base branch: \`${{ github.base_ref }}\`"
             echo "- Head branch: \`${{ github.head_ref }}\`"
