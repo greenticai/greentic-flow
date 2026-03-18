@@ -93,6 +93,32 @@ jobs:
             fi
           fi
 
+      - name: Guard unsafe large refactors (PR to develop only)
+        if: github.event_name == 'pull_request'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          changed_count="$(git diff --name-only | wc -l | tr -d ' ')"
+          if [ "${changed_count}" -gt 12 ]; then
+            echo "Forbidden: Codex changed too many files (${changed_count} > 12)."
+            git diff --name-only
+            exit 1
+          fi
+
+          # Auto-fix must not create/delete/rename files (prevents broad refactors).
+          if git diff --name-status | grep -E '^[ADR]'; then
+            echo "Forbidden: Codex created/deleted/renamed files."
+            git diff --name-status
+            exit 1
+          fi
+
+          # Protect critical dependency contracts from being silently dropped.
+          if git diff -U0 -- Cargo.toml | grep -E '^\-\s*greentic-(interfaces-host|interfaces-wasmtime|distributor-client)\s*='; then
+            echo "Forbidden: Codex removed critical greentic dependencies from Cargo.toml."
+            exit 1
+          fi
+
       - name: Commit and push Codex fixes (PR to develop only)
         if: github.event_name == 'pull_request'
         shell: bash
