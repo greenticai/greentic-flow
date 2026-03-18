@@ -18,43 +18,39 @@ jobs:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
     permissions:
       contents: write
-      pull-requests: write
     steps:
       - uses: actions/checkout@v6
         with:
-          ref: ${{ github.event.pull_request.head.ref || github.ref_name }}
           fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.ref || github.ref_name }}
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: 1.91.0
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
+
       - name: Preload CI dependencies (PR to develop only)
-        if: ${{ github.event_name == 'pull_request' && github.base_ref == 'develop' }}
+        if: github.event_name == 'pull_request'
         run: cargo fetch --locked
+
       - name: Codex CI auto-fix (PR to develop only)
-        if: ${{ github.event_name == 'pull_request' && github.base_ref == 'develop' }}
+        if: github.event_name == 'pull_request'
         uses: openai/codex-action@v1
         with:
           openai-api-key: ${{ secrets.OPENAI_API_KEY }}
           prompt: |
-            You are fixing this pull request so CI lint/build/test passes.
-            Primary goal: resolve recurring dependency/build/lint/test failures before checks execute.
-            Required commands:
+            Fix this PR so CI lint/build/test passes.
+            Focus on dependency and build issues first (Cargo.lock, versions, features, compile errors).
+            Ensure these commands pass:
             - cargo fmt --all -- --check
             - cargo clippy --workspace --all-targets -- -D warnings
             - cargo build --workspace --all-features
             - cargo test --workspace --all-features -- --nocapture
-            Focus on dependency conflicts, Cargo.lock drift, feature mismatches, compile/clippy errors, and CI config issues.
-            Allowed: minimal safe source/config/dependency fixes.
-            Forbidden:
-            - Do not modify/delete/disable/skip tests.
-            - Do not change tests/**, src/tests/**, or *.snap.
-            - Do not weaken assertions or CI checks.
-            If only test changes can fix an issue, report it without changing tests.
-            Create CODEX_CI_FIX_REPORT.md summarizing fixes and remaining blockers.
+            Never modify or disable tests. Do not edit tests/**, src/tests/**, or *.snap.
+            Create CODEX_CI_FIX_REPORT.md with applied fixes and remaining blockers.
+
       - name: Guard: tests were not modified (PR to develop only)
-        if: ${{ github.event_name == 'pull_request' && github.base_ref == 'develop' }}
+        if: github.event_name == 'pull_request'
         shell: bash
         run: |
           set -euo pipefail
@@ -62,12 +58,20 @@ jobs:
             echo "Codex changed test files/snapshots, which is forbidden."
             exit 1
           fi
+
       - name: Commit and push Codex fixes (PR to develop only)
-        if: ${{ github.event_name == 'pull_request' && github.base_ref == 'develop' && github.event.pull_request.head.repo.full_name == github.repository }}
+        if: github.event_name == 'pull_request'
+        shell: bash
         env:
           BRANCH: ${{ github.event.pull_request.head.ref }}
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          BASE_REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
+          if [ "$HEAD_REPO" != "$BASE_REPO" ]; then
+            echo "Fork PR detected, skipping push."
+            exit 0
+          fi
           if git diff --quiet && [ ! -f CODEX_CI_FIX_REPORT.md ]; then
             echo "No Codex changes to commit."
             exit 0
@@ -87,7 +91,7 @@ jobs:
 
   publish-dev:
     name: Publish dev crate to CodeArtifact
-    if: ${{ github.event_name == 'push' || github.event_name == 'workflow_dispatch' }}
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
     needs: build-test
     runs-on: ubuntu-latest
     env:
@@ -158,7 +162,7 @@ jobs:
         run: |
           tag="v${{ steps.gitversion.outputs.FullSemVer }}"
           echo "Creating tag ${tag}"
-          
+
           if git rev-parse -q --verify "refs/tags/${tag}" >/dev/null; then
             echo "Tag ${tag} already exists. Skipping."
           else
