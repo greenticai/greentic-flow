@@ -1,0 +1,155 @@
+{
+  "registry_version": "providers@1",
+  "categories": [
+    {
+      "id": "messaging",
+      "label": {
+        "i18n_key": "category.messaging",
+        "fallback": "Messaging"
+      },
+      "description": {
+        "i18n_key": "category.messaging.description",
+        "fallback": "Bridges the Greentic operator to an external messaging service"
+      }
+    },
+    {
+      "id": "events",
+      "label": {
+        "i18n_key": "category.events",
+        "fallback": "Events"
+      },
+      "description": {
+        "i18n_key": "category.events.description",
+        "fallback": "Event sources and delivery helpers"
+      }
+    }
+  ],
+  "items": [
+    {
+      "id": "messaging-teams",
+      "category": "messaging",
+      "label": {
+        "i18n_key": "provider.messaging.teams",
+        "fallback": "MS-Teams"
+      },
+      "ref": "oci://ghcr.io/greenticai/packs/messaging/messaging-teams:latest"
+    },
+    {
+      "id": "messaging-slack",
+      "category": "messaging",
+      "label": {
+        "i18n_key": "provider.messaging.slack",
+        "fallback": "Slack"
+      },
+      "ref": "oci://ghcr.io/greenticai/packs/messaging/messaging-slack:latest"
+    },
+    {
+      "id": "messaging-webex",
+      "category": "messaging",
+      "label": {
+        "i18n_key": "provider.messaging.webex",
+        "fallback": "WebEx"
+      },
+      "ref": "oci://ghcr.io/greenticai/packs/messaging/messaging-webex:latest"
+    },
+    {
+      "id": "messaging-webchat-gui",
+      "category": "messaging",
+      "label": {
+        "i18n_key": "provider.messaging.webchat.gui",
+        "fallback": "WebChat (+ GUI)"
+      },
+      "ref": "oci://ghcr.io/greenticai/packs/messaging/messaging-webchat:latest"
+    },
+    {
+      "id": "messaging-webchat",
+      "category": "messaging",
+      "label": {
+        "i18n_key": "provider.messaging.webchat",
+        "fallback": "WebChat (backend only)"
+      },
+      "ref": "oci://ghcr.io/greenticai/packs/messaging/messaging-webchat:latest"
+    },
+    {
+      "id": "messaging-whatsapp",
+      "category": "messaging",
+      "label": {
+        "i18n_key": "provider.messaging.whatsapp",
+        "fallback": "WhatsApp"
+      },
+      "ref": "oci://ghcr.io/greenticai/packs/messaging/messaging-whatsapp:latest"
+    },
+    {
+      "id": "messaging-telegram",
+      "category": "messaging",
+      "label": {
+        "i18n_key": "provider.messaging.telegram",
+        "fallback": "Telegram"
+      },
+      "ref": "oci://ghcr.io/greenticai/packs/messaging/messaging-telegram:latest"
+    },
+    {
+      "id": "messaging-email",
+      "category": "messaging",
+      "label": {
+        "i18n_key": "provider.messaging.email",
+        "fallback": "Email"
+      },
+      "ref": "oci://ghcr.io/greenticai/packs/messaging/messaging-email:latest"
+    },
+    {
+      "id": "events-webhook",
+      "category": "events",
+      "label": {
+        "i18n_key": "provider.events.webhook",
+        "fallback": "Webhook"
+      },
+      "ref": "oci://ghcr.io/greenticai/packs/events/events-webhook:latest"
+    },
+    {
+      "id": "events-email",
+      "category": "events",
+      "label": {
+        "i18n_key": "provider.events.email",
+        "fallback": "Email"
+      },
+      "ref": "oci://ghcr.io/greenticai/packs/events/events-email:latest"
+    },
+    {
+      "id": "events-email-sendgrid",
+      "category": "events",
+      "label": {
+        "i18n_key": "provider.events.email.sendgrid",
+        "fallback": "Email (SendGrid)"
+      },
+      "ref": "oci://ghcr.io/greenticai/packs/events/events-email-sendgrid:latest"
+    },
+    {
+      "id": "events-sms",
+      "category": "events",
+      "label": {
+        "i18n_key": "provider.events.sms",
+        "fallback": "SMS"
+      },
+      "ref": "oci://ghcr.io/greenticai/packs/events/events-sms:latest"
+    },
+    {
+      "id": "events-sms-twilio",
+      "category": "events",
+      "label": {
+        "i18n_key": "provider.events.sms.twilio",
+        "fallback": "SMS (Twilio)"
+      },
+      "ref": "oci://ghcr.io/greenticai/packs/events/events-sms-twilio:latest"
+    },
+    {
+      "id": "events-timer",
+      "category": "events",
+      "label": {
+        "i18n_key": "provider.events.timer",
+        "fallback": "Timer/Scheduler"
+      },
+      "ref": "oci://ghcr.io/greenticai/packs/events/events-timer:latest"
+    }
+  ]
+}
