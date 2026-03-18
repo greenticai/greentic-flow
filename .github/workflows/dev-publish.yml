@@ -49,7 +49,7 @@ jobs:
             Never modify or disable tests. Do not edit tests/**, src/tests/**, or *.snap.
             Create CODEX_CI_FIX_REPORT.md with applied fixes and remaining blockers.
 
-      - name: Guard: tests were not modified (PR to develop only)
+      - name: Guard tests were not modified (PR to develop only)
         if: github.event_name == 'pull_request'
         run: bash ci/codex_pr_guard.sh
 
