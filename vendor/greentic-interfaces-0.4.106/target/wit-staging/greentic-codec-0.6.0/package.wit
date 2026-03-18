@@ -1,0 +1,13 @@
+// SPDX-License-Identifier: MIT
+
+package greentic:codec@0.6.0;
+
+interface codec {
+  type cbor = list<u8>;
+  encode: func(payload: cbor) -> cbor;
+  decode: func(payload: cbor) -> cbor;
+}
+
+world codec-world {
+  export codec;
+}

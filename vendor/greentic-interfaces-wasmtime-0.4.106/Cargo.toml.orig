@@ -1,0 +1,31 @@
+[package]
+name = "greentic-interfaces-wasmtime"
+version.workspace = true
+edition = "2024"
+rust-version = "1.91"
+license = "MIT"
+repository = "https://github.com/greentic-ai/greentic-interfaces-wasmtime"
+description = "Wasmtime host & guest shims for greentic WIT worlds (sync; auto-discovered)"
+
+[features]
+default = []
+control-helpers = []
+
+[dependencies]
+anyhow = { workspace = true }
+greentic-interfaces = { workspace = true }
+
+[dependencies.wasmtime]
+workspace = true
+
+[build-dependencies]
+camino = { workspace = true }
+greentic-interfaces = { workspace = true }
+proc-macro2 = { workspace = true }
+quote = { workspace = true }
+syn = { workspace = true }
+walkdir = { workspace = true }
+
+[dev-dependencies]
+wat = { workspace = true }
+wasmtime-wasi = { workspace = true }

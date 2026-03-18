@@ -1,0 +1,59 @@
+// SPDX-License-Identifier: MIT
+
+package greentic:operator@1.0.0;
+
+interface hook-api {
+  use greentic:types-core/core@0.6.0.{tenant-ctx};
+
+  /// Lifecycle stage where the hook is executed.
+  enum hook-stage {
+    pre,
+    post,
+  }
+
+  /// Execution status of the operation envelope.
+  enum operation-status {
+    pending,
+    denied,
+    ok,
+    err,
+  }
+
+  /// Minimal operation envelope visible to hook providers.
+  record operation-envelope {
+    op-id: string,
+    op-name: string,
+    ctx: tenant-ctx,
+    payload-cbor: list<u8>,
+    meta-cbor: option<list<u8>>,
+    status: operation-status,
+    result-cbor: option<list<u8>>,
+  }
+
+  /// Deny payload returned by pre-hooks.
+  record hook-deny {
+    envelope: operation-envelope,
+    reason: string,
+  }
+
+  /// Hook decision payload returned by hook providers.
+  variant hook-decision {
+    continue(operation-envelope),
+    deny(hook-deny),
+  }
+
+  /// Hook evaluation request.
+  record hook-request {
+    stage: hook-stage,
+    op-name: string,
+    envelope: operation-envelope,
+  }
+
+  /// Evaluate pre/post operation hooks.
+  evaluate: func(request: hook-request) -> hook-decision;
+}
+
+/// Hook-provider world exported by policy/interceptor components.
+world hook-provider {
+  export hook-api;
+}

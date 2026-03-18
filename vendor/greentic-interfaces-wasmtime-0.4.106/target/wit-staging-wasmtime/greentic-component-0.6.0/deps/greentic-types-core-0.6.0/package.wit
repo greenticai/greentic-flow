@@ -1,0 +1,55 @@
+// SPDX-License-Identifier: MIT
+
+package greentic:types-core@0.6.0;
+
+interface core {
+  type env-id = string;
+  type tenant-id = string;
+  type team-id = string;
+  type user-id = string;
+  type flow-id = string;
+  type step-id = string;
+  type component-id = string;
+  type trace-id = string;
+  type correlation-id = string;
+
+  record tenant-ctx {
+    tenant-id: tenant-id,
+    team-id: option<team-id>,
+    user-id: option<user-id>,
+    env-id: env-id,
+    trace-id: trace-id,
+    correlation-id: correlation-id,
+    deadline-ms: u64,
+    attempt: u32,
+    idempotency-key: option<string>,
+    i18n-id: string,
+  }
+
+  record host-error {
+    code: string,
+    message: string,
+  }
+
+  record node-error {
+    code: string,
+    message: string,
+    retryable: bool,
+    backoff-ms: option<u64>,
+    details: option<list<u8>>,
+  }
+
+  type capability-id = string;
+
+  record capability {
+    id: capability-id,
+    description: option<string>,
+  }
+
+  record capability-requirement {
+    capability: capability-id,
+    optional: bool,
+  }
+}
+
+world types { export core; }
