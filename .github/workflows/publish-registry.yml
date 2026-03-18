@@ -1,0 +1,45 @@
+name: Publish Provider Registry to GHCR
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - 'registries/**'
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  publish-registry:
+    name: Publish provider registry
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install ORAS CLI
+        run: |
+          curl -fsSL https://github.com/oras-project/oras/releases/download/v1.2.0/oras_1.2.0_linux_amd64.tar.gz \
+            | tar -xzf - -C /usr/local/bin oras
+
+      - name: Login to GHCR
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | oras login ghcr.io -u "${{ github.actor }}" --password-stdin
+
+      - name: Validate JSON
+        run: |
+          jq . registries/providers.json > /dev/null
+          echo "✓ providers.json is valid JSON"
+
+      - name: Push provider registry to GHCR
+        run: |
+          cd registries
+          oras push ghcr.io/greenticai/registries/providers:latest \
+            --artifact-type application/vnd.greentic.registry.v1+json \
+            providers.json:application/json
+          echo "✓ Published to ghcr.io/greenticai/registries/providers:latest"
+
+      - name: Verify push
+        run: |
+          oras manifest fetch ghcr.io/greenticai/registries/providers:latest --pretty
