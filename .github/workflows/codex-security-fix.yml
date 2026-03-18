@@ -146,6 +146,45 @@ jobs:
           git commit -m "chore(security): codex remediation for security alerts" || echo "No changes to commit"
           git push origin "HEAD:${BRANCH}"
 
+      - name: Codex-fix summary
+        if: always()
+        run: |
+          set -euo pipefail
+
+          {
+            echo "## Codex-fix summary"
+            echo ""
+            echo "- Event: \`${{ github.event_name }}\`"
+            echo "- Ref: \`${{ github.ref_name }}\`"
+            echo "- Alerts selected: \`${{ steps.alerts.outputs.count || '0' }}\`"
+            echo ""
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if [ -f SECURITY_FIX_REPORT.md ]; then
+            {
+              echo "### Security fix report"
+              echo ""
+              cat SECURITY_FIX_REPORT.md
+              echo ""
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            {
+              echo "### Security fix report"
+              echo ""
+              echo "No \`SECURITY_FIX_REPORT.md\` was generated in this run."
+              echo ""
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+          if [ -s pr-comment.md ]; then
+            {
+              echo "### Dependency review scorecard"
+              echo ""
+              cat pr-comment.md
+              echo ""
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
       - name: Post Codex Review
         if: github.event_name == 'pull_request'
         env:
