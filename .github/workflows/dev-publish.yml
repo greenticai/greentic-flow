@@ -50,7 +50,13 @@ jobs:
             - cargo build --workspace --all-features
             - cargo test --workspace --all-features -- --nocapture
             Never modify or disable tests. Do not edit tests/**, src/tests/**, or *.snap.
-            Create CODEX_CI_FIX_REPORT.md with applied fixes and remaining blockers.
+            Forbidden fixes:
+            - Do not add or modify vendor/**.
+            - Do not add [patch.crates-io] sections.
+            - Do not add path/git dependency overrides in any Cargo.toml.
+            - Do not use local replacement sources via .cargo/config*.
+            - Do not create CODEX_CI_FIX_REPORT.md.
+            If a fix requires any forbidden method, leave code unchanged.
 
       - name: Guard tests were not modified (PR to develop only)
         if: github.event_name == 'pull_request'
@@ -60,6 +66,30 @@ jobs:
           if git diff --name-only | grep -E '^(tests/|src/tests/)|(^|/).*\.snap$'; then
             echo "Codex changed test files/snapshots, which is forbidden."
             exit 1
+          fi
+
+      - name: Guard forbidden autofix methods (PR to develop only)
+        if: github.event_name == 'pull_request'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if git diff --name-only | grep -E '^(vendor/|\.cargo/)'; then
+            echo "Forbidden: Codex changed vendor/** or .cargo/**"
+            exit 1
+          fi
+
+          if git diff --name-only | grep -E '^CODEX_CI_FIX_REPORT\.md$'; then
+            echo "Forbidden: CODEX_CI_FIX_REPORT.md must not be created in auto-fix"
+            exit 1
+          fi
+
+          cargo_toml_files="$(git diff --name-only | grep -E '(^|/)Cargo\.toml$' || true)"
+          if [ -n "${cargo_toml_files}" ]; then
+            if git diff -U0 -- ${cargo_toml_files} | grep -E '^\+.*(\[patch\.crates-io\]|path\s*=|git\s*=)'; then
+              echo "Forbidden: path/git overrides or [patch.crates-io] were introduced"
+              exit 1
+            fi
           fi
 
       - name: Commit and push Codex fixes (PR to develop only)
@@ -75,7 +105,7 @@ jobs:
             echo "Fork PR detected, skipping push."
             exit 0
           fi
-          if git diff --quiet && [ ! -f CODEX_CI_FIX_REPORT.md ]; then
+          if git diff --quiet; then
             echo "No Codex changes to commit."
             exit 0
           fi
