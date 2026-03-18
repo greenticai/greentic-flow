@@ -22,6 +22,39 @@
         "i18n_key": "category.events.description",
         "fallback": "Event sources and delivery helpers"
       }
+    },
+    {
+      "id": "oauth",
+      "label": {
+        "i18n_key": "category.oauth",
+        "fallback": "OAuth"
+      },
+      "description": {
+        "i18n_key": "category.oauth.description",
+        "fallback": "OAuth provider helpers and identity integrations"
+      }
+    },
+    {
+      "id": "secrets",
+      "label": {
+        "i18n_key": "category.secrets",
+        "fallback": "Secrets"
+      },
+      "description": {
+        "i18n_key": "category.secrets.description",
+        "fallback": "Secrets runtime and broker access"
+      }
+    },
+    {
+      "id": "deployer",
+      "label": {
+        "i18n_key": "category.deployer",
+        "fallback": "Deployer"
+      },
+      "description": {
+        "i18n_key": "category.deployer.description",
+        "fallback": "Deployment helpers for rollout targets"
+      }
     }
   ],
   "items": [
@@ -53,20 +86,11 @@
       "ref": "oci://ghcr.io/greenticai/packs/messaging/messaging-webex:latest"
     },
     {
-      "id": "messaging-webchat-gui",
-      "category": "messaging",
-      "label": {
-        "i18n_key": "provider.messaging.webchat.gui",
-        "fallback": "WebChat (+ GUI)"
-      },
-      "ref": "oci://ghcr.io/greenticai/packs/messaging/messaging-webchat:latest"
-    },
-    {
       "id": "messaging-webchat",
       "category": "messaging",
       "label": {
         "i18n_key": "provider.messaging.webchat",
-        "fallback": "WebChat (backend only)"
+        "fallback": "WebChat"
       },
       "ref": "oci://ghcr.io/greenticai/packs/messaging/messaging-webchat:latest"
     },
@@ -150,6 +174,159 @@
         "fallback": "Timer/Scheduler"
       },
       "ref": "oci://ghcr.io/greenticai/packs/events/events-timer:latest"
+    },
+    {
+      "id": "oauth-github",
+      "category": "oauth",
+      "label": {
+        "i18n_key": "provider.oauth.github",
+        "fallback": "GitHub"
+      },
+      "ref": "oci://ghcr.io/greenticai/packs/oauth/oauth-github:latest"
+    },
+    {
+      "id": "oauth-google",
+      "category": "oauth",
+      "label": {
+        "i18n_key": "provider.oauth.google",
+        "fallback": "Google"
+      },
+      "ref": "oci://ghcr.io/greenticai/packs/oauth/oauth-google:latest"
+    },
+    {
+      "id": "oauth-microsoft",
+      "category": "oauth",
+      "label": {
+        "i18n_key": "provider.oauth.microsoft",
+        "fallback": "Microsoft"
+      },
+      "ref": "oci://ghcr.io/greenticai/packs/oauth/oauth-microsoft-graph:latest"
+    },
+    {
+      "id": "oauth-oidc",
+      "category": "oauth",
+      "label": {
+        "i18n_key": "provider.oauth.oidc",
+        "fallback": "Generic OIDC"
+      },
+      "ref": "oci://ghcr.io/greenticai/packs/oauth/oauth-oidc-generic:latest"
+    },
+    {
+      "id": "oauth-slack",
+      "category": "oauth",
+      "label": {
+        "i18n_key": "provider.oauth.slack",
+        "fallback": "Slack"
+      },
+      "ref": "oci://ghcr.io/greenticai/packs/oauth/oauth-slack:latest"
+    },
+    {
+      "id": "secrets-aws-sm",
+      "category": "secrets",
+      "label": {
+        "i18n_key": "provider.secrets.aws-sm",
+        "fallback": "AWS Secrets Manager"
+      },
+      "ref": "oci://ghcr.io/greenticai/packs/secrets/greentic.secrets.aws-sm.gtpack:latest"
+    },
+    {
+      "id": "secrets-azure-kv",
+      "category": "secrets",
+      "label": {
+        "i18n_key": "provider.secrets.azure-kv",
+        "fallback": "Azure Key Vault"
+      },
+      "ref": "oci://ghcr.io/greenticai/packs/secrets/greentic.secrets.azure-kv.gtpack:latest"
+    },
+    {
+      "id": "secrets-gcp-sm",
+      "category": "secrets",
+      "label": {
+        "i18n_key": "provider.secrets.gcp-sm",
+        "fallback": "GCP Secret Manager"
+      },
+      "ref": "oci://ghcr.io/greenticai/packs/secrets/greentic.secrets.gcp-sm.gtpack:latest"
+    },
+    {
+      "id": "secrets-k8s",
+      "category": "secrets",
+      "label": {
+        "i18n_key": "provider.secrets.k8s",
+        "fallback": "Kubernetes Secrets"
+      },
+      "ref": "oci://ghcr.io/greenticai/packs/secrets/greentic.secrets.k8s.gtpack:latest"
+    },
+    {
+      "id": "secrets-vault",
+      "category": "secrets",
+      "label": {
+        "i18n_key": "provider.secrets.vault",
+        "fallback": "HashiCorp Vault"
+      },
+      "ref": "oci://ghcr.io/greenticai/packs/secrets/greentic.secrets.vault-kv.gtpack:latest"
+    },
+    {
+      "id": "deployer-serverless",
+      "category": "deployer",
+      "label": {
+        "i18n_key": "provider.deployer.serverless",
+        "fallback": "Serverless"
+      },
+      "ref": "oci://ghcr.io/greenticai/packs/deployer/greentic.fixture.serverless.gtpack:latest"
+    },
+    {
+      "id": "deployer-juju-machine",
+      "category": "deployer",
+      "label": {
+        "i18n_key": "provider.deployer.juju-machine",
+        "fallback": "Juju (Machine)"
+      },
+      "ref": "oci://ghcr.io/greenticai/packs/deployer/greentic.fixture.juju.machine.gtpack:latest"
+    },
+    {
+      "id": "deployer-juju-k8s",
+      "category": "deployer",
+      "label": {
+        "i18n_key": "provider.deployer.juju-k8s",
+        "fallback": "Juju (K8s)"
+      },
+      "ref": "oci://ghcr.io/greenticai/packs/deployer/greentic.fixture.juju.k8s.gtpack:latest"
+    },
+    {
+      "id": "deployer-snap",
+      "category": "deployer",
+      "label": {
+        "i18n_key": "provider.deployer.snap",
+        "fallback": "Snap"
+      },
+      "ref": "oci://ghcr.io/greenticai/packs/deployer/greentic.fixture.snap.gtpack:latest"
+    },
+    {
+      "id": "deployer-k8s",
+      "category": "deployer",
+      "label": {
+        "i18n_key": "provider.deployer.k8s",
+        "fallback": "Kubernetes (Raw)"
+      },
+      "ref": "oci://ghcr.io/greenticai/packs/deployer/greentic.fixture.k8s.raw.gtpack:latest"
+    },
+    {
+      "id": "deployer-helm",
+      "category": "deployer",
+      "label": {
+        "i18n_key": "provider.deployer.helm",
+        "fallback": "Helm"
+      },
+      "ref": "oci://ghcr.io/greenticai/packs/deployer/greentic.fixture.helm.gtpack:latest"
+    },
+    {
+      "id": "deployer-terraform",
+      "category": "deployer",
+      "label": {
+        "i18n_key": "provider.deployer.terraform",
+        "fallback": "Terraform"
+      },
+      "ref": "oci://ghcr.io/greenticai/packs/deployer/greentic.fixture.terraform.gtpack:latest"
     }
   ]
 }
