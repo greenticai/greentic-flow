@@ -30,10 +30,10 @@ jobs:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
       - name: Preload CI dependencies (PR to develop only)
-        if: ${{ github.event_name == 'pull_request' && github.base_ref == 'develop' && github.actor != 'github-actions[bot]' }}
+        if: ${{ github.event_name == 'pull_request' && github.base_ref == 'develop' }}
         run: cargo fetch --locked
       - name: Build Codex CI prompt (PR to develop only)
-        if: ${{ github.event_name == 'pull_request' && github.base_ref == 'develop' && github.actor != 'github-actions[bot]' }}
+        if: ${{ github.event_name == 'pull_request' && github.base_ref == 'develop' }}
         run: |
           cat > codex-ci-prompt.txt <<'PROMPT'
           You are fixing this pull request so CI lint/build/test passes.
@@ -71,14 +71,13 @@ jobs:
           - Create CODEX_CI_FIX_REPORT.md with what was changed and what remains.
           PROMPT
       - name: Codex CI auto-fix (PR to develop only)
-        if: ${{ github.event_name == 'pull_request' && github.base_ref == 'develop' && github.actor != 'github-actions[bot]' }}
+        if: ${{ github.event_name == 'pull_request' && github.base_ref == 'develop' }}
         uses: openai/codex-action@v1
         with:
           openai-api-key: ${{ secrets.OPENAI_API_KEY }}
           prompt-file: codex-ci-prompt.txt
-          codex-args: '["--full-auto"]'
       - name: Guard: tests were not modified (PR to develop only)
-        if: ${{ github.event_name == 'pull_request' && github.base_ref == 'develop' && github.actor != 'github-actions[bot]' }}
+        if: ${{ github.event_name == 'pull_request' && github.base_ref == 'develop' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -87,7 +86,7 @@ jobs:
             exit 1
           fi
       - name: Commit and push Codex fixes (PR to develop only)
-        if: ${{ github.event_name == 'pull_request' && github.base_ref == 'develop' && github.actor != 'github-actions[bot]' && github.event.pull_request.head.repo.full_name == github.repository }}
+        if: ${{ github.event_name == 'pull_request' && github.base_ref == 'develop' && github.event.pull_request.head.repo.full_name == github.repository }}
         env:
           BRANCH: ${{ github.event.pull_request.head.ref }}
         run: |
