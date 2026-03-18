@@ -50,6 +50,12 @@ jobs:
             - cargo clippy --workspace --all-targets -- -D warnings
             - cargo build --workspace --all-features
             - cargo test --workspace --all-features -- --nocapture
+            Preferred solution order (white paths first):
+            1) Cargo dependency fixes only in Cargo.toml and Cargo.lock (version/feature/lock updates).
+            2) Minimal compile fixes in existing Rust source files under src/** only.
+            3) Stop with no code changes if (1)-(2) are insufficient.
+            White paths (priority): Cargo.toml, Cargo.lock, src/**.
+            Black paths (never change): vendor/**, .cargo/**, tests/**, src/tests/**, **/*.snap, .github/**, ci/**.
             Never modify or disable tests. Do not edit tests/**, src/tests/**, or *.snap.
             Forbidden fixes:
             - Do not add or modify vendor/**.
@@ -125,6 +131,19 @@ jobs:
           # Protect critical dependency contracts from being silently dropped.
           if git diff -U0 -- Cargo.toml | grep -E '^\-\s*greentic-(interfaces-host|interfaces-wasmtime|distributor-client)\s*='; then
             echo "Forbidden: Codex removed critical greentic dependencies from Cargo.toml."
+            exit 1
+          fi
+
+      - name: Guard allowed paths only (PR to develop only)
+        if: github.event_name == 'pull_request'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          disallowed="$(git diff --name-only | grep -Ev '^(Cargo\.toml|Cargo\.lock|src/)' || true)"
+          if [ -n "${disallowed}" ]; then
+            echo "Forbidden: Codex changed files outside allowlist (Cargo.toml, Cargo.lock, src/**):"
+            echo "${disallowed}"
             exit 1
           fi
 
