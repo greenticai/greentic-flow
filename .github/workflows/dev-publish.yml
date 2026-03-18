@@ -115,6 +115,47 @@ jobs:
           git commit -m "chore(ci): codex pre-fix for lint/build/test" || echo "No changes to commit"
           git push origin "HEAD:${BRANCH}"
 
+      - name: Codex-fix summary (PR to develop only)
+        if: github.event_name == 'pull_request'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          {
+            echo "## Codex-fix summary"
+            echo ""
+            echo "- Event: \`${{ github.event_name }}\`"
+            echo "- Base branch: \`${{ github.base_ref }}\`"
+            echo "- Head branch: \`${{ github.head_ref }}\`"
+            echo ""
+            echo "### Codex commit details"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if git log -1 --pretty='%s' | grep -q '^chore(ci): codex pre-fix for lint/build/test$'; then
+            {
+              echo "- Last commit: \`$(git rev-parse --short HEAD)\`"
+              echo ""
+              echo "#### Files changed in last Codex commit"
+              echo '```text'
+              git show --name-only --pretty="" HEAD
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            changed="$(git diff --name-only)"
+            {
+              echo "- No new Codex commit detected in this run."
+              echo ""
+              echo "#### Uncommitted changes (if any)"
+              if [ -n "$changed" ]; then
+                echo '```text'
+                echo "$changed"
+                echo '```'
+              else
+                echo "None"
+              fi
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
       - name: Lint & Test
         run: |
           cargo fmt --all -- --check
