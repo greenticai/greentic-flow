@@ -32,50 +32,27 @@ jobs:
       - name: Preload CI dependencies (PR to develop only)
         if: ${{ github.event_name == 'pull_request' && github.base_ref == 'develop' }}
         run: cargo fetch --locked
-      - name: Build Codex CI prompt (PR to develop only)
-        if: ${{ github.event_name == 'pull_request' && github.base_ref == 'develop' }}
-        run: |
-          cat > codex-ci-prompt.txt <<'PROMPT'
-          You are fixing this pull request so CI lint/build/test passes.
-
-          Primary goal:
-          - Resolve recurring CI failures in dependency/build/lint/test steps before they execute.
-
-          Commands that must pass after fixes:
-          - Make minimal safe changes for:
-            - cargo fmt --all -- --check
-            - cargo clippy --workspace --all-targets -- -D warnings
-            - cargo build --workspace --all-features
-            - cargo test --workspace --all-features -- --nocapture
-
-          Focus areas (high priority):
-          - Cargo dependency/version conflicts.
-          - Missing or stale Cargo.lock / lockfile drift issues.
-          - Feature-flag mismatches used by clippy/build/test commands.
-          - Broken imports, compile errors, warnings promoted to errors by clippy.
-          - Build configuration issues that block compilation in CI.
-          - Tooling/config mismatches in project files used by those commands.
-
-          Allowed changes:
-          - Source and configuration changes needed to make the above commands pass.
-          - Dependency version adjustments and lockfile updates when required.
-
-          Strict constraints:
-          - DO NOT modify, delete, disable, or skip tests.
-          - DO NOT change files under tests/**, src/tests/**, or any *.snap snapshots.
-          - Do not relax assertions to force passing.
-          - Do not weaken CI checks or remove failing checks.
-          - If only test changes can solve an issue, leave code unchanged and report it.
-
-          Output:
-          - Create CODEX_CI_FIX_REPORT.md with what was changed and what remains.
-          PROMPT
       - name: Codex CI auto-fix (PR to develop only)
         if: ${{ github.event_name == 'pull_request' && github.base_ref == 'develop' }}
         uses: openai/codex-action@v1
         with:
           openai-api-key: ${{ secrets.OPENAI_API_KEY }}
-          prompt-file: codex-ci-prompt.txt
+          prompt: |
+            You are fixing this pull request so CI lint/build/test passes.
+            Primary goal: resolve recurring dependency/build/lint/test failures before checks execute.
+            Required commands:
+            - cargo fmt --all -- --check
+            - cargo clippy --workspace --all-targets -- -D warnings
+            - cargo build --workspace --all-features
+            - cargo test --workspace --all-features -- --nocapture
+            Focus on dependency conflicts, Cargo.lock drift, feature mismatches, compile/clippy errors, and CI config issues.
+            Allowed: minimal safe source/config/dependency fixes.
+            Forbidden:
+            - Do not modify/delete/disable/skip tests.
+            - Do not change tests/**, src/tests/**, or *.snap.
+            - Do not weaken assertions or CI checks.
+            If only test changes can fix an issue, report it without changing tests.
+            Create CODEX_CI_FIX_REPORT.md summarizing fixes and remaining blockers.
       - name: Guard: tests were not modified (PR to develop only)
         if: ${{ github.event_name == 'pull_request' && github.base_ref == 'develop' }}
         shell: bash
