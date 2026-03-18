@@ -64,7 +64,3 @@ targets = [
   "x86_64-pc-windows-msvc",
   "aarch64-pc-windows-msvc",
 ]
-
-[patch.crates-io]
-greentic-interfaces = { path = "vendor/greentic-interfaces-0.4.106" }
-greentic-interfaces-wasmtime = { path = "vendor/greentic-interfaces-wasmtime-0.4.106" }

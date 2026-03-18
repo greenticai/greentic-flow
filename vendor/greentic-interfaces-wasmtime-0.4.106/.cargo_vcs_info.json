@@ -1,6 +1,0 @@
-{
-  "git": {
-    "sha1": "a3e53297f6f129104b68cc79636b500903fc6c91"
-  },
-  "path_in_vcs": "crates/greentic-interfaces-wasmtime"
-}
