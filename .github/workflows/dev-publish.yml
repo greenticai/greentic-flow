@@ -57,6 +57,15 @@ jobs:
             - Do not add path/git dependency overrides in any Cargo.toml.
             - Do not use local replacement sources via .cargo/config*.
             - Do not create CODEX_CI_FIX_REPORT.md.
+            - Do not perform broad refactors or architecture changes.
+            - Do not create/delete/rename files.
+            - Do not introduce new modules to replace existing dependency APIs.
+            - Do not remove or swap core greentic dependencies to make errors disappear.
+            - Do not rewrite wizard/component/distributor flows as a workaround.
+            Keep changes minimal and local:
+            - Prefer tiny dependency/version/feature fixes in Cargo.toml and Cargo.lock.
+            - Prefer focused compile fixes in existing files only.
+            - If fix requires broad refactor, stop and leave code unchanged.
             If a fix requires any forbidden method, leave code unchanged.
 
       - name: Guard tests were not modified (PR to develop only)
