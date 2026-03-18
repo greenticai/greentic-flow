@@ -38,6 +38,7 @@ jobs:
 
       - name: Codex CI auto-fix (PR to develop only)
         if: github.event_name == 'pull_request'
+        timeout-minutes: 4
         uses: openai/codex-action@v1
         with:
           openai-api-key: ${{ secrets.OPENAI_API_KEY }}
