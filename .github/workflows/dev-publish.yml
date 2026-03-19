@@ -214,12 +214,21 @@ jobs:
             } >> "$GITHUB_STEP_SUMMARY"
           fi
 
-      - name: Lint & Test
-        run: |
-          cargo fmt --all -- --check
-          cargo clippy --workspace --all-targets -- -D warnings
-          cargo build --workspace --all-features
-          cargo test --workspace --all-features -- --nocapture
+      - name: Lint (fmt)
+        timeout-minutes: 3
+        run: cargo fmt --all -- --check
+
+      - name: Lint (clippy)
+        timeout-minutes: 8
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Build
+        timeout-minutes: 8
+        run: cargo build --workspace --all-features
+
+      - name: Test
+        timeout-minutes: 10
+        run: cargo test --workspace --all-features -- --nocapture
 
   publish-dev:
     name: Publish dev crate to CodeArtifact
