@@ -866,6 +866,8 @@ pub fn qa_spec_to_questions(
                 }
                 (crate::questions::QuestionKind::Choice, values)
             }
+            QuestionKind::InlineJson { .. } => (crate::questions::QuestionKind::String, Vec::new()),
+            QuestionKind::AssetRef { .. } => (crate::questions::QuestionKind::String, Vec::new()),
         };
 
         out.push(crate::questions::Question {

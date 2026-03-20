@@ -306,6 +306,13 @@ fn parse_answer(kind: &QuestionKind, raw: &str) -> Result<Value> {
                 })?;
             Ok(Value::String(matched))
         }
+        QuestionKind::InlineJson { .. } => {
+            serde_json::from_str(trimmed).map_err(|err| FlowError::Internal {
+                message: format!("invalid json: {err}"),
+                location: FlowErrorLocation::new(None, None, None),
+            })
+        }
+        QuestionKind::AssetRef { .. } => Ok(Value::String(trimmed.to_string())),
     }
 }
 

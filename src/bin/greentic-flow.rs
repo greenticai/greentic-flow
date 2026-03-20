@@ -2474,6 +2474,8 @@ fn component_spec_to_qa_form_json(
                         .collect::<Vec<_>>(),
                 ),
             ),
+            QuestionKind::InlineJson { .. } => ("string", None),
+            QuestionKind::AssetRef { .. } => ("string", None),
         };
         let mut entry = serde_json::Map::new();
         entry.insert(
