@@ -3,7 +3,8 @@ name: Dev Publish crates
 on:
   push:
     branches: [ develop ]
-  pull_request: {}
+  pull_request:
+    branches: [ develop ]
   workflow_dispatch: {}
 
 env:
@@ -16,21 +17,268 @@ jobs:
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
     permissions:
-      contents: read
+      contents: write
     steps:
       - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.ref || github.ref_name }}
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: 1.91.0
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
 
-      - name: Lint & Test
+      - name: Preload CI dependencies (PR to develop only)
+        if: github.event_name == 'pull_request'
+        shell: bash
         run: |
-          cargo fmt --all -- --check
-          cargo clippy --workspace --all-targets -- -D warnings
-          cargo build --workspace --all-features
-          cargo test --workspace --all-features -- --nocapture
+          set -euo pipefail
+          cargo fetch --locked || cargo fetch
+
+      - name: Codex CI auto-fix (PR to develop only)
+        id: codex_autofix
+        if: github.event_name == 'pull_request'
+        timeout-minutes: 4
+        continue-on-error: true
+        uses: openai/codex-action@v1
+        with:
+          openai-api-key: ${{ secrets.OPENAI_API_KEY }}
+          prompt: |
+            Fix this PR so CI lint/build/test passes.
+            Focus on dependency and build issues first (Cargo.lock, versions, features, compile errors).
+            Ensure these commands pass:
+            - cargo fmt --all -- --check
+            - cargo clippy --workspace --all-targets -- -D warnings
+            - cargo build --workspace --all-features
+            - cargo test --workspace --all-features -- --nocapture
+            Preferred solution order (white paths first):
+            1) Cargo dependency fixes only in Cargo.toml and Cargo.lock (version/feature/lock updates).
+            2) Minimal compile fixes in existing Rust source files under src/** only.
+            3) Stop with no code changes if (1)-(2) are insufficient.
+            White paths (priority): Cargo.toml, Cargo.lock, src/**.
+            Black paths (never change): vendor/**, .cargo/**, tests/**, src/tests/**, **/*.snap, .github/**, ci/**.
+            Never modify or disable tests. Do not edit tests/**, src/tests/**, or *.snap.
+            Forbidden fixes:
+            - Do not add or modify vendor/**.
+            - Do not add [patch.crates-io] sections.
+            - Do not add path/git dependency overrides in any Cargo.toml.
+            - Do not use local replacement sources via .cargo/config*.
+            - Do not create CODEX_CI_FIX_REPORT.md.
+            - Do not perform broad refactors or architecture changes.
+            - Do not create/delete/rename files.
+            - Do not introduce new modules to replace existing dependency APIs.
+            - Do not remove or swap core greentic dependencies to make errors disappear.
+            - Do not rewrite wizard/component/distributor flows as a workaround.
+            Keep changes minimal and local:
+            - Prefer tiny dependency/version/feature fixes in Cargo.toml and Cargo.lock.
+            - Prefer focused compile fixes in existing files only.
+            - If fix requires broad refactor, stop and leave code unchanged.
+            If a fix requires any forbidden method, leave code unchanged.
+
+      - name: Guard tests were not modified (PR to develop only)
+        if: github.event_name == 'pull_request'
+        shell: bash
+        run: |
+          set -euo pipefail
+          if git diff --name-only | grep -E '^(tests/|src/tests/)|(^|/).*\.snap$'; then
+            echo "Codex changed test files/snapshots, which is forbidden."
+            exit 1
+          fi
+
+      - name: Guard forbidden autofix methods (PR to develop only)
+        if: github.event_name == 'pull_request'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if git diff --name-only | grep -E '^(vendor/|\.cargo/)'; then
+            echo "Forbidden: Codex changed vendor/** or .cargo/**"
+            exit 1
+          fi
+
+          if git diff --name-only | grep -E '^CODEX_CI_FIX_REPORT\.md$'; then
+            echo "Forbidden: CODEX_CI_FIX_REPORT.md must not be created in auto-fix"
+            exit 1
+          fi
+
+          cargo_toml_files="$(git diff --name-only | grep -E '(^|/)Cargo\.toml$' || true)"
+          if [ -n "${cargo_toml_files}" ]; then
+            if git diff -U0 -- ${cargo_toml_files} | grep -E '^\+.*(\[patch\.crates-io\]|path\s*=|git\s*=)'; then
+              echo "Forbidden: path/git overrides or [patch.crates-io] were introduced"
+              exit 1
+            fi
+          fi
+
+      - name: Guard unsafe large refactors (PR to develop only)
+        if: github.event_name == 'pull_request'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          changed_count="$(git diff --name-only | wc -l | tr -d ' ')"
+          if [ "${changed_count}" -gt 12 ]; then
+            echo "Forbidden: Codex changed too many files (${changed_count} > 12)."
+            git diff --name-only
+            exit 1
+          fi
+
+          # Auto-fix must not create/delete/rename files (prevents broad refactors).
+          if git diff --name-status | grep -E '^[ADR]'; then
+            echo "Forbidden: Codex created/deleted/renamed files."
+            git diff --name-status
+            exit 1
+          fi
+
+          # Protect critical dependency contracts from being silently dropped.
+          if git diff -U0 -- Cargo.toml | grep -E '^\-\s*greentic-(interfaces-host|interfaces-wasmtime|distributor-client)\s*='; then
+            echo "Forbidden: Codex removed critical greentic dependencies from Cargo.toml."
+            exit 1
+          fi
+
+      - name: Guard allowed paths only (PR to develop only)
+        if: github.event_name == 'pull_request'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          disallowed="$(git diff --name-only | grep -Ev '^(Cargo\.toml|Cargo\.lock|src/)' || true)"
+          if [ -n "${disallowed}" ]; then
+            echo "Forbidden: Codex changed files outside allowlist (Cargo.toml, Cargo.lock, src/**):"
+            echo "${disallowed}"
+            exit 1
+          fi
+
+      - name: Commit and push Codex fixes (PR to develop only)
+        if: github.event_name == 'pull_request' && steps.codex_autofix.outcome == 'success'
+        shell: bash
+        env:
+          BRANCH: ${{ github.event.pull_request.head.ref }}
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          BASE_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          if [ "$HEAD_REPO" != "$BASE_REPO" ]; then
+            echo "Fork PR detected, skipping push."
+            exit 0
+          fi
+          if git diff --quiet; then
+            echo "No Codex changes to commit."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "chore(ci): codex pre-fix for lint/build/test" || echo "No changes to commit"
+          git push origin "HEAD:${BRANCH}"
+
+      - name: Codex-fix summary (PR to develop only)
+        if: github.event_name == 'pull_request'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          {
+            echo "## Codex-fix summary"
+            echo ""
+            echo "- Codex step outcome: \`${{ steps.codex_autofix.outcome }}\`"
+            echo "- Event: \`${{ github.event_name }}\`"
+            echo "- Base branch: \`${{ github.base_ref }}\`"
+            echo "- Head branch: \`${{ github.head_ref }}\`"
+            echo ""
+            echo "### Codex commit details"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if git log -1 --pretty='%s' | grep -q '^chore(ci): codex pre-fix for lint/build/test$'; then
+            {
+              echo "- Last commit: \`$(git rev-parse --short HEAD)\`"
+              echo ""
+              echo "#### Files changed in last Codex commit"
+              echo '```text'
+              git show --name-only --pretty="" HEAD
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            changed="$(git diff --name-only)"
+            {
+              echo "- No new Codex commit detected in this run."
+              echo ""
+              echo "#### Uncommitted changes (if any)"
+              if [ -n "$changed" ]; then
+                echo '```text'
+                echo "$changed"
+                echo '```'
+              else
+                echo "None"
+              fi
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Configure AWS Credentials (build-test)
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Get CodeArtifact Token (build-test)
+        run: |
+          token=$(aws codeartifact get-authorization-token \
+            --domain ${{ secrets.CODEARTIFACT_DOMAIN }} \
+            --domain-owner ${{ secrets.CODEARTIFACT_DOMAIN_OWNER }} \
+            --region ${{ secrets.AWS_REGION }} \
+            --query authorizationToken \
+            --output text)
+          echo "::add-mask::$token"
+          echo "CARGO_REGISTRIES_CORP_ARTIFACTS_GREENTIC_TOKEN=$token" >> $GITHUB_ENV
+
+      - name: Configure CodeArtifact Registry (build-test)
+        run: |
+          mkdir -p .cargo
+          cp ci/cargo-config-dev.toml .cargo/config.toml
+
+      - name: Apply dev patch from CodeArtifact (build-test)
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! grep -q "\[patch.crates-io\]" Cargo.toml; then
+            printf '\n' >> Cargo.toml
+            cat ci/cargo-patch-dev.toml >> Cargo.toml
+          else
+            echo "::warning title=Patch already applied::[patch.crates-io] already present. Skipping."
+          fi
+
+      - name: Force dev dependency graph (Precision Pinning build-test)
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "Pinning versions from ci/cargo-patch-dev.toml using 'cargo update --precise'..."
+          while IFS= read -r line; do
+            name=$(echo "$line" | cut -d' ' -f1)
+            version=$(echo "$line" | sed -nE 's/.*version\s*=\s*"=?([^"]+)".*/\1/p')
+            if [ -n "${name}" ] && [ -n "${version}" ]; then
+              echo "  -> Pinning ${name} to ${version}"
+              cargo update -p "${name}" --precise "${version}" || echo "     (Note: ${name} update failed or already at version)"
+            fi
+          done < <(grep -E '^[a-zA-Z0-9_-]+\s*=' ci/cargo-patch-dev.toml | grep "version")
+          cargo update --workspace
+
+      - name: Lint (fmt)
+        timeout-minutes: 3
+        run: cargo fmt --all -- --check
+
+
+      - name: Lint (clippy)
+        timeout-minutes: 8
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Build
+        timeout-minutes: 8
+        run: cargo build --workspace --all-features
+
+      - name: Test
+        timeout-minutes: 10
+        run: cargo test --workspace --all-features -- --nocapture
 
   publish-dev:
     name: Publish dev crate to CodeArtifact
@@ -73,8 +321,43 @@ jobs:
           mkdir -p .cargo
           cp ci/cargo-config-dev.toml .cargo/config.toml
 
-      - name: Apply ci patch
-        run: printf '\n' >> Cargo.toml && cat ci/cargo-patch-dev.toml >> Cargo.toml
+      - name: Apply dev patch from CodeArtifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "Applying patches from ci/cargo-patch-dev.toml to Cargo.toml..."
+          # Avoid double-patching if the section already exists
+          if ! grep -q "\[patch.crates-io\]" Cargo.toml; then
+            printf '\n' >> Cargo.toml
+            cat ci/cargo-patch-dev.toml >> Cargo.toml
+          else
+            echo "::warning title=Patch already applied::[patch.crates-io] already present in Cargo.toml. Skipping cat."
+          fi
+
+      - name: Force dev dependency graph (Precision Pinning)
+        shell: bash
+        run: |
+          set -euo pipefail
+          
+          # Force Cargo.lock to use EXACT versions from the patch file.
+          # This 'precision' prevents the resolver from fallbacking to stable versions
+          # when dev versions from the private registry are available.
+          echo "Pinning versions from ci/cargo-patch-dev.toml using 'cargo update --precise'..."
+          
+          while IFS= read -r line; do
+            # Extract package name and version string
+            name=$(echo "$line" | cut -d' ' -f1)
+            # Remove leading '=' if present in version string for --precise
+            version=$(echo "$line" | sed -nE 's/.*version\s*=\s*"=?([^"]+)".*/\1/p')
+            
+            if [ -n "${name}" ] && [ -n "${version}" ]; then
+              echo "  -> Pinning ${name} to ${version}"
+              # We hide errors because some crates might be indirect or already updated
+              cargo update -p "${name}" --precise "${version}" || echo "     (Note: ${name} update failed or already at version)"
+            fi
+          done < <(grep -E '^[a-zA-Z0-9_-]+\s*=' ci/cargo-patch-dev.toml | grep "version")
+
+          cargo update --workspace
 
       - name: Setup GitVersion
         uses: gittools/actions/gitversion/setup@v4
@@ -94,6 +377,12 @@ jobs:
           # Update package version safely (first instance)
           sed -i -E "0,/^version = \"[^\"]+\"/s//version = \"${dev_version}\"/" Cargo.toml
 
+      - name: Build with dev dependency graph
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build --workspace --all-features
+
       - name: Publish to CodeArtifact
         run: |
           # Use --allow-dirty because we edited Cargo.toml for patching/versioning
@@ -105,7 +394,7 @@ jobs:
         run: |
           tag="v${{ steps.gitversion.outputs.FullSemVer }}"
           echo "Creating tag ${tag}"
-          
+
           if git rev-parse -q --verify "refs/tags/${tag}" >/dev/null; then
             echo "Tag ${tag} already exists. Skipping."
           else

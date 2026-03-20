@@ -1,9 +1,9 @@
 [patch.crates-io]
 # Internal crates to be patched from AWS CodeArtifact in dev/develop
-greentic-types = { version = "0.4.56-dev.123", registry = "corp-artifacts-greentic" }
-# greentic-interfaces-host = { registry = "corp-artifacts-greentic" }
-# greentic-interfaces-wasmtime = { registry = "corp-artifacts-greentic" }
-# greentic-distributor-client = { registry = "corp-artifacts-greentic" }
-# greentic-qa-lib = { registry = "corp-artifacts-greentic" }
-# greentic-i18n-translator = { registry = "corp-artifacts-greentic" }
-# qa-spec = { registry = "corp-artifacts-greentic" }
+greentic-interfaces-host = { version = "=0.4.109-dev.16", registry = "corp-artifacts-greentic" }
+greentic-interfaces-wasmtime = { version = "=0.4.109-dev.16", registry = "corp-artifacts-greentic" }
+greentic-interfaces-guest = { version = "=0.4.109-dev.16", registry = "corp-artifacts-greentic" }
+greentic-distributor-client = { version = "=0.4.36-dev.20260320073300", registry = "corp-artifacts-greentic" }
+greentic-qa-lib = { version = "=0.4.10-dev.20260320002303", registry = "corp-artifacts-greentic" }
+greentic-i18n-translator = { version = "=0.4.10-dev.15", registry = "corp-artifacts-greentic" }
+greentic-types = { version = "=0.4.56-dev.141", registry = "corp-artifacts-greentic" }
