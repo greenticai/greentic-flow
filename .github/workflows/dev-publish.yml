@@ -271,8 +271,43 @@ jobs:
           mkdir -p .cargo
           cp ci/cargo-config-dev.toml .cargo/config.toml
 
-      - name: Apply ci patch
-        run: printf '\n' >> Cargo.toml && cat ci/cargo-patch-dev.toml >> Cargo.toml
+      - name: Apply dev patch from CodeArtifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "Applying patches from ci/cargo-patch-dev.toml to Cargo.toml..."
+          # Avoid double-patching if the section already exists
+          if ! grep -q "\[patch.crates-io\]" Cargo.toml; then
+            printf '\n' >> Cargo.toml
+            cat ci/cargo-patch-dev.toml >> Cargo.toml
+          else
+            echo "::warning title=Patch already applied::[patch.crates-io] already present in Cargo.toml. Skipping cat."
+          fi
+
+      - name: Force dev dependency graph (Precision Pinning)
+        shell: bash
+        run: |
+          set -euo pipefail
+          
+          # Force Cargo.lock to use EXACT versions from the patch file.
+          # This 'precision' prevents the resolver from fallbacking to stable versions
+          # when dev versions from the private registry are available.
+          echo "Pinning versions from ci/cargo-patch-dev.toml using 'cargo update --precise'..."
+          
+          while IFS= read -r line; do
+            # Extract package name and version string
+            name=$(echo "$line" | cut -d' ' -f1)
+            # Remove leading '=' if present in version string for --precise
+            version=$(echo "$line" | sed -nE 's/.*version\s*=\s*"=?([^"]+)".*/\1/p')
+            
+            if [ -n "${name}" ] && [ -n "${version}" ]; then
+              echo "  -> Pinning ${name} to ${version}"
+              # We hide errors because some crates might be indirect or already updated
+              cargo update -p "${name}" --precise "${version}" || echo "     (Note: ${name} update failed or already at version)"
+            fi
+          done < <(grep -E '^[a-zA-Z0-9_-]+\s*=' ci/cargo-patch-dev.toml | grep "version")
+
+          cargo update --workspace
 
       - name: Setup GitVersion
         uses: gittools/actions/gitversion/setup@v4
@@ -291,6 +326,12 @@ jobs:
           echo "Using dev version: ${dev_version}"
           # Update package version safely (first instance)
           sed -i -E "0,/^version = \"[^\"]+\"/s//version = \"${dev_version}\"/" Cargo.toml
+
+      - name: Build with dev dependency graph
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build --workspace --all-features
 
       - name: Publish to CodeArtifact
         run: |

@@ -88,7 +88,9 @@ pub fn run_interactive(
                     "cli.qa.prompt.enter_number",
                     "Enter number",
                 ),
-                QuestionKind::Text => {
+                QuestionKind::Text
+                | QuestionKind::InlineJson { .. }
+                | QuestionKind::AssetRef { .. } => {
                     resolve_cli_text(catalog, locale, "cli.qa.prompt.enter_text", "Enter text")
                 }
             };
@@ -206,7 +208,9 @@ fn component_spec_to_form(spec: &ComponentQaSpec, catalog: &I18nCatalog, locale:
             .as_ref()
             .map(|text| resolve_text(text, catalog, locale));
         let (kind, choices) = match &question.kind {
-            QuestionKind::Text => (QuestionType::String, None),
+            QuestionKind::Text | QuestionKind::InlineJson { .. } | QuestionKind::AssetRef { .. } => {
+                (QuestionType::String, None)
+            }
             QuestionKind::Number => (QuestionType::Number, None),
             QuestionKind::Bool => (QuestionType::Boolean, None),
             QuestionKind::Choice { options } => {
@@ -256,7 +260,9 @@ fn component_spec_to_form(spec: &ComponentQaSpec, catalog: &I18nCatalog, locale:
 fn parse_answer(kind: &QuestionKind, raw: &str) -> Result<Value> {
     let trimmed = raw.trim();
     match kind {
-        QuestionKind::Text => Ok(Value::String(trimmed.to_string())),
+        QuestionKind::Text | QuestionKind::InlineJson { .. } | QuestionKind::AssetRef { .. } => {
+            Ok(Value::String(trimmed.to_string()))
+        }
         QuestionKind::Number => {
             let number: f64 = trimmed.parse().map_err(|err| FlowError::Internal {
                 message: format!("invalid number: {err}"),

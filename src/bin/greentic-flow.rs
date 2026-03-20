@@ -2452,7 +2452,9 @@ fn component_spec_to_qa_form_json(
     let mut questions = Vec::with_capacity(spec.questions.len());
     for question in &spec.questions {
         let (kind, choices) = match &question.kind {
-            QuestionKind::Text => ("string", None),
+            QuestionKind::Text | QuestionKind::InlineJson { .. } | QuestionKind::AssetRef { .. } => {
+                ("string", None)
+            }
             QuestionKind::Number => ("number", None),
             QuestionKind::Bool => ("boolean", None),
             QuestionKind::Choice { options } => (

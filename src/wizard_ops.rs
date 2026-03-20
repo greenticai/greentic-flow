@@ -854,7 +854,9 @@ pub fn qa_spec_to_questions(
             .and_then(|value| cbor_value_to_json(value).ok());
 
         let (kind, choices) = match &question.kind {
-            QuestionKind::Text => (crate::questions::QuestionKind::String, Vec::new()),
+            QuestionKind::Text | QuestionKind::InlineJson { .. } | QuestionKind::AssetRef { .. } => {
+                (crate::questions::QuestionKind::String, Vec::new())
+            }
             QuestionKind::Number => (crate::questions::QuestionKind::Float, Vec::new()),
             QuestionKind::Bool => (crate::questions::QuestionKind::Bool, Vec::new()),
             QuestionKind::Choice { options } => {
