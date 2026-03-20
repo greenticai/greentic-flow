@@ -91,6 +91,12 @@ pub fn run_interactive(
                 QuestionKind::Text => {
                     resolve_cli_text(catalog, locale, "cli.qa.prompt.enter_text", "Enter text")
                 }
+                QuestionKind::InlineJson { .. } => {
+                    resolve_cli_text(catalog, locale, "cli.qa.prompt.enter_json", "Enter JSON")
+                }
+                QuestionKind::AssetRef { .. } => {
+                    resolve_cli_text(catalog, locale, "cli.qa.prompt.enter_path", "Enter path")
+                }
             };
             let default = question
                 .default
@@ -209,6 +215,8 @@ fn component_spec_to_form(spec: &ComponentQaSpec, catalog: &I18nCatalog, locale:
             QuestionKind::Text => (QuestionType::String, None),
             QuestionKind::Number => (QuestionType::Number, None),
             QuestionKind::Bool => (QuestionType::Boolean, None),
+            QuestionKind::InlineJson { .. } => (QuestionType::String, None),
+            QuestionKind::AssetRef { .. } => (QuestionType::String, None),
             QuestionKind::Choice { options } => {
                 let list = options.iter().map(|opt| opt.value.clone()).collect();
                 (QuestionType::Enum, Some(list))
@@ -274,6 +282,13 @@ fn parse_answer(kind: &QuestionKind, raw: &str) -> Result<Value> {
             let value = matches!(lower.as_str(), "true" | "t" | "yes" | "y" | "1");
             Ok(Value::Bool(value))
         }
+        QuestionKind::InlineJson { .. } => {
+            serde_json::from_str(trimmed).map_err(|err| FlowError::Internal {
+                message: format!("invalid json: {err}"),
+                location: FlowErrorLocation::new(None, None, None),
+            })
+        }
+        QuestionKind::AssetRef { .. } => Ok(Value::String(trimmed.to_string())),
         QuestionKind::Choice { options } => {
             if let Ok(idx) = trimmed.parse::<usize>()
                 && idx > 0

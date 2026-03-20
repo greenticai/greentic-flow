@@ -2463,6 +2463,8 @@ fn component_spec_to_qa_form_json(
             QuestionKind::Text => ("string", None),
             QuestionKind::Number => ("number", None),
             QuestionKind::Bool => ("boolean", None),
+            QuestionKind::InlineJson { .. } => ("string", None),
+            QuestionKind::AssetRef { .. } => ("string", None),
             QuestionKind::Choice { options } => (
                 "enum",
                 Some(
@@ -5357,7 +5359,6 @@ mod tests {
     use super::serialize_doc;
     use greentic_flow::flow_ir::FlowIr;
     use greentic_flow::loader::load_ygtc_from_path;
-    use greentic_flow::wizard_ops::WizardMode;
     use serde_json::Value;
     use serde_json::json;
     use std::env;
@@ -7001,14 +7002,6 @@ nodes:
     }
 
     #[test]
-    fn wizard_mode_upgrade_alias_maps_to_update() {
-        assert_eq!(
-            WizardModeArg::UpgradeDeprecated.to_mode(),
-            WizardMode::Update
-        );
-    }
-
-    #[test]
     fn normalize_wizard_args_strips_double_dash_before_pack() {
         let mut args = vec![
             OsString::from("greentic-flow"),
@@ -7758,22 +7751,6 @@ fn wizard_header(component: &str, mode: &str) -> String {
     format!("== {component} ({mode}) ==")
 }
 
-fn warn_deprecated_wizard_mode(mode: WizardModeArg) -> Option<serde_json::Value> {
-    if matches!(mode, WizardModeArg::UpgradeDeprecated) {
-        eprintln!(
-            "warning: wizard mode 'upgrade' is deprecated; use 'update' (will be removed in a future release)"
-        );
-        return Some(json!({
-            "kind": "deprecation",
-            "field": "mode",
-            "old": "upgrade",
-            "new": "update",
-            "message": "wizard mode 'upgrade' is deprecated; use 'update' (will be removed in a future release)"
-        }));
-    }
-    None
-}
-
 fn print_json_payload_with_optional_diagnostic(
     mut payload: serde_json::Value,
     diagnostic: Option<&serde_json::Value>,
@@ -7928,13 +7905,6 @@ fn ensure_wizard_config_not_error(
     );
 }
 
-fn wizard_mode_legacy_label(mode: wizard_ops::WizardMode) -> Option<&'static str> {
-    match mode {
-        wizard_ops::WizardMode::Update => Some("upgrade"),
-        _ => None,
-    }
-}
-
 fn wizard_answers_json_path(
     base_dir: &Path,
     flow_id: &str,
@@ -7951,15 +7921,7 @@ fn wizard_answers_json_path_compat(
     mode: wizard_ops::WizardMode,
 ) -> Option<PathBuf> {
     let primary = wizard_answers_json_path(base_dir, flow_id, node_id, mode);
-    if primary.exists() {
-        return Some(primary);
-    }
-    let legacy = wizard_mode_legacy_label(mode).map(|label| {
-        answers::answers_paths(base_dir, flow_id, node_id, label)
-            .json
-            .to_path_buf()
-    });
-    legacy.filter(|path| path.exists())
+    primary.exists().then_some(primary)
 }
 
 fn warn_unknown_keys(answers: &QuestionAnswers, questions: &[Question]) {
@@ -8009,8 +7971,6 @@ enum WizardModeArg {
     Default,
     Setup,
     Update,
-    #[value(name = "upgrade", hide = true)]
-    UpgradeDeprecated,
     Remove,
 }
 
@@ -8019,9 +7979,7 @@ impl WizardModeArg {
         match self {
             WizardModeArg::Default => wizard_ops::WizardMode::Default,
             WizardModeArg::Setup => wizard_ops::WizardMode::Setup,
-            WizardModeArg::Update | WizardModeArg::UpgradeDeprecated => {
-                wizard_ops::WizardMode::Update
-            }
+            WizardModeArg::Update => wizard_ops::WizardMode::Update,
             WizardModeArg::Remove => wizard_ops::WizardMode::Remove,
         }
     }
@@ -8330,7 +8288,7 @@ fn handle_add_step_with_qa_io(
         let doc = load_ygtc_from_path(&args.flow_path)?;
         let flow_ir = FlowIr::from_doc(doc)?;
         let wizard_mode_arg = args.wizard_mode.unwrap_or(WizardModeArg::Default);
-        let deprecation_diagnostic = warn_deprecated_wizard_mode(wizard_mode_arg);
+        let deprecation_diagnostic = None;
         let wizard_mode = wizard_mode_arg.to_mode();
         let resolved = resolve_wizard_component(
             &args.flow_path,
@@ -8769,7 +8727,7 @@ fn handle_update_step_with_qa_io(
     if wizard_requested {
         let (sidecar_path, mut sidecar) = ensure_sidecar(&args.flow_path)?;
         let wizard_mode_arg = args.wizard_mode.unwrap_or(WizardModeArg::Update);
-        let deprecation_diagnostic = warn_deprecated_wizard_mode(wizard_mode_arg);
+        let deprecation_diagnostic = None;
         let wizard_mode = wizard_mode_arg.to_mode();
         let resolved = resolve_wizard_component(
             &args.flow_path,
@@ -9136,7 +9094,7 @@ fn handle_delete_step(args: DeleteStepArgs, format: OutputFormat, backup: bool) 
     let mut deprecation_diagnostic: Option<serde_json::Value> = None;
     if wizard_requested {
         let wizard_mode_arg = args.wizard_mode.unwrap_or(WizardModeArg::Remove);
-        deprecation_diagnostic = warn_deprecated_wizard_mode(wizard_mode_arg);
+        deprecation_diagnostic = None;
         let wizard_mode = wizard_mode_arg.to_mode();
         if matches!(wizard_mode, wizard_ops::WizardMode::Remove) {
             confirm_remove_mode(args.interactive)?;
@@ -10148,32 +10106,13 @@ fn resolve_fixture_wizard(
     };
     let root = Path::new(root);
     let mode = wizard_mode.as_str();
-    let legacy_mode = wizard_mode_legacy_label(wizard_mode);
     if let Some(index) = load_fixture_index(root)?
         && let Some(entry) = fixture_entry_for_reference(&index, reference)
     {
         let dir = fixture_component_dir(root, reference, Some(entry));
         let describe_path = dir.join("describe.cbor");
-        let qa_spec_path = {
-            let path = dir.join(format!("qa_{mode}.cbor"));
-            if path.exists() {
-                path
-            } else if let Some(legacy) = legacy_mode {
-                dir.join(format!("qa_{legacy}.cbor"))
-            } else {
-                path
-            }
-        };
-        let apply_path = {
-            let path = dir.join(format!("apply_{mode}_config.cbor"));
-            if path.exists() {
-                path
-            } else if let Some(legacy) = legacy_mode {
-                dir.join(format!("apply_{legacy}_config.cbor"))
-            } else {
-                path
-            }
-        };
+        let qa_spec_path = dir.join(format!("qa_{mode}.cbor"));
+        let apply_path = dir.join(format!("apply_{mode}_config.cbor"));
         if !qa_spec_path.exists() || !apply_path.exists() {
             anyhow::bail!(
                 "fixture wizard missing qa/apply for {} (expected {} and {})",
@@ -10207,24 +10146,13 @@ fn resolve_fixture_wizard(
     let key = fixture_key(reference);
     let mode_path = root.join(format!("{key}.qa-{mode}.cbor"));
     let mode_apply = root.join(format!("{key}.apply-{mode}-config.cbor"));
-    let legacy_mode_path = legacy_mode.map(|legacy| root.join(format!("{key}.qa-{legacy}.cbor")));
-    let legacy_mode_apply =
-        legacy_mode.map(|legacy| root.join(format!("{key}.apply-{legacy}-config.cbor")));
     let qa_spec_path = if mode_path.exists() {
         mode_path
-    } else if let Some(path) = legacy_mode_path
-        && path.exists()
-    {
-        path
     } else {
         root.join(format!("{key}.qa-spec.cbor"))
     };
     let apply_path = if mode_apply.exists() {
         mode_apply
-    } else if let Some(path) = legacy_mode_apply
-        && path.exists()
-    {
-        path
     } else {
         root.join(format!("{key}.apply-answers.cbor"))
     };

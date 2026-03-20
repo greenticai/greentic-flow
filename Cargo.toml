@@ -1,6 +1,6 @@
 [package]
 name = "greentic-flow"
-version = "0.4.54"
+version = "0.4.55"
 edition = "2024"
 rust-version = "1.91"
 license = "MIT"
@@ -34,17 +34,17 @@ pathdiff = "0.2"
 sha2 = "0.10"
 semver = "1"
 greentic-distributor-client = { version = "0.4", default-features = false, features = ["dist-client", "http-runtime"] }
-reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
+reqwest = { version = "0.13", default-features = false, features = ["blocking", "rustls"] }
 url = "2"
-wasmtime = { version = "42", features = ["component-model"] }
-wasmtime-wasi = "42"
+wasmtime = { version = "43", features = ["component-model"] }
+wasmtime-wasi = "43"
 qa-spec = "0.4"
 sys-locale = "0.3"
 unic-langid = "0.9"
 include_dir = "0.7"
 greentic-i18n-translator = { version = "0.4" }
 greentic-qa-lib = "0.4"
-greentic-interfaces-wasmtime = "=0.4.109"
+greentic-interfaces-wasmtime = "0.4"
 
 [dev-dependencies]
 assert_cmd = "2"

@@ -8,7 +8,7 @@ fn env_lock() -> std::sync::MutexGuard<'static, ()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     LOCK.get_or_init(|| Mutex::new(()))
         .lock()
-        .expect("lock locale env mutex")
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 #[test]
@@ -39,7 +39,21 @@ fn resolve_locale_prefers_explicit_then_env_then_system_then_en() {
     unsafe {
         std::env::remove_var("LANG");
     }
-    assert_eq!(resolve_locale(None), "en");
+    let expected = sys_locale::get_locale()
+        .and_then(|raw| {
+            let without_encoding = raw.split('.').next().unwrap_or(raw.as_str());
+            let without_modifier = without_encoding
+                .split('@')
+                .next()
+                .unwrap_or(without_encoding);
+            let normalized = without_modifier.replace('_', "-");
+            normalized
+                .parse::<unic_langid::LanguageIdentifier>()
+                .ok()
+                .map(|lang| lang.to_string())
+        })
+        .unwrap_or_else(|| "en".to_string());
+    assert_eq!(resolve_locale(None), expected);
 }
 
 #[test]

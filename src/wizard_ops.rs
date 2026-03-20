@@ -857,6 +857,8 @@ pub fn qa_spec_to_questions(
             QuestionKind::Text => (crate::questions::QuestionKind::String, Vec::new()),
             QuestionKind::Number => (crate::questions::QuestionKind::Float, Vec::new()),
             QuestionKind::Bool => (crate::questions::QuestionKind::Bool, Vec::new()),
+            QuestionKind::InlineJson { .. } => (crate::questions::QuestionKind::String, Vec::new()),
+            QuestionKind::AssetRef { .. } => (crate::questions::QuestionKind::String, Vec::new()),
             QuestionKind::Choice { options } => {
                 let mut values = Vec::new();
                 for option in options {
