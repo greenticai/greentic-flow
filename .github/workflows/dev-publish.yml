@@ -248,6 +248,21 @@ jobs:
             echo "::warning title=Patch already applied::[patch.crates-io] already present. Skipping."
           fi
 
+      - name: Force dev dependency graph (Precision Pinning build-test)
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "Pinning versions from ci/cargo-patch-dev.toml using 'cargo update --precise'..."
+          while IFS= read -r line; do
+            name=$(echo "$line" | cut -d' ' -f1)
+            version=$(echo "$line" | sed -nE 's/.*version\s*=\s*"=?([^"]+)".*/\1/p')
+            if [ -n "${name}" ] && [ -n "${version}" ]; then
+              echo "  -> Pinning ${name} to ${version}"
+              cargo update -p "${name}" --precise "${version}" || echo "     (Note: ${name} update failed or already at version)"
+            fi
+          done < <(grep -E '^[a-zA-Z0-9_-]+\s*=' ci/cargo-patch-dev.toml | grep "version")
+          cargo update --workspace
+
       - name: Lint (fmt)
         timeout-minutes: 3
         run: cargo fmt --all -- --check
