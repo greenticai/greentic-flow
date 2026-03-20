@@ -2452,9 +2452,6 @@ fn component_spec_to_qa_form_json(
     let mut questions = Vec::with_capacity(spec.questions.len());
     for question in &spec.questions {
         let (kind, choices) = match &question.kind {
-            QuestionKind::Text | QuestionKind::InlineJson { .. } | QuestionKind::AssetRef { .. } => {
-                ("string", None)
-            }
             QuestionKind::Number => ("number", None),
             QuestionKind::Bool => ("boolean", None),
             QuestionKind::Choice { options } => (
@@ -2466,6 +2463,9 @@ fn component_spec_to_qa_form_json(
                         .collect::<Vec<_>>(),
                 ),
             ),
+            _ => {
+                ("string", None)
+            }
         };
         let mut entry = serde_json::Map::new();
         entry.insert(
