@@ -1,16 +1,9 @@
-#[path = "../../../greentic-runner/crates/greentic-runner-host/src/cache/config.rs"]
 pub mod config;
-#[path = "../../../greentic-runner/crates/greentic-runner-host/src/cache/disk.rs"]
 pub mod disk;
-#[path = "../../../greentic-runner/crates/greentic-runner-host/src/cache/engine_profile.rs"]
 pub mod engine_profile;
-#[path = "../../../greentic-runner/crates/greentic-runner-host/src/cache/keys.rs"]
 pub mod keys;
-#[path = "../../../greentic-runner/crates/greentic-runner-host/src/cache/memory.rs"]
 pub mod memory;
-#[path = "../../../greentic-runner/crates/greentic-runner-host/src/cache/metadata.rs"]
 pub mod metadata;
-#[path = "../../../greentic-runner/crates/greentic-runner-host/src/cache/singleflight.rs"]
 pub mod singleflight;
 
 use std::sync::Arc;
