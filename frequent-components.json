@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "catalog_version": "0.4.57",
+  "catalog_version": "0.4.58",
   "components": [
     {
       "id": "templates",
@@ -49,6 +49,22 @@
       "description": "Send an event from a message flow",
       "description_i18n_key": "wizard.frequent_component.message_to_events.description",
       "component_ref": "oci://ghcr.io/greenticai/component/component-msg2events:latest"
+    },
+    {
+      "id": "llm-openai",
+      "name": "LLM OpenAI and compatible",
+      "name_i18n_key": "wizard.frequent_component.llm_openai.name",
+      "description": "Use Openai, Ollama and others",
+      "description_i18n_key": "wizard.frequent_component.llm_openai.description",
+      "component_ref": "oci://ghcr.io/greenticai/component/component-llm-openai:latest"
+    },
+    {
+      "id": "http",
+      "name": "Call a url",
+      "name_i18n_key": "wizard.frequent_component.http.name",
+      "description": "Use http to call a url",
+      "description_i18n_key": "wizard.frequent_component.http.description",
+      "component_ref": "oci://ghcr.io/greenticai/component/component-http:latest"
     }
   ]
 }

@@ -1,11 +1,12 @@
 [package]
 name = "greentic-flow"
-version = "0.4.57"
+version = "0.4.58"
 edition = "2024"
 rust-version = "1.91"
 license = "MIT"
 description = "Generic YGTC flow schema/loader/IR for self-describing component nodes."
 repository = "https://github.com/greenticai/greentic-flow"
+build = "build.rs"
 
 [features]
 default = []
@@ -33,11 +34,14 @@ blake3 = "1"
 pathdiff = "0.2"
 sha2 = "0.10"
 semver = "1"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+dashmap = "6"
 greentic-distributor-client = { version = "0.4", default-features = false, features = ["dist-client", "http-runtime"] }
 reqwest = { version = "0.13", default-features = false, features = ["blocking", "rustls"] }
 url = "2"
 wasmtime = { version = "43", features = ["component-model"] }
 wasmtime-wasi = "43"
+wasmtime-environ = "43"
 qa-spec = "0.4"
 sys-locale = "0.3"
 unic-langid = "0.9"
@@ -52,6 +56,9 @@ predicates = "3"
 pretty_assertions = "1"
 insta = "1"
 tempfile = "3"
+
+[build-dependencies]
+serde_json = "1"
 
 [package.metadata.binstall]
 pkg-url = "{ repo }/releases/download/v{ version }/{ name }-v{ version }-{ target }.tgz"

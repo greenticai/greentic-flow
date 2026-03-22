@@ -126,6 +126,7 @@ jobs:
 
           mkdir -p "${archive_dir}"
           cp "${out_dir}/greentic-flow${bin_suffix}" "${archive_dir}/greentic-flow${bin_suffix}"
+          cp "frequent-components.json" "${archive_dir}/frequent-components.json"
           tar -C dist -czf "${archive}" "greentic-flow-v${version}-${target}"
 
           ARCHIVE="${archive}" python - <<'PY'
@@ -146,6 +147,7 @@ jobs:
           files: |
             ${{ steps.package.outputs.archive }}
             ${{ steps.package.outputs.checksum }}
+            frequent-components.json
           tag_name: ${{ env.RELEASE_TAG }}
           name: ${{ env.RELEASE_TITLE }}
           target_commitish: ${{ github.sha }}

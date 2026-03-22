@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "engine_profile_id": "sha256:1fcc79bc816b1447d8c9eca7409e83b8e413529905dfcedcd1f96bdfda8691a6",
+  "wasmtime_version": "43.0.0",
+  "target_triple": "x86_64-linux",
+  "cpu_policy": "native",
+  "config_fingerprint": "default",
+  "wasm_digest": "sha256:02d899617ca180fb98e1774ece7f39a49fd37bae273fa5721c8e8a1121e6958b",
+  "artifact_bytes": 977112,
+  "created_at": "2026-03-22T10:08:42.306041087+00:00",
+  "last_access_at": "2026-03-22T10:08:42.306041087+00:00",
+  "hit_count": 0
+}

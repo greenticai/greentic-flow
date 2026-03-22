@@ -6,6 +6,7 @@
 
 pub mod add_step;
 pub mod answers;
+pub mod cache;
 pub mod component_catalog;
 pub mod component_schema;
 pub mod component_setup;

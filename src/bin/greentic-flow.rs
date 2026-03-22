@@ -17,8 +17,8 @@ const EMBEDDED_FLOW_SCHEMA: &str = include_str!(concat!(
     "/schemas/ygtc.flow.schema.json"
 ));
 const EMBEDDED_FREQUENT_COMPONENTS_JSON: &str = include_str!(concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/frequent-components.json"
+    env!("OUT_DIR"),
+    "/frequent-components.embedded.json"
 ));
 const EMBEDDED_I18N_DIR: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/i18n");
 const EMBEDDED_WIZARD_I18N_DIR: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/i18n/wizard");
@@ -71,7 +71,7 @@ use greentic_types::flow_resolve::{
     ComponentSourceRefV1, FLOW_RESOLVE_SCHEMA_VERSION, FlowResolveV1, NodeResolveV1, ResolveModeV1,
     read_flow_resolve, sidecar_path_for_flow, write_flow_resolve,
 };
-use greentic_types::schemas::component::v0_6_0::{ComponentQaSpec, QuestionKind};
+use greentic_types::schemas::component::v0_6_0::{ComponentQaSpec, QuestionKind, SkipExpression};
 use indexmap::IndexMap;
 use jsonschema::error::ValidationErrorKind;
 use jsonschema::{Draft, ReferencingError};
@@ -2166,6 +2166,79 @@ fn qa_visible_if_expr(show_if: &serde_json::Value) -> Option<serde_json::Value> 
     }))
 }
 
+fn qa_visible_if_from_skip_if(skip_if: &SkipExpression) -> serde_json::Value {
+    fn answer_expr(field: &str) -> serde_json::Value {
+        serde_json::json!({ "op": "answer", "path": format!("/{field}") })
+    }
+
+    fn literal_expr(value: &ciborium::value::Value) -> serde_json::Value {
+        serde_json::json!({
+            "op": "literal",
+            "value": wizard_ops::cbor_value_to_json(value).unwrap_or(serde_json::Value::Null)
+        })
+    }
+
+    match skip_if {
+        SkipExpression::Condition(condition) => {
+            let mut expressions = Vec::new();
+            if let Some(equals) = &condition.equals {
+                expressions.push(serde_json::json!({
+                    "op": "eq",
+                    "left": answer_expr(&condition.field),
+                    "right": literal_expr(equals)
+                }));
+            }
+            if let Some(not_equals) = &condition.not_equals {
+                expressions.push(serde_json::json!({
+                    "op": "ne",
+                    "left": answer_expr(&condition.field),
+                    "right": literal_expr(not_equals)
+                }));
+            }
+            if condition.is_empty {
+                expressions.push(serde_json::json!({
+                    "op": "not",
+                    "expression": { "op": "is_set", "path": format!("/{}", condition.field) }
+                }));
+            }
+            if condition.is_not_empty {
+                expressions.push(serde_json::json!({
+                    "op": "is_set",
+                    "path": format!("/{}", condition.field)
+                }));
+            }
+            if expressions.len() == 1 {
+                expressions.pop().unwrap_or(serde_json::Value::Bool(true))
+            } else {
+                serde_json::json!({ "op": "and", "expressions": expressions })
+            }
+        }
+        SkipExpression::And(parts) => serde_json::json!({
+            "op": "and",
+            "expressions": parts.iter().map(qa_visible_if_from_skip_if).collect::<Vec<_>>()
+        }),
+        SkipExpression::Or(parts) => serde_json::json!({
+            "op": "or",
+            "expressions": parts.iter().map(qa_visible_if_from_skip_if).collect::<Vec<_>>()
+        }),
+        SkipExpression::Not(inner) => serde_json::json!({
+            "op": "not",
+            "expression": qa_visible_if_from_skip_if(inner)
+        }),
+    }
+}
+
+fn qa_visible_if_from_component_skip_if(
+    skip_if: &Option<SkipExpression>,
+) -> Option<serde_json::Value> {
+    skip_if.as_ref().map(|expr| {
+        serde_json::json!({
+            "op": "not",
+            "expression": qa_visible_if_from_skip_if(expr)
+        })
+    })
+}
+
 fn parse_qa_input_value(question: &serde_json::Value, raw: &str) -> Result<serde_json::Value> {
     let qtype = question
         .get("type")
@@ -2265,6 +2338,80 @@ fn parse_qa_input_value(question: &serde_json::Value, raw: &str) -> Result<serde
     }
 }
 
+fn needs_multiline_json_capture(kind: &QuestionKind, current: &str) -> bool {
+    matches!(kind, QuestionKind::InlineJson { .. })
+        && !current.trim().is_empty()
+        && looks_like_json_block_start(current)
+        && !json_brackets_balanced(current)
+}
+
+fn looks_like_json_block_start(value: &str) -> bool {
+    let trimmed = value.trim_start();
+    trimmed.starts_with('{') || trimmed.starts_with('[')
+}
+
+fn json_brackets_balanced(value: &str) -> bool {
+    let mut depth = 0_i32;
+    let mut in_string = false;
+    let mut escaped = false;
+    for ch in value.chars() {
+        if in_string {
+            if escaped {
+                escaped = false;
+                continue;
+            }
+            match ch {
+                '\\' => escaped = true,
+                '"' => in_string = false,
+                _ => {}
+            }
+            continue;
+        }
+        match ch {
+            '"' => in_string = true,
+            '{' | '[' => depth += 1,
+            '}' | ']' => depth -= 1,
+            _ => {}
+        }
+    }
+    depth <= 0 && !in_string
+}
+
+fn read_component_answer_with_io<R: Read + ?Sized, W: Write + ?Sized>(
+    reader: &mut R,
+    writer: &mut W,
+    prompt: &str,
+    kind: &QuestionKind,
+) -> Result<String> {
+    write!(writer, "{prompt}: ").ok();
+    writer.flush().ok();
+    let mut raw = read_input_line(reader)?;
+    while needs_multiline_json_capture(kind, &raw) {
+        raw.push('\n');
+        raw.push_str(&read_input_line(reader)?);
+    }
+    Ok(raw)
+}
+
+fn read_component_answer_stdin(prompt: &str, kind: &QuestionKind) -> Result<String> {
+    print!("{prompt}: ");
+    io::stdout().flush().context("flush stdout")?;
+    let mut line = String::new();
+    io::stdin()
+        .read_line(&mut line)
+        .context("read interactive answer")?;
+    let mut raw = line.trim_end().to_string();
+    while needs_multiline_json_capture(kind, &raw) {
+        raw.push('\n');
+        line.clear();
+        io::stdin()
+            .read_line(&mut line)
+            .context("read interactive answer")?;
+        raw.push_str(line.trim_end());
+    }
+    Ok(raw)
+}
+
 struct QaInteractiveIo<'a> {
     reader: &'a mut dyn Read,
     writer: &'a mut dyn Write,
@@ -2340,6 +2487,11 @@ fn run_component_qa_with_qa_lib(
                 })
             })
             .ok_or_else(|| anyhow!("{}", wizard_t("wizard.error.qa_runner_failed")))?;
+        let source_question = spec
+            .questions
+            .iter()
+            .find(|candidate| candidate.id == next_question_id)
+            .ok_or_else(|| anyhow!("{}", wizard_t("wizard.error.qa_runner_failed")))?;
 
         let title = question
             .get("title")
@@ -2373,28 +2525,19 @@ fn run_component_qa_with_qa_lib(
             }
         }
 
-        let prompt = match question.get("type").and_then(|v| v.as_str()) {
-            Some("enum") => wizard_t("wizard.qa.prompt.select_option"),
-            Some("boolean") => wizard_t("wizard.qa.prompt.enter_true_false"),
-            Some("number") => wizard_t("wizard.qa.prompt.enter_number"),
-            Some("integer") => wizard_t("wizard.qa.prompt.enter_integer"),
+        let prompt = match &source_question.kind {
+            QuestionKind::Choice { .. } => wizard_t("wizard.qa.prompt.select_option"),
+            QuestionKind::Bool => wizard_t("wizard.qa.prompt.enter_true_false"),
+            QuestionKind::Number => wizard_t("wizard.qa.prompt.enter_number"),
             _ => wizard_t("wizard.qa.prompt.enter_text"),
         };
         let raw_owned = if let Some(io) = qa_io.as_deref_mut() {
-            write!(io.writer, "{prompt}: ").ok();
-            io.writer.flush().ok();
-            read_input_line(io.reader)?
+            read_component_answer_with_io(io.reader, io.writer, &prompt, &source_question.kind)?
         } else {
-            print!("{prompt}: ");
-            io::stdout().flush().context("flush stdout")?;
-            let mut line = String::new();
-            io::stdin()
-                .read_line(&mut line)
-                .context("read interactive answer")?;
-            line.trim().to_string()
+            read_component_answer_stdin(&prompt, &source_question.kind)?
         };
         let raw = raw_owned.as_str();
-        let answer = parse_component_qa_input(question, raw)?;
+        let answer = parse_component_qa_input(&source_question.kind, question, raw)?;
         let patch = serde_json::json!({ next_question_id: answer });
         driver
             .submit_patch_json(&patch.to_string())
@@ -2504,6 +2647,9 @@ fn component_spec_to_qa_form_json(
                 serde_json::Value::Array(choice_values),
             );
         }
+        if let Some(expr) = qa_visible_if_from_component_skip_if(&question.skip_if) {
+            entry.insert("visible_if".to_string(), expr);
+        }
         questions.push(serde_json::Value::Object(entry));
     }
 
@@ -2517,21 +2663,21 @@ fn component_spec_to_qa_form_json(
     serde_json::to_string(&form).context("serialize qa-lib form")
 }
 
-fn parse_component_qa_input(question: &serde_json::Value, raw: &str) -> Result<serde_json::Value> {
+fn parse_component_qa_input(
+    kind: &QuestionKind,
+    question: &serde_json::Value,
+    raw: &str,
+) -> Result<serde_json::Value> {
     let trimmed = raw.trim();
-    match question
-        .get("type")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or("string")
-    {
-        "boolean" => {
+    match kind {
+        QuestionKind::Bool => {
             let lower = trimmed.to_ascii_lowercase();
             Ok(serde_json::Value::Bool(matches!(
                 lower.as_str(),
                 "true" | "t" | "yes" | "y" | "1"
             )))
         }
-        "number" => {
+        QuestionKind::Number => {
             let parsed = trimmed.parse::<f64>().with_context(|| {
                 wizard_t_with("wizard.error.invalid_number", &[("value", trimmed)])
             })?;
@@ -2540,13 +2686,7 @@ fn parse_component_qa_input(question: &serde_json::Value, raw: &str) -> Result<s
             };
             Ok(serde_json::Value::Number(number))
         }
-        "integer" => {
-            let parsed = trimmed.parse::<i64>().with_context(|| {
-                wizard_t_with("wizard.error.invalid_integer", &[("value", trimmed)])
-            })?;
-            Ok(serde_json::Value::Number(parsed.into()))
-        }
-        "enum" => {
+        QuestionKind::Choice { .. } => {
             let choices = question
                 .get("choices")
                 .and_then(serde_json::Value::as_array)
@@ -2579,7 +2719,12 @@ fn parse_component_qa_input(question: &serde_json::Value, raw: &str) -> Result<s
                 )
             );
         }
-        _ => Ok(serde_json::Value::String(trimmed.to_string())),
+        QuestionKind::InlineJson { .. } => {
+            serde_json::from_str(trimmed).with_context(|| format!("invalid json: {trimmed}"))
+        }
+        QuestionKind::AssetRef { .. } | QuestionKind::Text => {
+            Ok(serde_json::Value::String(trimmed.to_string()))
+        }
     }
 }
 
@@ -3483,18 +3628,8 @@ fn wizard_select_setup_mode<R: Read, W: Write>(
 fn frequent_components_latest_url() -> String {
     env::var("GREENTIC_FLOW_FREQUENT_COMPONENTS_LATEST_URL").unwrap_or_else(|_| {
         format!(
-            "{}/releases/latest/download/frequent-components.json",
+            "{}/releases/download/latest/frequent-components.json",
             env!("CARGO_PKG_REPOSITORY")
-        )
-    })
-}
-
-fn frequent_components_versioned_url() -> String {
-    env::var("GREENTIC_FLOW_FREQUENT_COMPONENTS_VERSIONED_URL").unwrap_or_else(|_| {
-        format!(
-            "{}/releases/download/v{}/frequent-components.json",
-            env!("CARGO_PKG_REPOSITORY"),
-            env!("CARGO_PKG_VERSION")
         )
     })
 }
@@ -3607,15 +3742,11 @@ fn load_frequent_components_catalog() -> FrequentComponentsCatalog {
     }
 
     let embedded = embedded_frequent_components_catalog();
-    for location in [
-        frequent_components_latest_url(),
-        frequent_components_versioned_url(),
-    ] {
-        if let Ok(catalog) = load_frequent_components_catalog_from_location(&location)
-            && frequent_component_catalog_is_newer(&catalog, &embedded)
-        {
-            return catalog;
-        }
+    let latest = frequent_components_latest_url();
+    if let Ok(catalog) = load_frequent_components_catalog_from_location(&latest)
+        && frequent_component_catalog_is_newer(&catalog, &embedded)
+    {
+        return catalog;
     }
     embedded
 }
@@ -3958,7 +4089,7 @@ fn wizard_select_step_source<R: Read, W: Write>(
                 &mut *reader,
                 &mut *writer,
             )?;
-            PathBuf::from(answer_str(&local_answers, "step.source.local_path")?)
+            parse_user_supplied_path(answer_str(&local_answers, "step.source.local_path")?)
         } else {
             let mut choices = Vec::new();
             for candidate in &candidates {
@@ -4009,7 +4140,10 @@ fn wizard_select_step_source<R: Read, W: Write>(
                     &mut *reader,
                     &mut *writer,
                 )?;
-                PathBuf::from(answer_str(&local_answers, "step.source.local_custom_path")?)
+                parse_user_supplied_path(answer_str(
+                    &local_answers,
+                    "step.source.local_custom_path",
+                )?)
             } else {
                 let rel = PathBuf::from(selected);
                 if rel.is_absolute() {
@@ -4127,6 +4261,23 @@ fn answer_str<'a>(answers: &'a HashMap<String, serde_json::Value>, key: &str) ->
                 wizard_t_with("wizard.error.missing_required_answer", &[("key", key)])
             )
         })
+}
+
+fn parse_user_supplied_path(value: &str) -> PathBuf {
+    let trimmed = value.trim();
+    let unquoted = if trimmed.len() >= 2 {
+        let bytes = trimmed.as_bytes();
+        let first = bytes[0];
+        let last = bytes[trimmed.len() - 1];
+        if (first == b'"' && last == b'"') || (first == b'\'' && last == b'\'') {
+            &trimmed[1..trimmed.len() - 1]
+        } else {
+            trimmed
+        }
+    } else {
+        trimmed
+    };
+    PathBuf::from(unquoted)
 }
 
 fn flow_id_from_name(name: &str) -> Result<String> {
@@ -5357,8 +5508,14 @@ mod tests {
     use super::parse_answers_map;
     use super::resolve_config_flow;
     use super::serialize_doc;
+    use ciborium::value::Value as CborValue;
     use greentic_flow::flow_ir::FlowIr;
     use greentic_flow::loader::load_ygtc_from_path;
+    use greentic_types::i18n_text::I18nText;
+    use greentic_types::schemas::component::v0_6_0::{
+        ChoiceOption, ComponentQaSpec, QaMode, Question, QuestionKind, SkipCondition,
+        SkipExpression,
+    };
     use serde_json::Value;
     use serde_json::json;
     use std::env;
@@ -6836,6 +6993,255 @@ nodes:
     }
 
     #[test]
+    fn interactive_add_step_overwrites_existing_answers_artifact() {
+        let dir = tempdir().expect("temp dir");
+        let flow_path = dir.path().join("flows/global/messaging/welcome.ygtc");
+        handle_new(
+            NewArgs {
+                flow_path: flow_path.clone(),
+                flow_id: "welcome".to_string(),
+                flow_type: "messaging".to_string(),
+                schema_version: 2,
+                name: None,
+                description: None,
+                force: true,
+            },
+            false,
+        )
+        .expect("seed flow");
+
+        let base_dir = super::answers_base_dir(&flow_path, None);
+        let mut stale = std::collections::BTreeMap::new();
+        stale.insert(
+            "stale".to_string(),
+            serde_json::Value::String("value".to_string()),
+        );
+        super::answers::write_answers(&base_dir, "welcome", "widget", "default", &stale, true)
+            .expect("seed stale answers");
+
+        handle_add_step(
+            AddStepArgs {
+                component_id: None,
+                flow_path: flow_path.clone(),
+                after: None,
+                mode: AddStepMode::Default,
+                pack_alias: None,
+                wizard_mode: Some(WizardModeArg::Default),
+                operation: None,
+                payload: "{}".to_string(),
+                routing_out: true,
+                routing_reply: false,
+                routing_next: None,
+                routing_multi_to: None,
+                routing_json: None,
+                routing_to_anchor: false,
+                config_flow: None,
+                answers: None,
+                answers_file: None,
+                answers_dir: None,
+                overwrite_answers: false,
+                reask: false,
+                locale: None,
+                interactive: true,
+                allow_cycles: false,
+                dry_run: false,
+                write: false,
+                validate_only: false,
+                manifests: Vec::new(),
+                node_id: Some("widget".to_string()),
+                component_ref: Some("oci://acme/widget:1".to_string()),
+                local_wasm: None,
+                distributor_url: None,
+                auth_token: None,
+                tenant: None,
+                env: None,
+                pack: None,
+                component_version: None,
+                abi_version: None,
+                resolver: Some(fixture_registry_resolver()),
+                pin: false,
+                allow_contract_change: false,
+            },
+            SchemaMode::Strict,
+            OutputFormat::Human,
+            false,
+        )
+        .expect("interactive add step");
+    }
+
+    #[test]
+    fn frequent_components_latest_url_uses_release_download_latest_path() {
+        assert_eq!(
+            super::frequent_components_latest_url(),
+            "https://github.com/greenticai/greentic-flow/releases/download/latest/frequent-components.json"
+        );
+    }
+
+    #[test]
+    fn embedded_frequent_components_catalog_uses_current_package_version() {
+        let catalog = super::embedded_frequent_components_catalog();
+        assert_eq!(
+            catalog.catalog_version.as_deref(),
+            Some(env!("CARGO_PKG_VERSION"))
+        );
+    }
+
+    #[test]
+    fn component_spec_to_qa_form_json_converts_skip_if_to_visible_if() {
+        let spec = ComponentQaSpec {
+            mode: QaMode::Default,
+            title: I18nText::new("qa.adaptive_card.title", Some("Adaptive Card".to_string())),
+            description: None,
+            defaults: Default::default(),
+            questions: vec![
+                Question {
+                    id: "card_source".to_string(),
+                    label: I18nText::new("qa.card_source", Some("Card Source".to_string())),
+                    help: None,
+                    error: None,
+                    kind: QuestionKind::Choice {
+                        options: vec![
+                            ChoiceOption {
+                                value: "inline".to_string(),
+                                label: I18nText::new("qa.inline", Some("inline".to_string())),
+                            },
+                            ChoiceOption {
+                                value: "asset".to_string(),
+                                label: I18nText::new("qa.asset", Some("asset".to_string())),
+                            },
+                        ],
+                    },
+                    required: true,
+                    default: None,
+                    skip_if: None,
+                },
+                Question {
+                    id: "default_card_inline".to_string(),
+                    label: I18nText::new(
+                        "qa.default_card_inline",
+                        Some("Default Card Inline".to_string()),
+                    ),
+                    help: None,
+                    error: None,
+                    kind: QuestionKind::InlineJson { schema: None },
+                    required: true,
+                    default: None,
+                    skip_if: Some(SkipExpression::Condition(SkipCondition {
+                        field: "card_source".to_string(),
+                        equals: Some(CborValue::Text("asset".to_string())),
+                        not_equals: None,
+                        is_empty: false,
+                        is_not_empty: false,
+                    })),
+                },
+            ],
+        };
+        let catalog = super::wizard_catalog_for_locale("en");
+        let form_json =
+            super::component_spec_to_qa_form_json(&spec, &catalog, "en").expect("form json");
+        let form: serde_json::Value = serde_json::from_str(&form_json).expect("parse form json");
+        let inline_question = form
+            .get("questions")
+            .and_then(Value::as_array)
+            .and_then(|questions| {
+                questions
+                    .iter()
+                    .find(|q| q.get("id") == Some(&json!("default_card_inline")))
+            })
+            .expect("inline question");
+        assert_eq!(
+            inline_question.get("visible_if"),
+            Some(&json!({
+                "op": "not",
+                "expression": {
+                    "op": "eq",
+                    "left": { "op": "answer", "path": "/card_source" },
+                    "right": { "op": "literal", "value": "asset" }
+                }
+            }))
+        );
+    }
+
+    #[test]
+    fn parse_component_qa_input_parses_inline_json_values() {
+        let parsed = super::parse_component_qa_input(
+            &QuestionKind::InlineJson { schema: None },
+            &json!({ "id": "default_card_inline", "type": "string" }),
+            r#"{"type":"AdaptiveCard","version":"1.6"}"#,
+        )
+        .expect("parse inline json");
+        assert_eq!(
+            parsed,
+            json!({
+                "type": "AdaptiveCard",
+                "version": "1.6"
+            })
+        );
+    }
+
+    #[test]
+    fn read_component_answer_with_io_collects_multiline_inline_json() {
+        let mut input = Cursor::new("{\n  \"type\": \"AdaptiveCard\"\n}\n");
+        let mut output = Vec::new();
+        let raw = super::read_component_answer_with_io(
+            &mut input,
+            &mut output,
+            "Enter text",
+            &QuestionKind::InlineJson { schema: None },
+        )
+        .expect("read multiline answer");
+        assert_eq!(raw, "{\n\"type\": \"AdaptiveCard\"\n}");
+    }
+
+    #[test]
+    fn apply_wizard_answers_handles_inline_json_for_local_adaptive_card() {
+        let wasm_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("workspace parent")
+            .join("component-adaptive-card")
+            .join("dist")
+            .join("component_adaptive_card__0_6_0.wasm");
+        if !wasm_path.exists() {
+            return;
+        }
+
+        let wasm_bytes = fs::read(&wasm_path).expect("read adaptive card wasm");
+        let mut answers = std::collections::HashMap::new();
+        answers.insert("card_source".to_string(), json!("inline"));
+        answers.insert(
+            "default_card_inline".to_string(),
+            json!({
+                "type": "AdaptiveCard",
+                "version": "1.6",
+                "body": [
+                    {
+                        "type": "TextBlock",
+                        "text": "Adaptive Card E2E Fixture"
+                    }
+                ]
+            }),
+        );
+        answers.insert("multilingual".to_string(), json!(false));
+
+        let answers_cbor = super::wizard_ops::answers_to_cbor(&answers).expect("answers cbor");
+        let config_cbor = super::wizard_ops::apply_wizard_answers(
+            &wasm_bytes,
+            super::wizard_ops::WizardAbi::V6,
+            super::wizard_ops::WizardMode::Default,
+            &super::wizard_ops::empty_cbor_map(),
+            &answers_cbor,
+        )
+        .expect("apply wizard answers");
+        let config_json = super::wizard_ops::cbor_to_json(&config_cbor).expect("config json");
+        super::ensure_wizard_config_not_error(
+            "local-adaptive-card",
+            super::wizard_ops::WizardMode::Default,
+            &config_json,
+        )
+        .expect("config should not be an error payload");
+    }
+
+    #[test]
     fn wizard_local_wasm_copy_places_file_under_pack_components() {
         let dir = tempdir().expect("temp dir");
         let external = dir.path().join("external-widget.wasm");
@@ -6847,6 +7253,34 @@ nodes:
         let src = fs::read(&external).expect("read source");
         let dst = fs::read(&copied).expect("read copied");
         assert_eq!(src, dst);
+    }
+
+    #[test]
+    fn parse_user_supplied_path_trims_matching_quotes() {
+        assert_eq!(
+            super::parse_user_supplied_path("'./components/widget.wasm'"),
+            PathBuf::from("./components/widget.wasm")
+        );
+        assert_eq!(
+            super::parse_user_supplied_path("\"/tmp/widget.wasm\""),
+            PathBuf::from("/tmp/widget.wasm")
+        );
+        assert_eq!(
+            super::parse_user_supplied_path("./components/widget.wasm"),
+            PathBuf::from("./components/widget.wasm")
+        );
+    }
+
+    #[test]
+    fn wizard_local_wasm_copy_accepts_quoted_absolute_path() {
+        let dir = tempdir().expect("temp dir");
+        let external = dir.path().join("external-widget.wasm");
+        fs::write(&external, b"\0asm....").expect("write wasm");
+        let parsed = super::parse_user_supplied_path(&format!("'{}'", external.display()));
+        let copied =
+            super::copy_local_wasm_into_pack_components(dir.path(), &parsed).expect("copy wasm");
+        assert!(copied.starts_with(dir.path().join("components")));
+        assert!(copied.exists(), "copied wasm should exist");
     }
 
     #[test]
@@ -8262,6 +8696,10 @@ fn handle_add_step(
     handle_add_step_with_qa_io(args, schema_mode, format, backup, None)
 }
 
+fn should_overwrite_wizard_answers(existing_flag: bool, interactive: bool) -> bool {
+    existing_flag || interactive
+}
+
 fn handle_add_step_with_qa_io(
     args: AddStepArgs,
     schema_mode: SchemaMode,
@@ -8446,7 +8884,7 @@ fn handle_add_step_with_qa_io(
                 &inserted_id,
                 wizard_mode.as_str(),
                 &sorted,
-                args.overwrite_answers,
+                should_overwrite_wizard_answers(args.overwrite_answers, args.interactive),
             )?;
             wizard_state::update_wizard_state(
                 &args.flow_path,
@@ -8855,7 +9293,7 @@ fn handle_update_step_with_qa_io(
                 &step_id,
                 wizard_mode.as_str(),
                 &sorted,
-                args.overwrite_answers,
+                should_overwrite_wizard_answers(args.overwrite_answers, args.interactive),
             )?;
             wizard_state::update_wizard_state(
                 &args.flow_path,
@@ -9186,7 +9624,7 @@ fn handle_delete_step(args: DeleteStepArgs, format: OutputFormat, backup: bool) 
                 &target,
                 wizard_mode.as_str(),
                 &sorted,
-                args.overwrite_answers,
+                should_overwrite_wizard_answers(args.overwrite_answers, args.interactive),
             )?;
             wizard_state::update_wizard_state(
                 &args.flow_path,

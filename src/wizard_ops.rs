@@ -66,6 +66,9 @@ pub struct WizardSpecOutput {
 #[allow(unsafe_code)]
 mod host {
     use super::*;
+    use std::sync::{Arc, OnceLock};
+
+    use crate::cache::{ArtifactKey, CacheConfig, CacheManager, CpuPolicy, EngineProfile};
     use greentic_interfaces_host::component_v0_6::exports::greentic::component::node as canonical_node;
     use greentic_interfaces_wasmtime::host_helpers::v1::state_store::{
         OpAck, StateKey, StateStoreError, StateStoreHost, TenantCtx as StateTenantCtx,
@@ -89,6 +92,12 @@ mod host {
     }
 
     struct NoopStateStore;
+
+    struct WizardRuntimeCache {
+        engine: Engine,
+        component_cache: CacheManager,
+        async_runtime: tokio::runtime::Runtime,
+    }
 
     impl StateStoreHost for NoopStateStore {
         fn read(
@@ -142,6 +151,58 @@ mod host {
         let mut config = Config::new();
         config.wasm_component_model(true);
         Engine::new(&config).map_err(|err| anyhow!("init wasm engine: {err}"))
+    }
+
+    fn wizard_runtime_cache() -> Result<&'static WizardRuntimeCache> {
+        static RUNTIME: OnceLock<Result<WizardRuntimeCache, String>> = OnceLock::new();
+        let runtime =
+            RUNTIME.get_or_init(|| WizardRuntimeCache::new().map_err(|err| format!("{err:#}")));
+        runtime
+            .as_ref()
+            .map_err(|message| anyhow!("init wizard wasm runtime cache: {message}"))
+    }
+
+    impl WizardRuntimeCache {
+        fn new() -> Result<Self> {
+            let engine = build_engine()?;
+            let profile =
+                EngineProfile::from_engine(&engine, CpuPolicy::Native, "default".to_string());
+            let component_cache = CacheManager::new(CacheConfig::default(), profile);
+            let async_runtime = tokio::runtime::Runtime::new()
+                .map_err(|err| anyhow!("init wizard cache async runtime: {err}"))?;
+            Ok(Self {
+                engine,
+                component_cache,
+                async_runtime,
+            })
+        }
+    }
+
+    fn wizard_engine() -> Result<&'static Engine> {
+        Ok(&wizard_runtime_cache()?.engine)
+    }
+
+    fn compute_sha256_digest_for(bytes: &[u8]) -> String {
+        use sha2::Digest as _;
+
+        let mut hasher = sha2::Sha256::new();
+        hasher.update(bytes);
+        format!("sha256:{:x}", hasher.finalize())
+    }
+
+    fn load_component_cached(wasm_bytes: &[u8]) -> Result<Arc<Component>> {
+        let runtime = wizard_runtime_cache()?;
+        let key = ArtifactKey::new(
+            runtime.component_cache.engine_profile_id().to_string(),
+            compute_sha256_digest_for(wasm_bytes),
+        );
+        runtime
+            .async_runtime
+            .block_on(
+                runtime
+                    .component_cache
+                    .get_component(&runtime.engine, &key, || Ok(wasm_bytes.to_vec())),
+            )
     }
 
     fn add_wasi_imports(linker: &mut Linker<HostState>) -> Result<()> {
@@ -414,14 +475,13 @@ mod host {
         current_config: &[u8],
         answers: &[u8],
     ) -> Result<Vec<u8>> {
-        let engine = build_engine()?;
-        let component = Component::from_binary(&engine, wasm_bytes)
-            .map_err(|err| anyhow!("load component: {err}"))?;
-        let mut linker: Linker<HostState> = Linker::new(&engine);
+        let engine = wizard_engine()?;
+        let component = load_component_cached(wasm_bytes)?;
+        let mut linker: Linker<HostState> = Linker::new(engine);
         add_wasi_imports(&mut linker)?;
         add_control_imports(&mut linker)?;
-        let mut store = Store::new(&engine, HostState::new());
-        let api = runtime::RuntimeComponent::instantiate(&mut store, &component, &linker)
+        let mut store = Store::new(engine, HostState::new());
+        let api = runtime::RuntimeComponent::instantiate(&mut store, component.as_ref(), &linker)
             .map_err(|err| anyhow!("instantiate canonical component world: {err}"))?;
         let node = api.greentic_component_node();
 
@@ -475,17 +535,16 @@ mod host {
         wasm_bytes: &[u8],
         add_control: bool,
     ) -> Result<(Store<HostState>, wasmtime::component::Instance)> {
-        let engine = build_engine()?;
-        let component = Component::from_binary(&engine, wasm_bytes)
-            .map_err(|err| anyhow!("load component: {err}"))?;
-        let mut linker: Linker<HostState> = Linker::new(&engine);
+        let engine = wizard_engine()?;
+        let component = load_component_cached(wasm_bytes)?;
+        let mut linker: Linker<HostState> = Linker::new(engine);
         add_wasi_imports(&mut linker)?;
         if add_control {
             add_control_imports(&mut linker)?;
         }
-        let mut store = Store::new(&engine, HostState::new());
+        let mut store = Store::new(engine, HostState::new());
         let instance = linker
-            .instantiate(&mut store, &component)
+            .instantiate(&mut store, component.as_ref())
             .map_err(|err| anyhow!("instantiate component root world: {err}"))?;
         Ok((store, instance))
     }
@@ -651,23 +710,23 @@ mod host {
     }
 
     pub fn fetch_wizard_spec(wasm_bytes: &[u8], _mode: WizardMode) -> Result<WizardSpecOutput> {
-        let engine = build_engine()?;
-        let component = Component::from_binary(&engine, wasm_bytes)
-            .map_err(|err| anyhow!("load component: {err}"))?;
-        let mut linker: Linker<HostState> = Linker::new(&engine);
+        let engine = wizard_engine()?;
+        let component = load_component_cached(wasm_bytes)?;
+        let mut linker: Linker<HostState> = Linker::new(engine);
         add_wasi_imports(&mut linker)?;
         add_control_imports(&mut linker)?;
-        let mut store = Store::new(&engine, HostState::new());
-        let api = match runtime::RuntimeComponent::instantiate(&mut store, &component, &linker) {
-            Ok(api) => api,
-            Err(err) => {
-                let err = anyhow!("instantiate canonical component world: {err}");
-                if is_missing_node_instance_error(&err) {
-                    return fetch_descriptor_spec(wasm_bytes, _mode);
+        let mut store = Store::new(engine, HostState::new());
+        let api =
+            match runtime::RuntimeComponent::instantiate(&mut store, component.as_ref(), &linker) {
+                Ok(api) => api,
+                Err(err) => {
+                    let err = anyhow!("instantiate canonical component world: {err}");
+                    if is_missing_node_instance_error(&err) {
+                        return fetch_descriptor_spec(wasm_bytes, _mode);
+                    }
+                    return Err(err);
                 }
-                return Err(err);
-            }
-        };
+            };
         let node = api.greentic_component_node();
 
         let descriptor = node
@@ -703,14 +762,63 @@ mod host {
         answers: &[u8],
     ) -> Result<Vec<u8>> {
         match invoke_setup_apply(wasm_bytes, mode, current_config, answers) {
+            Ok(config) if setup_apply_result_requires_descriptor_fallback(&config) => {
+                apply_descriptor_answers(wasm_bytes, mode, current_config, answers)
+            }
             Ok(config) => Ok(config),
             Err(err)
-                if is_missing_node_instance_error(&err) || is_missing_setup_apply_error(&err) =>
+                if is_missing_node_instance_error(&err)
+                    || is_missing_setup_apply_error(&err)
+                    || is_setup_apply_descriptor_fallback_error(&err) =>
             {
                 apply_descriptor_answers(wasm_bytes, mode, current_config, answers)
             }
             Err(err) => Err(err),
         }
+    }
+
+    pub(super) fn is_setup_apply_descriptor_fallback_error(err: &anyhow::Error) -> bool {
+        let message = err.to_string().to_ascii_lowercase();
+        message.contains("ac_schema_invalid")
+            || message.contains("failed to decode cbor")
+            || message.contains("decode cbor")
+            || message.contains("invalid type: byte array, expected any valid json value")
+            || (message.contains("byte array") && message.contains("expected any valid json value"))
+    }
+
+    pub(super) fn setup_apply_result_requires_descriptor_fallback(config_cbor: &[u8]) -> bool {
+        let Ok(config_json) = super::cbor_to_json(config_cbor) else {
+            return false;
+        };
+        let Some(error) = config_json.get("error").and_then(|value| value.as_object()) else {
+            return false;
+        };
+
+        let mut combined = String::new();
+        if let Some(code) = error.get("code").and_then(|value| value.as_str()) {
+            combined.push_str(code);
+            combined.push(' ');
+        }
+        if let Some(message) = error.get("message").and_then(|value| value.as_str()) {
+            combined.push_str(message);
+            combined.push(' ');
+        }
+        if let Some(details) = error.get("details").and_then(|value| value.as_str()) {
+            combined.push_str(details);
+        }
+
+        is_setup_apply_descriptor_fallback_error(&anyhow::anyhow!(combined))
+    }
+
+    #[cfg(test)]
+    pub(super) fn wizard_cache_metrics() -> Result<crate::cache::CacheMetricsSnapshot> {
+        Ok(wizard_runtime_cache()?.component_cache.metrics())
+    }
+
+    #[cfg(test)]
+    pub(super) fn load_cached_component_for_tests(wasm_bytes: &[u8]) -> Result<()> {
+        let _ = load_component_cached(wasm_bytes)?;
+        Ok(())
     }
 
     pub fn run_wizard_ops(
@@ -735,6 +843,72 @@ mod host {
 
 #[cfg(not(target_arch = "wasm32"))]
 pub use host::{apply_wizard_answers, fetch_wizard_spec, run_wizard_ops};
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod tests {
+    use std::fs;
+    use std::path::PathBuf;
+
+    fn adaptive_card_wasm_bytes() -> Vec<u8> {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../component-adaptive-card/dist/component_adaptive_card__0_6_0.wasm");
+        fs::read(&path).unwrap_or_else(|err| panic!("read {}: {err}", path.display()))
+    }
+
+    #[test]
+    fn setup_apply_fallback_classifier_matches_json_byte_array_error() {
+        let err = anyhow::anyhow!(
+            "AC_SCHEMA_INVALID: invalid type: byte array, expected any valid JSON value"
+        );
+        assert!(super::host::is_setup_apply_descriptor_fallback_error(&err));
+    }
+
+    #[test]
+    fn setup_apply_fallback_classifier_matches_decode_cbor_error() {
+        let err = anyhow::anyhow!("call invoke: failed to decode cbor payload");
+        assert!(super::host::is_setup_apply_descriptor_fallback_error(&err));
+    }
+
+    #[test]
+    fn setup_apply_fallback_classifier_ignores_unrelated_errors() {
+        let err = anyhow::anyhow!("call invoke: permission denied");
+        assert!(!super::host::is_setup_apply_descriptor_fallback_error(&err));
+    }
+
+    #[test]
+    fn setup_apply_fallback_classifier_matches_error_payload_cbor() {
+        let payload = serde_json::json!({
+            "error": {
+                "code": "AC_SCHEMA_INVALID",
+                "message": "Invalid CBOR invocation",
+                "details": "invalid input: failed to decode cbor: CBOR decode failed: Semantic(None, \"invalid type: byte array, expected any valid JSON value\")"
+            }
+        });
+        let cbor = super::json_to_cbor(&payload).expect("payload cbor");
+        assert!(super::host::setup_apply_result_requires_descriptor_fallback(&cbor));
+    }
+
+    #[test]
+    fn wizard_component_cache_reuses_compiled_artifact() {
+        let wasm_bytes = adaptive_card_wasm_bytes();
+
+        super::host::load_cached_component_for_tests(&wasm_bytes).expect("first cached load");
+        let after_first = super::host::wizard_cache_metrics().expect("first metrics");
+
+        super::host::load_cached_component_for_tests(&wasm_bytes).expect("second cached load");
+        let after_second = super::host::wizard_cache_metrics().expect("second metrics");
+
+        assert_eq!(
+            after_second.compiles, after_first.compiles,
+            "second load should not trigger another compile"
+        );
+        assert!(
+            after_second.memory_hits > after_first.memory_hits
+                || after_second.disk_hits > after_first.disk_hits,
+            "second load should hit memory or disk cache"
+        );
+    }
+}
 
 #[cfg(target_arch = "wasm32")]
 pub fn run_wizard_ops(

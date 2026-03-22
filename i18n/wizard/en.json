@@ -109,5 +109,9 @@
   "wizard.frequent_component.events_to_message.name": "Events to Message",
   "wizard.frequent_component.events_to_message.description": "Send a message from an event flow",
   "wizard.frequent_component.message_to_events.name": "Message to Events",
-  "wizard.frequent_component.message_to_events.description": "Send an event from a message flow"
+  "wizard.frequent_component.message_to_events.description": "Send an event from a message flow",
+  "wizard.frequent_component.llm_openai.name": "LLM OpenAI and compatible",
+  "wizard.frequent_component.llm_openai.description": "Use Openai, Ollama and others",
+  "wizard.frequent_component.http.name": "Call a url",
+  "wizard.frequent_component.http.description": "Use http to call a url"
 }
