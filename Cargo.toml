@@ -16,6 +16,7 @@ include = [
   "/frequent-components.json",
   "/src/**",
   "/i18n/**",
+  "/schemas/**",
   "/fixtures/**",
   "/tests/**",
 ]
