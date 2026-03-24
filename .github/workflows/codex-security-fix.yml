@@ -2,7 +2,7 @@ name: Codex Security Fix
 
 on:
   pull_request:
-    branches: [master]
+    branches: [main]
   workflow_dispatch:
     inputs:
       max_alerts:
