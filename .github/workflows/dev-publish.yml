@@ -1,30 +1,52 @@
-name: Dev Publish crates
+﻿name: Dev Publish crates
 
 on:
   push:
     branches: [ develop ]
-  pull_request: {}
   workflow_dispatch: {}
-
-env:
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
 
 jobs:
   build-test:
     name: CI (lint/test/build)
     runs-on: ubuntu-latest
-    env:
-      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: 1.91.0
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
-
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+      - name: Get CodeArtifact Token
+        run: |
+          token=$(aws codeartifact get-authorization-token --domain ${{ secrets.CODEARTIFACT_DOMAIN }} --domain-owner ${{ secrets.CODEARTIFACT_DOMAIN_OWNER }} --region ${{ secrets.AWS_REGION }} --query authorizationToken --output text)
+          echo "::add-mask::$token"
+          echo "CARGO_REGISTRIES_CORP_ARTIFACTS_GREENTIC_TOKEN=$token" >> $GITHUB_ENV
+      - name: Configure CodeArtifact Registry
+        run: |
+          mkdir -p .cargo
+          cp ci/cargo-config-dev.toml .cargo/config.toml
+      - name: Apply deps-dev overlay
+        shell: bash
+        run: |
+          set -euo pipefail
+          while IFS= read -r line; do
+            [[ -z "${line// }" || "${line}" =~ ^[[:space:]]*# ]] && continue
+            if [[ "$line" =~ ^([a-zA-Z0-9_-]+)[[:space:]]*=[[:space:]]*\"([^\"]+)\"[[:space:]]*$ ]]; then
+              dep="${BASH_REMATCH[1]}"
+              ver="${BASH_REMATCH[2]}"
+              echo "Pinning ${dep} => ${ver}"
+              sed -i -E "s#^${dep}[[:space:]]*=.*#${dep} = { version = \"=${ver}\", registry = \"corp-artifacts-greentic\" }#" Cargo.toml
+              cargo update -p "${dep}" --precise "${ver}" || true
+            fi
+          done < ci/deps-dev.toml
+          cargo update --workspace
       - name: Lint & Test
         run: |
           cargo fmt --all -- --check
@@ -33,84 +55,70 @@ jobs:
           cargo test --workspace --all-features -- --nocapture
 
   publish-dev:
-    name: Publish dev crate to CodeArtifact
-    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
     needs: build-test
     runs-on: ubuntu-latest
-    env:
-      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v4
         with:
           fetch-depth: 0
       - uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: stable
+          toolchain: 1.91.0
       - uses: Swatinem/rust-cache@v2
-
-      - name: Configure AWS Credentials
-        uses: aws-actions/configure-aws-credentials@v6
+      - uses: aws-actions/configure-aws-credentials@v4
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ secrets.AWS_REGION }}
-
       - name: Get CodeArtifact Token
         run: |
-          token=$(aws codeartifact get-authorization-token \
-            --domain ${{ secrets.CODEARTIFACT_DOMAIN }} \
-            --domain-owner ${{ secrets.CODEARTIFACT_DOMAIN_OWNER }} \
-            --region ${{ secrets.AWS_REGION }} \
-            --query authorizationToken \
-            --output text)
+          token=$(aws codeartifact get-authorization-token --domain ${{ secrets.CODEARTIFACT_DOMAIN }} --domain-owner ${{ secrets.CODEARTIFACT_DOMAIN_OWNER }} --region ${{ secrets.AWS_REGION }} --query authorizationToken --output text)
           echo "::add-mask::$token"
           echo "CARGO_REGISTRIES_CORP_ARTIFACTS_GREENTIC_TOKEN=$token" >> $GITHUB_ENV
-
-      - name: Configure CodeArtifact Registry (via template)
+      - name: Configure CodeArtifact Registry
         run: |
           mkdir -p .cargo
           cp ci/cargo-config-dev.toml .cargo/config.toml
-
-      - name: Apply ci patch
-        run: printf '\n' >> Cargo.toml && cat ci/cargo-patch-dev.toml >> Cargo.toml
-
-      - name: Setup GitVersion
-        uses: gittools/actions/gitversion/setup@v4
-        with:
-          versionSpec: "6.x"
-      - name: Determine dev version
-        id: gitversion
-        uses: gittools/actions/gitversion/execute@v4
-        with:
-          configFilePath: GitVersion.yml
-
-      - name: Update package version to dev
+      - name: Apply deps-dev overlay
         shell: bash
         run: |
-          dev_version="${{ steps.gitversion.outputs.MajorMinorPatch }}-${{ steps.gitversion.outputs.PreReleaseTag }}"
-          echo "Using dev version: ${dev_version}"
-          # Update package version safely (first instance)
-          sed -i -E "0,/^version = \"[^\"]+\"/s//version = \"${dev_version}\"/" Cargo.toml
-
+          set -euo pipefail
+          while IFS= read -r line; do
+            [[ -z "${line// }" || "${line}" =~ ^[[:space:]]*# ]] && continue
+            if [[ "$line" =~ ^([a-zA-Z0-9_-]+)[[:space:]]*=[[:space:]]*\"([^\"]+)\"[[:space:]]*$ ]]; then
+              dep="${BASH_REMATCH[1]}"
+              ver="${BASH_REMATCH[2]}"
+              echo "Pinning ${dep} => ${ver}"
+              sed -i -E "s#^${dep}[[:space:]]*=.*#${dep} = { version = \"=${ver}\", registry = \"corp-artifacts-greentic\" }#" Cargo.toml
+              cargo update -p "${dep}" --precise "${ver}" || true
+            fi
+          done < ci/deps-dev.toml
+          cargo update --workspace
+      - name: Setup GitVersion
+        uses: gittools/actions/gitversion/setup@v1
+        with:
+          versionSpec: "5.x"
+      - name: Compute version
+        id: gitversion
+        uses: gittools/actions/gitversion/execute@v1
+        with:
+          useConfigFile: true
+          configFilePath: GitVersion.yml
+      - name: Set crate dev version
+        run: |
+          VERSION="${{ steps.gitversion.outputs.MajorMinorPatch }}-dev.${{ github.run_number }}"
+          sed -i -E "0,/^version\s*=\s*\"[^\"]+\"/s//version = \"$VERSION\"/" Cargo.toml
       - name: Publish to CodeArtifact
-        run: |
-          # Use --allow-dirty because we edited Cargo.toml for patching/versioning
-          cargo publish --registry corp-artifacts-greentic --allow-dirty
-
-      - name: Create Tag
+        run: cargo publish --registry corp-artifacts-greentic --allow-dirty
+      - name: Create git tag only after successful publish
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          tag="v${{ steps.gitversion.outputs.FullSemVer }}"
-          echo "Creating tag ${tag}"
-          
-          if git rev-parse -q --verify "refs/tags/${tag}" >/dev/null; then
-            echo "Tag ${tag} already exists. Skipping."
+          TAG="${{ steps.gitversion.outputs.MajorMinorPatch }}-dev.${{ github.run_number }}"
+          if gh api "repos/${{ github.repository }}/git/ref/tags/$TAG" >/dev/null 2>&1; then
+            echo "Tag $TAG already exists"
           else
-            git config user.name "github-actions[bot]"
-            git config user.email "github-actions[bot]@users.noreply.github.com"
-            git tag "${tag}"
-            git push origin "${tag}"
+            gh api "repos/${{ github.repository }}/git/refs" -X POST -f ref="refs/tags/$TAG" -f sha="${GITHUB_SHA}"
           fi
