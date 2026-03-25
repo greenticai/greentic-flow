@@ -40,7 +40,7 @@
     {
       "matchBaseBranches": ["release"],
       "matchFileNames": ["Cargo.toml"],
-      "allowedVersions": "/^(?!.*-dev\\.).*$/",
+      "ignoreUnstable": true,
       "additionalBranchPrefix": "release-"
     },
     {
