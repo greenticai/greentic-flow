@@ -1,0 +1,7 @@
+{
+  "auth_token": "",
+  "auth_type": "bearer",
+  "base_url": "",
+  "default_headers": "",
+  "timeout_ms": 30000
+}

@@ -1,0 +1,5 @@
+{
+  "card_source": "inline",
+  "default_card_inline": "{\"type\":\"AdaptiveCard\",\"version\":\"1.5\",\"body\":[{\"type\":\"TextBlock\",\"text\":\"Hello\"}]}",
+  "multilingual": false
+}
