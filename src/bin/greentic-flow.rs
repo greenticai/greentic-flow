@@ -1058,7 +1058,10 @@ fn run_wizard_menu_with_config<R: Read, W: Write>(
                     "{}",
                     wizard_t_with(
                         "wizard.error.answers_file_load_failed",
-                        &[("path", &resolved.display().to_string()), ("message", &err.to_string())]
+                        &[
+                            ("path", &resolved.display().to_string()),
+                            ("message", &err.to_string())
+                        ]
                     )
                 )
                 .ok();
@@ -2497,7 +2500,10 @@ fn run_component_qa_with_qa_lib(
                 .join("; ");
             anyhow::bail!(
                 "{}",
-                wizard_t_with("wizard.error.answers_validation_failed", &[("details", &details)])
+                wizard_t_with(
+                    "wizard.error.answers_validation_failed",
+                    &[("details", &details)]
+                )
             );
         }
         return Ok(answers);
@@ -2839,10 +2845,8 @@ fn parse_component_qa_input(
                 )
             );
         }
-        QuestionKind::InlineJson { .. } => {
-            serde_json::from_str(trimmed)
-                .with_context(|| wizard_t_with("wizard.error.invalid_json", &[("value", trimmed)]))
-        }
+        QuestionKind::InlineJson { .. } => serde_json::from_str(trimmed)
+            .with_context(|| wizard_t_with("wizard.error.invalid_json", &[("value", trimmed)])),
         QuestionKind::AssetRef { .. } | QuestionKind::Text => {
             Ok(serde_json::Value::String(trimmed.to_string()))
         }
@@ -5614,6 +5618,7 @@ fn write_stdout_line(line: &str) -> Result<()> {
 mod tests {
     use super::AddStepArgs;
     use super::AddStepMode;
+    use super::Cli;
     use super::DeleteStepArgs;
     use super::NewArgs;
     use super::OutputFormat;
@@ -5630,6 +5635,7 @@ mod tests {
     use super::resolve_config_flow;
     use super::serialize_doc;
     use ciborium::value::Value as CborValue;
+    use clap::CommandFactory;
     use greentic_flow::flow_ir::FlowIr;
     use greentic_flow::loader::load_ygtc_from_path;
     use greentic_types::i18n_text::I18nText;
@@ -5639,6 +5645,7 @@ mod tests {
     };
     use serde_json::Value;
     use serde_json::json;
+    use std::collections::BTreeMap;
     use std::env;
     use std::ffi::OsString;
     use std::fs;
@@ -5660,6 +5667,45 @@ mod tests {
         LOCK.get_or_init(|| Mutex::new(()))
             .lock()
             .expect("env test lock")
+    }
+
+    #[test]
+    fn help_i18n_entries_exist_in_en_and_es() {
+        let mut help_entries = BTreeMap::new();
+        super::collect_help_i18n_entries(&Cli::command(), &[], &mut help_entries);
+
+        let en: BTreeMap<String, String> = serde_json::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/i18n/en.json"
+        )))
+        .expect("parse en.json");
+        let es: BTreeMap<String, String> = serde_json::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/i18n/es.json"
+        )))
+        .expect("parse es.json");
+
+        let missing_en = help_entries
+            .keys()
+            .filter(|key| !en.contains_key(*key))
+            .cloned()
+            .collect::<Vec<_>>();
+        let missing_es = help_entries
+            .keys()
+            .filter(|key| !es.contains_key(*key))
+            .cloned()
+            .collect::<Vec<_>>();
+
+        assert!(
+            missing_en.is_empty(),
+            "missing English help i18n keys: {:?}",
+            missing_en
+        );
+        assert!(
+            missing_es.is_empty(),
+            "missing Spanish help i18n keys: {:?}",
+            missing_es
+        );
     }
 
     fn sample_number_qa_spec() -> ComponentQaSpec {
@@ -5694,7 +5740,8 @@ mod tests {
     #[test]
     fn wizard_menu_continues_when_answers_file_cannot_be_loaded() {
         let dir = tempdir().expect("temp dir");
-        fs::write(dir.path().join("broken.answers.json"), "{not-json").expect("write broken answers");
+        fs::write(dir.path().join("broken.answers.json"), "{not-json")
+            .expect("write broken answers");
         let mut output = Vec::new();
         super::run_wizard_menu_with_config(
             dir.path(),
@@ -5721,15 +5768,8 @@ mod tests {
         fs::write(file.path(), r#"{"count":"oops"}"#).expect("write answers");
 
         let answers = parse_answers_map(None, Some(file.path())).expect("parse answers");
-        let err = super::run_component_qa_with_qa_lib(
-            &spec,
-            &catalog,
-            "en",
-            answers,
-            false,
-            None,
-        )
-        .expect_err("invalid answers should fail");
+        let err = super::run_component_qa_with_qa_lib(&spec, &catalog, "en", answers, false, None)
+            .expect_err("invalid answers should fail");
 
         assert!(err.to_string().to_lowercase().contains("validation"));
     }
@@ -5742,15 +5782,8 @@ mod tests {
         fs::write(file.path(), "{}").expect("write answers");
 
         let answers = parse_answers_map(None, Some(file.path())).expect("parse answers");
-        let err = super::run_component_qa_with_qa_lib(
-            &spec,
-            &catalog,
-            "en",
-            answers,
-            false,
-            None,
-        )
-        .expect_err("missing answers should fail");
+        let err = super::run_component_qa_with_qa_lib(&spec, &catalog, "en", answers, false, None)
+            .expect_err("missing answers should fail");
 
         assert!(err.to_string().to_lowercase().contains("missing required"));
         assert!(err.to_string().contains("--answers-file"));
@@ -10132,9 +10165,9 @@ fn parse_answers_map(
         let parsed: serde_json::Value = serde_yaml_bw::from_str(text)
             .or_else(|_| serde_json::from_str(text))
             .context(wizard_t("wizard.error.answers_inline_parse_failed"))?;
-        let obj = parsed
-            .as_object()
-            .ok_or_else(|| anyhow::anyhow!("{}", wizard_t("wizard.error.answers_inline_invalid_object")))?;
+        let obj = parsed.as_object().ok_or_else(|| {
+            anyhow::anyhow!("{}", wizard_t("wizard.error.answers_inline_invalid_object"))
+        })?;
         merged.extend(obj.clone());
     }
     Ok(merged)

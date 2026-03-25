@@ -70,9 +70,23 @@ mod host {
 
     use crate::cache::{ArtifactKey, CacheConfig, CacheManager, CpuPolicy, EngineProfile};
     use greentic_interfaces_host::component_v0_6::exports::greentic::component::node as canonical_node;
-    use greentic_interfaces_wasmtime::host_helpers::v1::state_store::{
-        OpAck, StateKey, StateStoreError, StateStoreHost, TenantCtx as StateTenantCtx,
-        add_state_store_to_linker,
+    use greentic_interfaces_wasmtime::host_helpers::v1::{
+        self, HostFns,
+        http_client::{
+            HttpClientErrorV1_1, HttpClientHostV1_1, RequestOptionsV1_1, RequestV1_1, ResponseV1_1,
+            TenantCtxV1_1,
+        },
+        oauth_broker::OAuthBrokerHost,
+        runner_host_http::RunnerHostHttp,
+        runner_host_kv::RunnerHostKv,
+        secrets_store::{SecretsErrorV1_1, SecretsStoreHostV1_1},
+        state_store::{
+            OpAck, StateKey, StateStoreError, StateStoreHost, TenantCtx as StateTenantCtx,
+        },
+        telemetry_logger::{
+            OpAck as TelemetryOpAck, SpanContext, TelemetryLoggerError, TelemetryLoggerHost,
+            TenantCtx,
+        },
     };
     use wasmtime::component::{Component, Linker};
     use wasmtime::component::{ResourceTable, Val};
@@ -88,10 +102,22 @@ mod host {
     struct HostState {
         wasi: WasiCtx,
         table: ResourceTable,
+        http_client: OfflineHttpClient,
+        oauth_broker: OfflineOAuthBroker,
+        runner_http: OfflineRunnerHostHttp,
+        runner_kv: OfflineRunnerHostKv,
+        telemetry_logger: NoopTelemetryLogger,
         state_store: NoopStateStore,
+        secrets_store: NoopSecretsStore,
     }
 
     struct NoopStateStore;
+    struct NoopTelemetryLogger;
+    struct NoopSecretsStore;
+    struct OfflineHttpClient;
+    struct OfflineOAuthBroker;
+    struct OfflineRunnerHostHttp;
+    struct OfflineRunnerHostKv;
 
     struct WizardRuntimeCache {
         engine: Engine,
@@ -126,6 +152,117 @@ mod host {
         }
     }
 
+    impl TelemetryLoggerHost for NoopTelemetryLogger {
+        fn log(
+            &mut self,
+            _span: SpanContext,
+            _fields: wasmtime::component::__internal::Vec<(
+                wasmtime::component::__internal::String,
+                wasmtime::component::__internal::String,
+            )>,
+            _ctx: Option<TenantCtx>,
+        ) -> std::result::Result<TelemetryOpAck, TelemetryLoggerError> {
+            Ok(TelemetryOpAck::Ok)
+        }
+    }
+
+    impl SecretsStoreHostV1_1 for NoopSecretsStore {
+        fn get(
+            &mut self,
+            _key: wasmtime::component::__internal::String,
+        ) -> std::result::Result<Option<wasmtime::component::__internal::Vec<u8>>, SecretsErrorV1_1>
+        {
+            Ok(None)
+        }
+
+        fn put(
+            &mut self,
+            _key: wasmtime::component::__internal::String,
+            _value: wasmtime::component::__internal::Vec<u8>,
+        ) {
+        }
+    }
+
+    impl HttpClientHostV1_1 for OfflineHttpClient {
+        fn send(
+            &mut self,
+            _req: RequestV1_1,
+            _opts: Option<RequestOptionsV1_1>,
+            _ctx: Option<TenantCtxV1_1>,
+        ) -> std::result::Result<ResponseV1_1, HttpClientErrorV1_1> {
+            Ok(ResponseV1_1 {
+                status: 204,
+                headers: Vec::new(),
+                body: None,
+            })
+        }
+    }
+
+    impl OAuthBrokerHost for OfflineOAuthBroker {
+        fn get_consent_url(
+            &mut self,
+            _provider_id: wasmtime::component::__internal::String,
+            _subject: wasmtime::component::__internal::String,
+            _scopes: wasmtime::component::__internal::Vec<wasmtime::component::__internal::String>,
+            _redirect_path: wasmtime::component::__internal::String,
+            _extra_json: wasmtime::component::__internal::String,
+        ) -> wasmtime::component::__internal::String {
+            "offline://oauth-disabled".into()
+        }
+
+        fn exchange_code(
+            &mut self,
+            _provider_id: wasmtime::component::__internal::String,
+            _subject: wasmtime::component::__internal::String,
+            _code: wasmtime::component::__internal::String,
+            _redirect_path: wasmtime::component::__internal::String,
+        ) -> wasmtime::component::__internal::String {
+            String::new()
+        }
+
+        fn get_token(
+            &mut self,
+            _provider_id: wasmtime::component::__internal::String,
+            _subject: wasmtime::component::__internal::String,
+            _scopes: wasmtime::component::__internal::Vec<wasmtime::component::__internal::String>,
+        ) -> wasmtime::component::__internal::String {
+            String::new()
+        }
+    }
+
+    impl RunnerHostHttp for OfflineRunnerHostHttp {
+        fn request(
+            &mut self,
+            _method: wasmtime::component::__internal::String,
+            _url: wasmtime::component::__internal::String,
+            _headers: wasmtime::component::__internal::Vec<wasmtime::component::__internal::String>,
+            _body: Option<wasmtime::component::__internal::Vec<u8>>,
+        ) -> std::result::Result<
+            wasmtime::component::__internal::Vec<u8>,
+            wasmtime::component::__internal::String,
+        > {
+            Ok(Vec::new())
+        }
+    }
+
+    impl RunnerHostKv for OfflineRunnerHostKv {
+        fn get(
+            &mut self,
+            _ns: wasmtime::component::__internal::String,
+            _key: wasmtime::component::__internal::String,
+        ) -> Option<wasmtime::component::__internal::String> {
+            None
+        }
+
+        fn put(
+            &mut self,
+            _ns: wasmtime::component::__internal::String,
+            _key: wasmtime::component::__internal::String,
+            _val: wasmtime::component::__internal::String,
+        ) {
+        }
+    }
+
     impl HostState {
         fn new() -> Self {
             Self {
@@ -133,7 +270,13 @@ mod host {
                 // expected by components that read CLI env/args.
                 wasi: WasiCtxBuilder::new().build(),
                 table: ResourceTable::new(),
+                http_client: OfflineHttpClient,
+                oauth_broker: OfflineOAuthBroker,
+                runner_http: OfflineRunnerHostHttp,
+                runner_kv: OfflineRunnerHostKv,
+                telemetry_logger: NoopTelemetryLogger,
                 state_store: NoopStateStore,
+                secrets_store: NoopSecretsStore,
             }
         }
     }
@@ -208,8 +351,21 @@ mod host {
     fn add_wasi_imports(linker: &mut Linker<HostState>) -> Result<()> {
         wasmtime_wasi::p2::add_to_linker_sync(linker)
             .map_err(|err| anyhow!("link wasi imports: {err}"))?;
-        add_state_store_to_linker(linker, |state: &mut HostState| &mut state.state_store)
-            .map_err(|err| anyhow!("link state store imports: {err}"))?;
+        v1::add_all_v1_to_linker(
+            linker,
+            HostFns {
+                http_client_v1_1: Some(|state: &mut HostState| &mut state.http_client),
+                http_client: None,
+                oauth_broker: Some(|state: &mut HostState| &mut state.oauth_broker),
+                runner_host_http: Some(|state: &mut HostState| &mut state.runner_http),
+                runner_host_kv: Some(|state: &mut HostState| &mut state.runner_kv),
+                telemetry_logger: Some(|state: &mut HostState| &mut state.telemetry_logger),
+                state_store: Some(|state: &mut HostState| &mut state.state_store),
+                secrets_store_v1_1: Some(|state: &mut HostState| &mut state.secrets_store),
+                secrets_store: None,
+            },
+        )
+        .map_err(|err| anyhow!("link Greentic v1 host imports: {err}"))?;
         add_wasi_cli_environment_0_2_3_compat(linker)?;
         Ok(())
     }
@@ -849,6 +1005,9 @@ mod tests {
     use std::fs;
     use std::path::PathBuf;
 
+    use greentic_distributor_client::{CachePolicy, DistClient, ResolvePolicy};
+    use serde::Deserialize;
+
     fn adaptive_card_wasm_bytes() -> Option<Vec<u8>> {
         let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../component-adaptive-card/dist/component_adaptive_card__0_6_0.wasm");
@@ -856,6 +1015,47 @@ mod tests {
             return None;
         }
         Some(fs::read(&path).unwrap_or_else(|err| panic!("read {}: {err}", path.display())))
+    }
+
+    #[derive(Deserialize)]
+    struct FrequentComponentEntry {
+        id: String,
+        component_ref: String,
+    }
+
+    #[derive(Deserialize)]
+    struct FrequentComponentsCatalog {
+        components: Vec<FrequentComponentEntry>,
+    }
+
+    fn frequent_component_ref(id: &str) -> Option<String> {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("frequent-components.json");
+        let raw = fs::read_to_string(&path).ok()?;
+        let catalog: FrequentComponentsCatalog = serde_json::from_str(&raw).ok()?;
+        catalog
+            .components
+            .into_iter()
+            .find(|entry| entry.id == id)
+            .map(|entry| entry.component_ref)
+    }
+
+    fn frequent_component_wasm_bytes(id: &str) -> Option<Vec<u8>> {
+        let reference = frequent_component_ref(id)?;
+        let runtime = tokio::runtime::Runtime::new().ok()?;
+        let client = DistClient::new(Default::default());
+        let source = client.parse_source(&reference).ok()?;
+        let descriptor = runtime
+            .block_on(client.resolve(source, ResolvePolicy))
+            .ok()?;
+        let resolved = runtime
+            .block_on(client.fetch(&descriptor, CachePolicy))
+            .ok()?;
+        let cache_path = resolved.cache_path?;
+        let bytes = fs::read(&cache_path).ok()?;
+        if bytes.is_empty() {
+            return None;
+        }
+        Some(bytes)
     }
 
     #[test]
@@ -911,6 +1111,44 @@ mod tests {
             after_second.memory_hits > after_first.memory_hits
                 || after_second.disk_hits > after_first.disk_hits,
             "second load should hit memory or disk cache"
+        );
+    }
+
+    #[test]
+    fn frequent_http_component_no_longer_fails_with_missing_http_linker_import() {
+        let Some(wasm_bytes) = frequent_component_wasm_bytes("http") else {
+            return;
+        };
+
+        let message = match super::host::fetch_wizard_spec(&wasm_bytes, super::WizardMode::Default)
+        {
+            Ok(_) => return,
+            Err(err) => format!("{err:#}"),
+        };
+        assert!(
+            !message.contains("matching implementation was not found in the linker"),
+            "expected greentic-flow host linker fix to be active, got: {message}"
+        );
+        assert!(
+            !message.contains("greentic:http/http-client@1.1.0"),
+            "expected http client host import to be linked, got: {message}"
+        );
+    }
+
+    #[test]
+    fn frequent_llm_component_no_longer_fails_with_missing_linker_implementations() {
+        let Some(wasm_bytes) = frequent_component_wasm_bytes("llm-openai") else {
+            return;
+        };
+
+        let message = match super::host::fetch_wizard_spec(&wasm_bytes, super::WizardMode::Default)
+        {
+            Ok(_) => return,
+            Err(err) => format!("{err:#}"),
+        };
+        assert!(
+            !message.contains("matching implementation was not found in the linker"),
+            "expected greentic-flow host linker fix to be active, got: {message}"
         );
     }
 }

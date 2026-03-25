@@ -1,0 +1,4 @@
+{
+  "default_event_type": "message.text",
+  "default_flow": ""
+}
