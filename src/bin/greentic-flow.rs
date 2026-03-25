@@ -1050,7 +1050,21 @@ fn run_wizard_menu_with_config<R: Read, W: Write>(
         } else {
             pack_dir.join(path)
         };
-        load_wizard_answers_file(&resolved)?
+        match load_wizard_answers_file(&resolved) {
+            Ok(data) => data,
+            Err(err) => {
+                writeln!(
+                    writer,
+                    "{}",
+                    wizard_t_with(
+                        "wizard.error.answers_file_load_failed",
+                        &[("path", &resolved.display().to_string()), ("message", &err.to_string())]
+                    )
+                )
+                .ok();
+                WizardReplayData::default()
+            }
+        }
     } else {
         WizardReplayData::default()
     };
@@ -2026,6 +2040,20 @@ fn run_questions_with_qa_lib_io<R: Read, W: Write>(
     let locale = resolve_locale(None);
     let qa_i18n = wizard_qa_i18n_config_for_locale(&locale);
     let spec = qa_form_from_questions(questions)?;
+    let form: qa_spec::FormSpec = serde_json::from_value(spec.clone()).context("parse qa form")?;
+    let mut seed = seed;
+    let ignored_keys = sanitize_prefilled_answers(&form, &mut seed);
+    if !ignored_keys.is_empty() {
+        writeln!(
+            writer,
+            "{}",
+            wizard_t_with(
+                "wizard.error.answers_prefill_ignored",
+                &[("keys", &ignored_keys.join(", "))]
+            )
+        )
+        .ok();
+    }
     let mut driver = WizardDriver::new(QaWizardRunConfig {
         spec_json: spec.to_string(),
         initial_answers_json: Some(serde_json::Value::Object(map_from_answers(&seed)).to_string()),
@@ -2060,15 +2088,34 @@ fn run_questions_with_qa_lib_io<R: Read, W: Write>(
             .get("title")
             .and_then(|v| v.as_str())
             .unwrap_or(question_id);
-        writeln!(writer, "{title}").ok();
-        write!(writer, "> ").ok();
-        writer.flush().ok();
-        let line = read_input_line(reader)?;
-        let answer = parse_qa_input_value(question, &line)?;
-        let patch = serde_json::json!({ question_id: answer });
-        driver
-            .submit_patch_json(&patch.to_string())
-            .map_err(|err| anyhow!("{}: {err}", wizard_t("wizard.error.qa_runner_failed")))?;
+        loop {
+            writeln!(writer, "{title}").ok();
+            write!(writer, "> ").ok();
+            writer.flush().ok();
+            let line = read_input_line(reader)?;
+            let answer = match parse_qa_input_value(question, &line) {
+                Ok(answer) => answer,
+                Err(err) => {
+                    writeln!(writer, "{err}").ok();
+                    continue;
+                }
+            };
+            let patch = serde_json::json!({ question_id: answer });
+            match driver.submit_patch_json(&patch.to_string()) {
+                Ok(_) => break,
+                Err(err) => {
+                    writeln!(
+                        writer,
+                        "{}",
+                        wizard_t_with(
+                            "wizard.error.answer_validation_failed",
+                            &[("message", &err.to_string())]
+                        )
+                    )
+                    .ok();
+                }
+            }
+        }
     }
 
     let result = driver
@@ -2426,8 +2473,8 @@ fn run_component_qa_with_qa_lib(
     mut qa_io: Option<&mut QaInteractiveIo<'_>>,
 ) -> Result<HashMap<String, serde_json::Value>> {
     let form_json = component_spec_to_qa_form_json(spec, catalog, locale)?;
+    let form: qa_spec::FormSpec = serde_json::from_str(&form_json).context("parse qa form")?;
     if !interactive {
-        let form: qa_spec::FormSpec = serde_json::from_str(&form_json).context("parse qa form")?;
         let result = qa_spec::validate(
             &form,
             &serde_json::Value::Object(map_from_answers(&answers)),
@@ -2435,8 +2482,11 @@ fn run_component_qa_with_qa_lib(
         if !result.valid {
             if !result.missing_required.is_empty() {
                 anyhow::bail!(
-                    "missing required answers: {} (provide --answers/--answers-file)",
-                    result.missing_required.join(", ")
+                    "{}",
+                    wizard_t_with(
+                        "wizard.error.answers_missing_required",
+                        &[("keys", &result.missing_required.join(", "))]
+                    )
                 );
             }
             let details = result
@@ -2445,9 +2495,25 @@ fn run_component_qa_with_qa_lib(
                 .map(|err| err.message.as_str())
                 .collect::<Vec<_>>()
                 .join("; ");
-            anyhow::bail!("answers failed validation: {details}");
+            anyhow::bail!(
+                "{}",
+                wizard_t_with("wizard.error.answers_validation_failed", &[("details", &details)])
+            );
         }
         return Ok(answers);
+    }
+
+    let ignored_keys = sanitize_prefilled_answers(&form, &mut answers);
+    if !ignored_keys.is_empty() {
+        let message = wizard_t_with(
+            "wizard.error.answers_prefill_ignored",
+            &[("keys", &ignored_keys.join(", "))],
+        );
+        if let Some(io) = qa_io.as_deref_mut() {
+            writeln!(io.writer, "{message}").ok();
+        } else {
+            println!("{message}");
+        }
     }
 
     let mut driver = WizardDriver::new(QaWizardRunConfig {
@@ -2531,17 +2597,40 @@ fn run_component_qa_with_qa_lib(
             QuestionKind::Number => wizard_t("wizard.qa.prompt.enter_number"),
             _ => wizard_t("wizard.qa.prompt.enter_text"),
         };
-        let raw_owned = if let Some(io) = qa_io.as_deref_mut() {
-            read_component_answer_with_io(io.reader, io.writer, &prompt, &source_question.kind)?
-        } else {
-            read_component_answer_stdin(&prompt, &source_question.kind)?
-        };
-        let raw = raw_owned.as_str();
-        let answer = parse_component_qa_input(&source_question.kind, question, raw)?;
-        let patch = serde_json::json!({ next_question_id: answer });
-        driver
-            .submit_patch_json(&patch.to_string())
-            .map_err(|err| anyhow!("{}: {err}", wizard_t("wizard.error.qa_runner_failed")))?;
+        loop {
+            let raw_owned = if let Some(io) = qa_io.as_deref_mut() {
+                read_component_answer_with_io(io.reader, io.writer, &prompt, &source_question.kind)?
+            } else {
+                read_component_answer_stdin(&prompt, &source_question.kind)?
+            };
+            let raw = raw_owned.as_str();
+            let answer = match parse_component_qa_input(&source_question.kind, question, raw) {
+                Ok(answer) => answer,
+                Err(err) => {
+                    if let Some(io) = qa_io.as_deref_mut() {
+                        writeln!(io.writer, "{err}").ok();
+                    } else {
+                        println!("{err}");
+                    }
+                    continue;
+                }
+            };
+            let patch = serde_json::json!({ next_question_id: answer });
+            match driver.submit_patch_json(&patch.to_string()) {
+                Ok(_) => break,
+                Err(err) => {
+                    let message = wizard_t_with(
+                        "wizard.error.answer_validation_failed",
+                        &[("message", &err.to_string())],
+                    );
+                    if let Some(io) = qa_io.as_deref_mut() {
+                        writeln!(io.writer, "{message}").ok();
+                    } else {
+                        println!("{message}");
+                    }
+                }
+            }
+        }
     }
 
     let result = driver
@@ -2663,6 +2752,37 @@ fn component_spec_to_qa_form_json(
     serde_json::to_string(&form).context("serialize qa-lib form")
 }
 
+fn sanitize_prefilled_answers(
+    form: &qa_spec::FormSpec,
+    answers: &mut HashMap<String, serde_json::Value>,
+) -> Vec<String> {
+    let result = qa_spec::validate(form, &serde_json::Value::Object(map_from_answers(answers)));
+    let mut invalid_keys = std::collections::BTreeSet::new();
+    for key in result.unknown_fields {
+        invalid_keys.insert(key);
+    }
+    for err in result.errors {
+        if let Some(key) = err
+            .question_id
+            .or_else(|| err.path.as_deref().map(normalize_validation_error_path))
+        {
+            invalid_keys.insert(key);
+        }
+    }
+    for key in &invalid_keys {
+        answers.remove(key);
+    }
+    invalid_keys.into_iter().collect()
+}
+
+fn normalize_validation_error_path(path: &str) -> String {
+    path.trim_start_matches('/')
+        .split('/')
+        .next()
+        .unwrap_or(path)
+        .to_string()
+}
+
 fn parse_component_qa_input(
     kind: &QuestionKind,
     question: &serde_json::Value,
@@ -2720,7 +2840,8 @@ fn parse_component_qa_input(
             );
         }
         QuestionKind::InlineJson { .. } => {
-            serde_json::from_str(trimmed).with_context(|| format!("invalid json: {trimmed}"))
+            serde_json::from_str(trimmed)
+                .with_context(|| wizard_t_with("wizard.error.invalid_json", &[("value", trimmed)]))
         }
         QuestionKind::AssetRef { .. } | QuestionKind::Text => {
             Ok(serde_json::Value::String(trimmed.to_string()))
@@ -5541,6 +5662,25 @@ mod tests {
             .expect("env test lock")
     }
 
+    fn sample_number_qa_spec() -> ComponentQaSpec {
+        ComponentQaSpec {
+            mode: QaMode::Default,
+            title: I18nText::new("qa.sample.title", Some("Sample Wizard".to_string())),
+            description: None,
+            defaults: Default::default(),
+            questions: vec![Question {
+                id: "count".to_string(),
+                label: I18nText::new("qa.sample.count", Some("Count".to_string())),
+                help: None,
+                error: None,
+                kind: QuestionKind::Number,
+                required: true,
+                default: None,
+                skip_if: None,
+            }],
+        }
+    }
+
     #[test]
     fn wizard_menu_main_zero_exits() {
         let dir = tempdir().expect("temp dir");
@@ -5549,6 +5689,133 @@ mod tests {
         super::run_wizard_menu_with_io(dir.path(), input, &mut output).expect("wizard exit");
         let rendered = String::from_utf8(output).expect("utf8");
         assert!(rendered.contains("Main Menu"));
+    }
+
+    #[test]
+    fn wizard_menu_continues_when_answers_file_cannot_be_loaded() {
+        let dir = tempdir().expect("temp dir");
+        fs::write(dir.path().join("broken.answers.json"), "{not-json").expect("write broken answers");
+        let mut output = Vec::new();
+        super::run_wizard_menu_with_config(
+            dir.path(),
+            Cursor::new("0\n"),
+            &mut output,
+            super::WizardRunConfig {
+                answers_file: Some(PathBuf::from("broken.answers.json")),
+                emit_answers: None,
+                emit_schema: None,
+                dry_run: false,
+            },
+        )
+        .expect("wizard should continue after answers-file load error");
+        let rendered = String::from_utf8(output).expect("utf8");
+        assert!(rendered.contains("broken.answers.json"));
+        assert!(rendered.contains("Main Menu"));
+    }
+
+    #[test]
+    fn component_qa_non_interactive_rejects_invalid_answers_file_values() {
+        let spec = sample_number_qa_spec();
+        let catalog = super::wizard_catalog_for_locale("en");
+        let file = NamedTempFile::new().expect("answers file");
+        fs::write(file.path(), r#"{"count":"oops"}"#).expect("write answers");
+
+        let answers = parse_answers_map(None, Some(file.path())).expect("parse answers");
+        let err = super::run_component_qa_with_qa_lib(
+            &spec,
+            &catalog,
+            "en",
+            answers,
+            false,
+            None,
+        )
+        .expect_err("invalid answers should fail");
+
+        assert!(err.to_string().to_lowercase().contains("validation"));
+    }
+
+    #[test]
+    fn component_qa_non_interactive_rejects_missing_answers_file_values() {
+        let spec = sample_number_qa_spec();
+        let catalog = super::wizard_catalog_for_locale("en");
+        let file = NamedTempFile::new().expect("answers file");
+        fs::write(file.path(), "{}").expect("write answers");
+
+        let answers = parse_answers_map(None, Some(file.path())).expect("parse answers");
+        let err = super::run_component_qa_with_qa_lib(
+            &spec,
+            &catalog,
+            "en",
+            answers,
+            false,
+            None,
+        )
+        .expect_err("missing answers should fail");
+
+        assert!(err.to_string().to_lowercase().contains("missing required"));
+        assert!(err.to_string().contains("--answers-file"));
+    }
+
+    #[test]
+    fn component_qa_interactive_can_recover_from_invalid_answers_file_values() {
+        let spec = sample_number_qa_spec();
+        let catalog = super::wizard_catalog_for_locale("en");
+        let file = NamedTempFile::new().expect("answers file");
+        fs::write(file.path(), r#"{"count":"oops"}"#).expect("write answers");
+        let answers = parse_answers_map(None, Some(file.path())).expect("parse answers");
+        let mut input = Cursor::new("42\n");
+        let mut output = Vec::new();
+        let mut qa_io = super::QaInteractiveIo {
+            reader: &mut input,
+            writer: &mut output,
+        };
+
+        let answers = super::run_component_qa_with_qa_lib(
+            &spec,
+            &catalog,
+            "en",
+            answers,
+            true,
+            Some(&mut qa_io),
+        )
+        .expect("interactive correction");
+
+        assert_eq!(answers.get("count").and_then(Value::as_f64), Some(42.0));
+    }
+
+    #[test]
+    fn component_qa_interactive_can_fill_missing_answers_from_answers_file() {
+        let spec = sample_number_qa_spec();
+        let catalog = super::wizard_catalog_for_locale("en");
+        let file = NamedTempFile::new().expect("answers file");
+        fs::write(file.path(), "{}").expect("write answers");
+        let answers = parse_answers_map(None, Some(file.path())).expect("parse answers");
+        let mut input = Cursor::new("42\n");
+        let mut output = Vec::new();
+        let mut qa_io = super::QaInteractiveIo {
+            reader: &mut input,
+            writer: &mut output,
+        };
+
+        let answers = super::run_component_qa_with_qa_lib(
+            &spec,
+            &catalog,
+            "en",
+            answers,
+            true,
+            Some(&mut qa_io),
+        )
+        .expect("interactive answer");
+
+        assert_eq!(answers.get("count").and_then(Value::as_f64), Some(42.0));
+    }
+
+    #[test]
+    fn parse_answers_map_reports_missing_answers_file() {
+        let missing = Path::new(env!("CARGO_MANIFEST_DIR")).join("target/no-such-answers.json");
+        let err = parse_answers_map(None, Some(&missing)).expect_err("missing file should fail");
+        assert!(err.to_string().contains("Could not read answers file"));
+        assert!(err.to_string().contains("no-such-answers.json"));
     }
 
     #[test]
@@ -5759,6 +6026,16 @@ mod tests {
             "wizard.save.confirm_exit",
             "wizard.answers.path.prompt",
             "wizard.answers.path.saved",
+            "wizard.error.answer_validation_failed",
+            "wizard.error.answers_file_invalid_object",
+            "wizard.error.answers_file_load_failed",
+            "wizard.error.answers_file_parse_failed",
+            "wizard.error.answers_file_read_failed",
+            "wizard.error.answers_inline_invalid_object",
+            "wizard.error.answers_inline_parse_failed",
+            "wizard.error.answers_missing_required",
+            "wizard.error.answers_prefill_ignored",
+            "wizard.error.answers_validation_failed",
             "wizard.translate.locales.prompt",
             "wizard.translate.done",
             "wizard.translate.missing_source",
@@ -5782,6 +6059,7 @@ mod tests {
             "wizard.error.invalid_choice",
             "wizard.error.required_input",
             "wizard.error.invalid_integer",
+            "wizard.error.invalid_json",
             "wizard.error.invalid_number",
             "wizard.error.number_out_of_range",
             "wizard.error.enum_choices_missing",
@@ -9831,23 +10109,32 @@ fn parse_answers_map(
 ) -> Result<QuestionAnswers> {
     let mut merged = QuestionAnswers::new();
     if let Some(path) = answers_file {
-        let text = fs::read_to_string(path)
-            .with_context(|| format!("read answers file {}", path.display()))?;
+        let text = fs::read_to_string(path).with_context(|| {
+            wizard_t_with(
+                "wizard.error.answers_file_read_failed",
+                &[("path", &path.display().to_string())],
+            )
+        })?;
         let parsed: serde_json::Value = serde_yaml_bw::from_str(&text)
             .or_else(|_| serde_json::from_str(&text))
-            .context("parse answers file as JSON/YAML")?;
-        let obj = parsed
-            .as_object()
-            .ok_or_else(|| anyhow::anyhow!("answers file must contain a JSON/YAML object"))?;
+            .with_context(|| {
+                wizard_t_with(
+                    "wizard.error.answers_file_parse_failed",
+                    &[("path", &path.display().to_string())],
+                )
+            })?;
+        let obj = parsed.as_object().ok_or_else(|| {
+            anyhow::anyhow!("{}", wizard_t("wizard.error.answers_file_invalid_object"))
+        })?;
         merged.extend(obj.clone());
     }
     if let Some(text) = answers {
         let parsed: serde_json::Value = serde_yaml_bw::from_str(text)
             .or_else(|_| serde_json::from_str(text))
-            .context("parse --answers as JSON/YAML")?;
+            .context(wizard_t("wizard.error.answers_inline_parse_failed"))?;
         let obj = parsed
             .as_object()
-            .ok_or_else(|| anyhow::anyhow!("--answers must be a JSON/YAML object"))?;
+            .ok_or_else(|| anyhow::anyhow!("{}", wizard_t("wizard.error.answers_inline_invalid_object")))?;
         merged.extend(obj.clone());
     }
     Ok(merged)
