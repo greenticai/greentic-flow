@@ -1,38 +1,32 @@
 # Security Fix Report
 
-Date (UTC): 2026-03-25
-Branch: `ci/add-workflow-permissions`
+Date: 2026-03-25 (UTC)
+Repository: `greentic-flow`
+Reviewer role: CI Security Reviewer
 
 ## Inputs Reviewed
-- Security alerts JSON:
-  - `dependabot`: `[]`
-  - `code_scanning`: `[]`
-- New PR dependency vulnerabilities: `[]`
+- Dependabot alerts JSON: `{"dependabot": [], "code_scanning": []}`
+- New PR Dependency Vulnerabilities: `[]`
 
-## PR Dependency Change Review
-Compared this branch against `origin/main` (merge-base `e76f1f2ca555671467ec0a47d9e96bb5853668f0`).
-
-Files changed in PR:
-- `.github/workflows/dev-publish.yml`
-- `.github/workflows/publish.yml`
-
-Dependency manifests/lockfiles changed in PR:
-- None
+## Analysis Performed
+1. Verified the repository dependency manifests/locks present in this project:
+   - `Cargo.toml`
+   - `Cargo.lock`
+2. Reviewed PR/HEAD commit dependency-file changes (`HEAD~1..HEAD`).
+3. Inspected dependency diffs in `Cargo.toml` and `Cargo.lock`.
 
 ## Findings
-- No active Dependabot alerts were provided.
-- No active Code Scanning alerts were provided.
-- No new dependency vulnerabilities were provided for this PR.
-- No new dependency-related risk introduced by changed files (workflows only).
+- No Dependabot alerts were provided.
+- No code scanning alerts were provided.
+- No new PR dependency vulnerabilities were provided.
+- Dependency file changes in the latest commit were limited to an internal package version bump:
+  - `greentic-flow` version `0.4.59` -> `0.4.60`
+- No third-party dependency additions/upgrades/downgrades were detected in the reviewed diff.
 
 ## Remediation Actions
-- No dependency or source-code remediation was required.
-- No package upgrades or lockfile changes were applied.
+- No vulnerability remediation was required.
+- No dependency changes were applied.
 
-## Validation Notes
-- Local repository inspection confirmed no dependency file changes in the PR.
-- `cargo-audit` is not available in this CI sandbox, so online advisory DB scanning could not be executed here.
-
-## Final Status
-- `No actionable vulnerabilities detected`.
-- `No security fixes necessary for this PR`.
+## Outcome
+- Security posture unchanged based on supplied alert data and reviewed dependency diffs.
+- No new vulnerabilities identified from PR dependency-file changes.
