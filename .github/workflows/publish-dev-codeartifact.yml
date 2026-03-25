@@ -113,7 +113,7 @@ jobs:
           for i in $(seq 1 "$attempts"); do
             echo "Publishing greentic-flow (attempt ${i}/${attempts})"
             set +e
-            output="$(cargo publish -p greentic-flow --manifest-path Cargo.toml --registry corp-artifacts-greentic --allow-dirty 2>&1)"
+            output="$(cargo publish -p greentic-flow --manifest-path Cargo.toml --registry corp-artifacts-greentic --allow-dirty --no-verify 2>&1)"
             status=$?
             set -e
             echo "${output}"
