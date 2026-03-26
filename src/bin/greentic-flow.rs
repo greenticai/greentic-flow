@@ -1337,7 +1337,7 @@ fn create_wizard_staging_pack(pack_dir: &Path) -> Result<PathBuf> {
     let stage_root = env::temp_dir().join(unique);
     fs::create_dir_all(&stage_root)
         .with_context(|| format!("create directory {}", stage_root.display()))?;
-    for entry in ["flows", "i18n", "components"] {
+    for entry in ["flows", "i18n", "components", "assets"] {
         let src = pack_dir.join(entry);
         let dst = stage_root.join(entry);
         if src.exists() {
@@ -1705,6 +1705,7 @@ fn sync_staged_pack_back(session: &mut WizardSession) -> Result<()> {
     sync_staged_dir(session, "flows")?;
     sync_staged_dir(session, "i18n")?;
     sync_staged_dir(session, "components")?;
+    sync_staged_dir(session, "assets")?;
     Ok(())
 }
 
@@ -2467,6 +2468,20 @@ struct QaInteractiveIo<'a> {
     writer: &'a mut dyn Write,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct AssetRefQuestionSpec {
+    allow_remote: bool,
+    base_path: Option<String>,
+    file_types: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AssetConflictChoice {
+    Overwrite,
+    Rename,
+    Cancel,
+}
+
 fn run_component_qa_with_qa_lib(
     spec: &ComponentQaSpec,
     catalog: &I18nCatalog,
@@ -2646,6 +2661,342 @@ fn run_component_qa_with_qa_lib(
         answers = object.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
     }
     Ok(answers)
+}
+
+fn asset_ref_specs_from_qa_spec_cbor(qa_spec_cbor: &[u8]) -> HashMap<String, AssetRefQuestionSpec> {
+    let value = wizard_ops::cbor_to_json(qa_spec_cbor).or_else(|_| {
+        serde_json::from_slice::<serde_json::Value>(qa_spec_cbor).map_err(anyhow::Error::from)
+    });
+    let Ok(value) = value else {
+        return HashMap::new();
+    };
+    let Some(questions) = value.get("questions").and_then(serde_json::Value::as_array) else {
+        return HashMap::new();
+    };
+
+    let mut out = HashMap::new();
+    for question in questions {
+        let Some(id) = question.get("id").and_then(serde_json::Value::as_str) else {
+            continue;
+        };
+        let Some(kind) = question.get("kind").and_then(serde_json::Value::as_object) else {
+            continue;
+        };
+        if kind.get("type").and_then(serde_json::Value::as_str) != Some("asset_ref") {
+            continue;
+        }
+        let file_types = kind
+            .get("file_types")
+            .and_then(serde_json::Value::as_array)
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(serde_json::Value::as_str)
+                    .map(ToOwned::to_owned)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let base_path = kind
+            .get("base_path")
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned);
+        let allow_remote = kind
+            .get("allow_remote")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
+        out.insert(
+            id.to_string(),
+            AssetRefQuestionSpec {
+                allow_remote,
+                base_path,
+                file_types,
+            },
+        );
+    }
+    out
+}
+
+#[cfg(not(test))]
+fn is_remote_asset_reference(value: &str) -> bool {
+    matches!(
+        value.split_once("://").map(|(scheme, _)| scheme),
+        Some("https" | "oci" | "repo" | "store")
+    )
+}
+
+#[cfg(test)]
+fn is_remote_asset_reference(value: &str) -> bool {
+    matches!(
+        value.split_once("://").map(|(scheme, _)| scheme),
+        Some("https" | "http" | "oci" | "repo" | "store")
+    )
+}
+
+fn ensure_safe_pack_relative_path(path: &Path, label: &str) -> Result<()> {
+    if path.as_os_str().is_empty() {
+        anyhow::bail!("{label} must not be empty");
+    }
+    if path.is_absolute() {
+        anyhow::bail!("{label} must be relative to the pack root");
+    }
+    for component in path.components() {
+        match component {
+            std::path::Component::Normal(_) | std::path::Component::CurDir => {}
+            _ => anyhow::bail!("{label} must not escape the pack root"),
+        }
+    }
+    Ok(())
+}
+
+fn validate_asset_extension(file_name: &str, file_types: &[String]) -> Result<()> {
+    if file_types.is_empty() {
+        return Ok(());
+    }
+    let ext = Path::new(file_name)
+        .extension()
+        .and_then(|value| value.to_str())
+        .map(|value| value.to_ascii_lowercase())
+        .unwrap_or_default();
+    let allowed = file_types
+        .iter()
+        .map(|value| value.trim_start_matches('.').to_ascii_lowercase())
+        .collect::<Vec<_>>();
+    if allowed.iter().any(|value| value == &ext) {
+        return Ok(());
+    }
+    anyhow::bail!(
+        "remote asset file '{}' does not match allowed file types: {}",
+        file_name,
+        allowed.join(", ")
+    );
+}
+
+fn file_name_from_https_reference(reference: &str) -> Result<String> {
+    let url = reqwest::Url::parse(reference)
+        .with_context(|| format!("parse remote asset URL {reference}"))?;
+    let file_name = url
+        .path_segments()
+        .and_then(|segments| segments.filter(|segment| !segment.is_empty()).next_back())
+        .ok_or_else(|| anyhow!("remote asset URL {reference} does not contain a file name"))?;
+    Ok(file_name.to_string())
+}
+
+fn unique_target_path(path: &Path) -> PathBuf {
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let stem = path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or("asset");
+    let ext = path.extension().and_then(|value| value.to_str());
+    for idx in 2.. {
+        let candidate_name = match ext {
+            Some(ext) if !ext.is_empty() => format!("{stem}-{idx}.{ext}"),
+            _ => format!("{stem}-{idx}"),
+        };
+        let candidate = parent.join(candidate_name);
+        if !candidate.exists() {
+            return candidate;
+        }
+    }
+    unreachable!("integer iterator is unbounded")
+}
+
+fn prompt_asset_conflict_with_io<R: Read + ?Sized, W: Write + ?Sized>(
+    reader: &mut R,
+    writer: &mut W,
+    target: &Path,
+) -> Result<AssetConflictChoice> {
+    loop {
+        writeln!(writer, "Asset already exists at {}", target.display()).ok();
+        write!(writer, "Choose action: [o]verwrite, [r]ename, [c]ancel: ").ok();
+        writer.flush().ok();
+        match read_input_line(reader)?
+            .trim()
+            .to_ascii_lowercase()
+            .as_str()
+        {
+            "o" | "overwrite" => return Ok(AssetConflictChoice::Overwrite),
+            "r" | "rename" => return Ok(AssetConflictChoice::Rename),
+            "c" | "cancel" => return Ok(AssetConflictChoice::Cancel),
+            _ => {
+                writeln!(
+                    writer,
+                    "Invalid choice. Enter overwrite, rename, or cancel."
+                )
+                .ok();
+            }
+        }
+    }
+}
+
+fn prompt_asset_conflict_stdin(target: &Path) -> Result<AssetConflictChoice> {
+    loop {
+        println!("Asset already exists at {}", target.display());
+        print!("Choose action: [o]verwrite, [r]ename, [c]ancel: ");
+        io::stdout().flush().context("flush stdout")?;
+        let mut stdin = io::stdin();
+        match read_input_line(&mut stdin)?
+            .trim()
+            .to_ascii_lowercase()
+            .as_str()
+        {
+            "o" | "overwrite" => return Ok(AssetConflictChoice::Overwrite),
+            "r" | "rename" => return Ok(AssetConflictChoice::Rename),
+            "c" | "cancel" => return Ok(AssetConflictChoice::Cancel),
+            _ => println!("Invalid choice. Enter overwrite, rename, or cancel."),
+        }
+    }
+}
+
+fn fetch_remote_asset(reference: &str) -> Result<(Vec<u8>, String)> {
+    if reference.starts_with("https://") || is_test_local_http_reference(reference) {
+        let client = BlockingHttpClient::builder()
+            .timeout(Duration::from_secs(30))
+            .build()
+            .context("build HTTP client")?;
+        let response = client
+            .get(reference)
+            .header(reqwest::header::USER_AGENT, "greentic-flow")
+            .send()
+            .with_context(|| format!("download remote asset {reference}"))?
+            .error_for_status()
+            .with_context(|| format!("download remote asset {reference}"))?;
+        let file_name = file_name_from_https_reference(reference)?;
+        let bytes = response
+            .bytes()
+            .with_context(|| format!("read remote asset response body {reference}"))?;
+        return Ok((bytes.to_vec(), file_name));
+    }
+
+    let client = DistClient::new(Default::default());
+    let cache_path = ensure_cached_component_path(&client, reference)
+        .with_context(|| format!("resolve remote asset {reference}"))?;
+    let file_name = cache_path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .ok_or_else(|| anyhow!("resolved remote asset {} without a file name", reference))?
+        .to_string();
+    let bytes = fs::read(&cache_path)
+        .with_context(|| format!("read cached remote asset {}", cache_path.display()))?;
+    Ok((bytes, file_name))
+}
+
+#[cfg(not(test))]
+fn is_test_local_http_reference(_reference: &str) -> bool {
+    false
+}
+
+#[cfg(test)]
+fn is_test_local_http_reference(reference: &str) -> bool {
+    let Ok(url) = reqwest::Url::parse(reference) else {
+        return false;
+    };
+    if url.scheme() != "http" {
+        return false;
+    }
+    matches!(
+        url.host_str(),
+        Some("localhost") | Some("127.0.0.1") | Some("::1")
+    )
+}
+
+fn materialize_remote_asset_answer(
+    reference: &str,
+    asset_spec: &AssetRefQuestionSpec,
+    flow_path: &Path,
+    interactive: bool,
+    qa_io: Option<&mut QaInteractiveIo<'_>>,
+) -> Result<String> {
+    let base_path = asset_spec.base_path.as_deref().ok_or_else(|| {
+        anyhow!(
+            "remote asset '{}' requires asset_ref.base_path so greentic-flow knows where to place it in the pack",
+            reference
+        )
+    })?;
+    let pack_root = infer_pack_root_from_flow_path(flow_path)?;
+    let base_rel = PathBuf::from(base_path);
+    ensure_safe_pack_relative_path(&base_rel, "asset_ref.base_path")?;
+
+    let (bytes, file_name) = fetch_remote_asset(reference)?;
+    validate_asset_extension(&file_name, &asset_spec.file_types)?;
+
+    let mut target_rel = base_rel.join(&file_name);
+    ensure_safe_pack_relative_path(&target_rel, "resolved asset target path")?;
+    let mut target_abs = pack_root.join(&target_rel);
+
+    if target_abs.exists() {
+        let choice = if interactive {
+            if let Some(io) = qa_io {
+                prompt_asset_conflict_with_io(io.reader, io.writer, &target_rel)?
+            } else {
+                prompt_asset_conflict_stdin(&target_rel)?
+            }
+        } else {
+            anyhow::bail!(
+                "remote asset target {} already exists; rerun interactively to choose overwrite or rename",
+                target_rel.display()
+            );
+        };
+        match choice {
+            AssetConflictChoice::Overwrite => {}
+            AssetConflictChoice::Rename => {
+                target_abs = unique_target_path(&target_abs);
+                target_rel = target_abs
+                    .strip_prefix(&pack_root)
+                    .map(PathBuf::from)
+                    .map_err(|err| anyhow!("compute renamed asset path: {err}"))?;
+            }
+            AssetConflictChoice::Cancel => {
+                anyhow::bail!(
+                    "remote asset import cancelled for target {}",
+                    target_rel.display()
+                );
+            }
+        }
+    }
+
+    if let Some(parent) = target_abs.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("create asset directory {}", parent.display()))?;
+    }
+    fs::write(&target_abs, bytes)
+        .with_context(|| format!("write remote asset {}", target_abs.display()))?;
+    Ok(target_rel.to_string_lossy().replace('\\', "/"))
+}
+
+fn materialize_remote_asset_answers(
+    qa_spec_cbor: &[u8],
+    answers: &mut HashMap<String, serde_json::Value>,
+    flow_path: &Path,
+    interactive: bool,
+    mut qa_io: Option<&mut QaInteractiveIo<'_>>,
+) -> Result<()> {
+    let asset_specs = asset_ref_specs_from_qa_spec_cbor(qa_spec_cbor);
+    for (question_id, asset_spec) in asset_specs {
+        if !asset_spec.allow_remote {
+            continue;
+        }
+        let Some(answer) = answers.get_mut(&question_id) else {
+            continue;
+        };
+        let Some(reference) = answer.as_str() else {
+            continue;
+        };
+        if !is_remote_asset_reference(reference) {
+            continue;
+        }
+        let local_path = materialize_remote_asset_answer(
+            reference,
+            &asset_spec,
+            flow_path,
+            interactive,
+            qa_io.as_deref_mut(),
+        )?;
+        *answer = serde_json::Value::String(local_path);
+    }
+    Ok(())
 }
 
 fn qa_key_fallback_label(key: &str) -> String {
@@ -5645,13 +5996,16 @@ mod tests {
     };
     use serde_json::Value;
     use serde_json::json;
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, HashMap};
     use std::env;
     use std::ffi::OsString;
     use std::fs;
     use std::io::Cursor;
+    use std::io::{Read as _, Write as _};
+    use std::net::TcpListener;
     use std::path::{Path, PathBuf};
     use std::sync::{Mutex, OnceLock};
+    use std::thread;
     use tempfile::NamedTempFile;
     use tempfile::tempdir;
 
@@ -5667,6 +6021,76 @@ mod tests {
         LOCK.get_or_init(|| Mutex::new(()))
             .lock()
             .expect("env test lock")
+    }
+
+    fn write_remote_asset_fixture(root: &Path, reference: &str) {
+        let fixture_dir = root.join("components").join(super::fixture_key(reference));
+        fs::create_dir_all(&fixture_dir).expect("create fixture dir");
+        fs::write(root.join("index.json"), json!({"components": {reference: {"path": format!("components/{}", super::fixture_key(reference))}}}).to_string())
+            .expect("write fixture index");
+        fs::write(fixture_dir.join("component.wasm"), b"fixture-wasm").expect("write fixture wasm");
+        fs::write(fixture_dir.join("describe.cbor"), b"").expect("write fixture describe");
+
+        let qa_spec = ComponentQaSpec {
+            mode: QaMode::Default,
+            title: I18nText::new("qa.remote_asset.title", Some("Remote Asset".to_string())),
+            description: None,
+            defaults: Default::default(),
+            questions: vec![Question {
+                id: "card_asset".to_string(),
+                label: I18nText::new("qa.card_asset", Some("Card asset".to_string())),
+                help: None,
+                error: None,
+                kind: QuestionKind::AssetRef {
+                    file_types: vec!["json".to_string()],
+                    base_path: Some("assets/cards".to_string()),
+                    check_exists: true,
+                    allow_remote: true,
+                },
+                required: true,
+                default: None,
+                skip_if: None,
+            }],
+        };
+        let qa_spec_cbor =
+            greentic_types::cbor::canonical::to_canonical_cbor(&qa_spec).expect("encode qa spec");
+        fs::write(fixture_dir.join("qa_default.cbor"), qa_spec_cbor).expect("write qa fixture");
+
+        let apply_default = greentic_types::cbor::canonical::to_canonical_cbor_allow_floats(
+            &json!({"card_path": "placeholder"}),
+        )
+        .expect("encode apply config");
+        fs::write(fixture_dir.join("apply_default_config.cbor"), apply_default)
+            .expect("write apply fixture");
+    }
+
+    fn start_http_asset_server_with_requests(
+        body: &'static [u8],
+        requests: usize,
+    ) -> (String, thread::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind http listener");
+        let addr = listener.local_addr().expect("listener addr");
+        let url = format!("http://{}/card.json", addr);
+        let handle = thread::spawn(move || {
+            for _ in 0..requests {
+                let (mut stream, _) = listener.accept().expect("accept");
+                let mut buf = [0u8; 1024];
+                let _ = stream.read(&mut buf);
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                stream
+                    .write_all(response.as_bytes())
+                    .and_then(|_| stream.write_all(body))
+                    .expect("write response");
+            }
+        });
+        (url, handle)
+    }
+
+    fn start_http_asset_server(body: &'static [u8]) -> (String, thread::JoinHandle<()>) {
+        start_http_asset_server_with_requests(body, 1)
     }
 
     #[test]
@@ -6399,6 +6823,59 @@ nodes: {}
     }
 
     #[test]
+    fn wizard_staging_and_save_include_assets_directory() {
+        let dir = tempdir().expect("temp dir");
+        let real_pack_dir = dir.path().join("pack");
+        fs::create_dir_all(real_pack_dir.join("flows")).expect("create flows dir");
+        fs::create_dir_all(real_pack_dir.join("assets/cards")).expect("create assets dir");
+        fs::write(
+            real_pack_dir.join("flows/main.ygtc"),
+            "id: main\ntype: messaging\nnodes: {}\n",
+        )
+        .expect("write flow");
+        fs::write(
+            real_pack_dir.join("assets/cards/existing.json"),
+            "{\"existing\":true}\n",
+        )
+        .expect("write existing asset");
+
+        let staged_pack_dir =
+            super::create_wizard_staging_pack(&real_pack_dir).expect("create staged pack");
+        assert_eq!(
+            fs::read_to_string(staged_pack_dir.join("assets/cards/existing.json"))
+                .expect("read staged asset"),
+            "{\"existing\":true}\n"
+        );
+
+        fs::write(
+            staged_pack_dir.join("assets/cards/imported.json"),
+            "{\"imported\":true}\n",
+        )
+        .expect("write imported asset");
+
+        let mut session = super::WizardSession {
+            real_pack_dir: real_pack_dir.clone(),
+            staged_pack_dir,
+            dirty: true,
+            config: super::WizardRunConfig::default(),
+            answers_log: serde_json::Map::new(),
+            answers_output_path: None,
+        };
+        super::sync_staged_pack_back(&mut session).expect("sync staged pack back");
+
+        assert_eq!(
+            fs::read_to_string(real_pack_dir.join("assets/cards/existing.json"))
+                .expect("read synced existing asset"),
+            "{\"existing\":true}\n"
+        );
+        assert_eq!(
+            fs::read_to_string(real_pack_dir.join("assets/cards/imported.json"))
+                .expect("read synced imported asset"),
+            "{\"imported\":true}\n"
+        );
+    }
+
+    #[test]
     fn wizard_save_doctor_failure_does_not_persist() {
         let dir = tempdir().expect("temp dir");
         let flow_path = dir.path().join("flows/global/messaging/welcome.ygtc");
@@ -6611,6 +7088,105 @@ nodes: {}
         assert!(
             flow_ir.nodes.contains_key("first") && flow_ir.nodes.contains_key("second"),
             "flow should preserve existing steps"
+        );
+    }
+
+    #[test]
+    fn wizard_emit_answers_and_replay_restores_remote_adaptive_card_asset() {
+        let wasm_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("workspace parent")
+            .join("component-adaptive-card")
+            .join("dist")
+            .join("component_adaptive_card__0_6_0.wasm");
+        if !wasm_path.exists() {
+            return;
+        }
+
+        let dir = tempdir().expect("temp dir");
+        let source_pack = dir.path().join("source-pack");
+        let replay_pack = dir.path().join("replay-pack");
+        let answers_path = dir.path().join("wizard.answers.json");
+        let adaptive_card_body = br#"{"type":"AdaptiveCard","version":"1.6"}"#;
+        let (remote_url, server) = start_http_asset_server_with_requests(adaptive_card_body, 2);
+
+        for pack_dir in [&source_pack, &replay_pack] {
+            fs::create_dir_all(pack_dir.join("flows")).expect("create flows dir");
+            fs::create_dir_all(pack_dir.join("components")).expect("create components dir");
+            fs::write(
+                pack_dir.join("flows/main.ygtc"),
+                "id: main\ntype: messaging\nnodes: {}\n",
+            )
+            .expect("write flow");
+            fs::copy(
+                &wasm_path,
+                pack_dir.join("components/component_adaptive_card__0_6_0.wasm"),
+            )
+            .expect("copy adaptive card wasm");
+        }
+
+        let input = Cursor::new(format!(
+            "2\n1\n3\n2\n1\n1\n3\n{remote_url}\nfalse\n7\n0\n0\n0\n"
+        ));
+        let mut output = Vec::new();
+        super::run_wizard_menu_with_config(
+            &source_pack,
+            input,
+            &mut output,
+            super::WizardRunConfig {
+                answers_file: None,
+                emit_answers: Some(answers_path.clone()),
+                emit_schema: None,
+                dry_run: false,
+            },
+        )
+        .expect("wizard run with emitted answers");
+        assert!(answers_path.exists(), "emitted answers file should exist");
+
+        let mut replay_output = Vec::new();
+        super::run_wizard_menu_with_config(
+            &replay_pack,
+            Cursor::new(""),
+            &mut replay_output,
+            super::WizardRunConfig {
+                answers_file: Some(answers_path.clone()),
+                emit_answers: None,
+                emit_schema: None,
+                dry_run: false,
+            },
+        )
+        .expect("wizard replay run");
+
+        server.join().expect("join http server");
+
+        let replay_flow_path = replay_pack.join("flows/main.ygtc");
+        let replay_doc = load_ygtc_from_path(&replay_flow_path).expect("load replay flow");
+        let replay_flow_ir = FlowIr::from_doc(replay_doc).expect("replay flow ir");
+        assert_eq!(
+            replay_flow_ir.nodes.len(),
+            1,
+            "replay should add exactly one adaptive card node"
+        );
+        let node = replay_flow_ir
+            .nodes
+            .values()
+            .next()
+            .expect("adaptive card node");
+        let config = extract_config_payload(&node.payload);
+        assert_eq!(
+            config.get("default_card_asset").and_then(Value::as_str),
+            Some("assets/cards/card.json")
+        );
+        assert_eq!(
+            config.get("default_source").and_then(Value::as_str),
+            Some("asset")
+        );
+
+        let asset_path = replay_pack.join("assets/cards/card.json");
+        assert!(asset_path.exists(), "replayed asset should exist");
+        assert_eq!(
+            fs::read_to_string(&asset_path).expect("read replayed asset"),
+            r#"{"type":"AdaptiveCard","version":"1.6"}"#
         );
     }
 
@@ -7487,6 +8063,207 @@ nodes:
                 "type": "AdaptiveCard",
                 "version": "1.6"
             })
+        );
+    }
+
+    #[test]
+    fn asset_ref_specs_from_qa_spec_cbor_reads_allow_remote() {
+        let qa_spec = json!({
+            "mode": "default",
+            "title": { "key": "qa.asset.title", "fallback": "Asset" },
+            "description": null,
+            "defaults": {},
+            "questions": [
+                {
+                    "id": "card_asset",
+                    "label": { "key": "qa.card_asset", "fallback": "Card asset" },
+                    "help": null,
+                    "error": null,
+                    "required": true,
+                    "default": null,
+                    "skip_if": null,
+                    "kind": {
+                        "type": "asset_ref",
+                        "file_types": ["json"],
+                        "base_path": "assets/cards",
+                        "check_exists": true,
+                        "allow_remote": true
+                    }
+                }
+            ]
+        });
+        let bytes = greentic_types::cbor::canonical::to_canonical_cbor_allow_floats(&qa_spec)
+            .expect("encode qa spec");
+        let specs = super::asset_ref_specs_from_qa_spec_cbor(&bytes);
+        let spec = specs.get("card_asset").expect("asset spec");
+        assert!(spec.allow_remote);
+        assert_eq!(spec.base_path.as_deref(), Some("assets/cards"));
+        assert_eq!(spec.file_types, vec!["json".to_string()]);
+    }
+
+    #[test]
+    fn materialize_remote_asset_answers_requires_base_path() {
+        let qa_spec = json!({
+            "mode": "default",
+            "title": { "key": "qa.asset.title", "fallback": "Asset" },
+            "description": null,
+            "defaults": {},
+            "questions": [
+                {
+                    "id": "card_asset",
+                    "label": { "key": "qa.card_asset", "fallback": "Card asset" },
+                    "help": null,
+                    "error": null,
+                    "required": true,
+                    "default": null,
+                    "skip_if": null,
+                    "kind": {
+                        "type": "asset_ref",
+                        "file_types": ["json"],
+                        "check_exists": true,
+                        "allow_remote": true
+                    }
+                }
+            ]
+        });
+        let bytes = greentic_types::cbor::canonical::to_canonical_cbor_allow_floats(&qa_spec)
+            .expect("encode qa spec");
+        let mut answers = HashMap::from([(
+            "card_asset".to_string(),
+            Value::String("https://example.com/card.json".to_string()),
+        )]);
+        let dir = tempdir().expect("temp dir");
+        let flow_path = dir.path().join("flows/global/messaging/main.ygtc");
+        let err =
+            super::materialize_remote_asset_answers(&bytes, &mut answers, &flow_path, false, None)
+                .expect_err("missing base_path should fail");
+        assert!(err.to_string().contains("asset_ref.base_path"));
+    }
+
+    #[test]
+    fn materialize_remote_asset_answers_leaves_local_paths_unchanged() {
+        let qa_spec = json!({
+            "mode": "default",
+            "title": { "key": "qa.asset.title", "fallback": "Asset" },
+            "description": null,
+            "defaults": {},
+            "questions": [
+                {
+                    "id": "card_asset",
+                    "label": { "key": "qa.card_asset", "fallback": "Card asset" },
+                    "help": null,
+                    "error": null,
+                    "required": true,
+                    "default": null,
+                    "skip_if": null,
+                    "kind": {
+                        "type": "asset_ref",
+                        "file_types": ["json"],
+                        "base_path": "assets/cards",
+                        "check_exists": true,
+                        "allow_remote": true
+                    }
+                }
+            ]
+        });
+        let bytes = greentic_types::cbor::canonical::to_canonical_cbor_allow_floats(&qa_spec)
+            .expect("encode qa spec");
+        let mut answers = HashMap::from([(
+            "card_asset".to_string(),
+            Value::String("assets/cards/existing.json".to_string()),
+        )]);
+        let dir = tempdir().expect("temp dir");
+        let flow_path = dir.path().join("flows/global/messaging/main.ygtc");
+        super::materialize_remote_asset_answers(&bytes, &mut answers, &flow_path, false, None)
+            .expect("local paths should be unchanged");
+        assert_eq!(
+            answers.get("card_asset"),
+            Some(&Value::String("assets/cards/existing.json".to_string()))
+        );
+    }
+
+    #[test]
+    fn add_step_wizard_materializes_remote_asset_into_pack() {
+        let dir = tempdir().expect("temp dir");
+        let flow_path = dir.path().join("flows/global/messaging/main.ygtc");
+        handle_new(
+            NewArgs {
+                flow_path: flow_path.clone(),
+                flow_id: "main".to_string(),
+                flow_type: "messaging".to_string(),
+                schema_version: 2,
+                name: None,
+                description: None,
+                force: true,
+            },
+            false,
+        )
+        .expect("seed flow");
+
+        let fixture_root = dir.path().join("fixture-registry");
+        let reference = "oci://acme/remote-asset:1";
+        write_remote_asset_fixture(&fixture_root, reference);
+        let (remote_url, server) = start_http_asset_server(br#"{"type":"AdaptiveCard"}"#);
+
+        handle_add_step(
+            AddStepArgs {
+                component_id: None,
+                flow_path: flow_path.clone(),
+                after: None,
+                mode: AddStepMode::Default,
+                pack_alias: None,
+                wizard_mode: Some(WizardModeArg::Default),
+                operation: None,
+                payload: "{}".to_string(),
+                routing_out: true,
+                routing_reply: false,
+                routing_next: None,
+                routing_multi_to: None,
+                routing_json: None,
+                routing_to_anchor: false,
+                config_flow: None,
+                answers: Some(json!({ "card_asset": remote_url }).to_string()),
+                answers_file: None,
+                answers_dir: None,
+                overwrite_answers: false,
+                reask: false,
+                locale: None,
+                interactive: false,
+                allow_cycles: false,
+                dry_run: false,
+                write: false,
+                validate_only: false,
+                manifests: Vec::new(),
+                node_id: Some("remote-asset".to_string()),
+                component_ref: Some(reference.to_string()),
+                local_wasm: None,
+                distributor_url: None,
+                auth_token: None,
+                tenant: None,
+                env: None,
+                pack: None,
+                component_version: None,
+                abi_version: None,
+                resolver: Some(format!("fixture://{}", fixture_root.display())),
+                pin: false,
+                allow_contract_change: false,
+            },
+            SchemaMode::Strict,
+            OutputFormat::Human,
+            false,
+        )
+        .expect("add step");
+
+        server.join().expect("join http server");
+        let asset_path = dir.path().join("assets/cards/card.json");
+        assert!(
+            asset_path.exists(),
+            "expected downloaded asset at {}",
+            asset_path.display()
+        );
+        assert_eq!(
+            fs::read_to_string(&asset_path).expect("read asset"),
+            r#"{"type":"AdaptiveCard"}"#
         );
     }
 
@@ -9016,7 +9793,7 @@ fn handle_add_step_with_qa_io(
     schema_mode: SchemaMode,
     format: OutputFormat,
     backup: bool,
-    qa_io: Option<&mut QaInteractiveIo<'_>>,
+    mut qa_io: Option<&mut QaInteractiveIo<'_>>,
 ) -> Result<()> {
     let (routing_value, require_placeholder) = build_routing_value(&args)?;
     let component_identity = args
@@ -9086,9 +9863,16 @@ fn handle_add_step_with_qa_io(
                 &locale,
                 answers,
                 args.interactive,
-                qa_io,
+                qa_io.as_deref_mut(),
             )?;
         }
+        materialize_remote_asset_answers(
+            &spec.qa_spec_cbor,
+            &mut answers,
+            &args.flow_path,
+            args.interactive,
+            qa_io,
+        )?;
 
         let answers_cbor = wizard_ops::answers_to_cbor(&answers)?;
         let current_config = wizard_ops::empty_cbor_map();
@@ -9456,7 +10240,7 @@ fn handle_update_step_with_qa_io(
     schema_mode: SchemaMode,
     format: OutputFormat,
     backup: bool,
-    qa_io: Option<&mut QaInteractiveIo<'_>>,
+    mut qa_io: Option<&mut QaInteractiveIo<'_>>,
 ) -> Result<()> {
     let doc = load_ygtc_from_path(&args.flow_path)?;
     let mut flow_ir = FlowIr::from_doc(doc)?;
@@ -9533,9 +10317,16 @@ fn handle_update_step_with_qa_io(
                 &locale,
                 answers,
                 args.interactive,
-                qa_io,
+                qa_io.as_deref_mut(),
             )?;
         }
+        materialize_remote_asset_answers(
+            &spec.qa_spec_cbor,
+            &mut answers,
+            &args.flow_path,
+            args.interactive,
+            qa_io,
+        )?;
 
         let answers_cbor = wizard_ops::answers_to_cbor(&answers)?;
         let mut node = flow_ir

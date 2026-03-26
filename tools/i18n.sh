@@ -9,7 +9,21 @@ TRANSLATOR_BIN="${TRANSLATOR_BIN:-greentic-i18n-translator}"
 BINSTALL_BIN="${BINSTALL_BIN:-cargo-binstall}"
 BATCH_SIZE="${BATCH_SIZE:-500}"
 LOCAL_CACHE_DIR="${LOCAL_CACHE_DIR:-$ROOT_DIR/.i18n/cache}"
-GLOBAL_CACHE_DIR="${GLOBAL_CACHE_DIR:-$HOME/Library/Caches/greentic/i18n-translator}"
+default_global_cache_dir() {
+  case "$(uname -s)" in
+    Darwin)
+      printf '%s\n' "$HOME/Library/Caches/greentic/i18n-translator"
+      ;;
+    Linux)
+      printf '%s\n' "${XDG_CACHE_HOME:-$HOME/.cache}/greentic/i18n-translator"
+      ;;
+    *)
+      printf '%s\n' "${XDG_CACHE_HOME:-$HOME/.cache}/greentic/i18n-translator"
+      ;;
+  esac
+}
+
+GLOBAL_CACHE_DIR="${GLOBAL_CACHE_DIR:-$(default_global_cache_dir)}"
 CACHE_DIR="${CACHE_DIR:-$GLOBAL_CACHE_DIR}"
 
 ensure_translator() {

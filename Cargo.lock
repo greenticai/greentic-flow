@@ -1429,7 +1429,7 @@ dependencies = [
 
 [[package]]
 name = "greentic-flow"
-version = "0.4.60"
+version = "0.4.61"
 dependencies = [
  "anyhow",
  "assert_cmd",
@@ -1476,9 +1476,9 @@ dependencies = [
 
 [[package]]
 name = "greentic-i18n-translator"
-version = "0.4.10"
+version = "0.4.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "be425645298963a7d7a33d9eef52143f119da7a97796ea98a0ef53c6151b45cc"
+checksum = "4928f431ae9dc810c1ea6bef41d6a2257c9dd775ceb1fe52fa6ebe8b02e67f01"
 dependencies = [
  "blake3",
  "clap",
@@ -1667,9 +1667,9 @@ dependencies = [
 
 [[package]]
 name = "greentic-types"
-version = "0.4.57"
+version = "0.4.58"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "705f50d24a284d23e88d4166c9ecb9177adf555947513cd5f79a534a55813cab"
+checksum = "eee55ef0e8a21fb642a6a2aed9d86dfc4b5ca745328da2093ec617ff274df7ad"
 dependencies = [
  "anyhow",
  "blake3",
@@ -1697,9 +1697,9 @@ dependencies = [
 
 [[package]]
 name = "greentic-types-macros"
-version = "0.4.57"
+version = "0.4.58"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "267c0a6f8e4c09e9a5a864dea1abc55a21afab0937ba6d00497d744fcbb0ce8e"
+checksum = "e0f75e3f64ec1ecc5477b48716248fa9388bbbbc60f275b8e4ee7666791cc792"
 dependencies = [
  "proc-macro2",
  "quote",
