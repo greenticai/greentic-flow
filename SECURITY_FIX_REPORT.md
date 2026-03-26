@@ -1,7 +1,7 @@
 # Security Fix Report
 
-Date (UTC): 2026-03-25
-Branch: `ci/add-workflow-permissions`
+Date (UTC): 2026-03-26
+Branch: `chore/shared-ci-template`
 
 ## Inputs Reviewed
 - Security alerts JSON:
@@ -10,11 +10,14 @@ Branch: `ci/add-workflow-permissions`
 - New PR dependency vulnerabilities: `[]`
 
 ## PR Dependency Change Review
-Compared this branch against `origin/main` (merge-base `e76f1f2ca555671467ec0a47d9e96bb5853668f0`).
+Compared the latest commit range (`HEAD~1..HEAD`).
 
 Files changed in PR:
-- `.github/workflows/dev-publish.yml`
-- `.github/workflows/publish.yml`
+- `.github/workflows/ci.yml`
+
+Dependency manifests/lockfiles present in repo:
+- `Cargo.toml`
+- `Cargo.lock`
 
 Dependency manifests/lockfiles changed in PR:
 - None
@@ -22,16 +25,20 @@ Dependency manifests/lockfiles changed in PR:
 ## Findings
 - No active Dependabot alerts were provided.
 - No active Code Scanning alerts were provided.
-- No new dependency vulnerabilities were provided for this PR.
-- No new dependency-related risk introduced by changed files (workflows only).
+- No new PR dependency vulnerabilities were provided.
+- The PR diff does not modify dependency manifests or lockfiles.
 
 ## Remediation Actions
-- No dependency or source-code remediation was required.
-- No package upgrades or lockfile changes were applied.
+- No code or dependency remediation was required.
+- No version bumps or lockfile updates were applied.
 
 ## Validation Notes
-- Local repository inspection confirmed no dependency file changes in the PR.
-- `cargo-audit` is not available in this CI sandbox, so online advisory DB scanning could not be executed here.
+- Local JSON inputs were validated from:
+  - `security-alerts.json`
+  - `dependabot-alerts.json`
+  - `code-scanning-alerts.json`
+  - `pr-vulnerable-changes.json`
+- Attempted local tool check with `cargo audit -V`; execution failed in sandbox due read-only rustup temp path (`/home/runner/.rustup/tmp`).
 
 ## Final Status
 - `No actionable vulnerabilities detected`.
