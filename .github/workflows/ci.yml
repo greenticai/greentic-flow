@@ -13,7 +13,7 @@ jobs:
     uses: greenticai/.github/.github/workflows/host-crate-ci.yml@main
     with:
       setup-script: |
-        rm -f .cargo/config.toml rust-toolchain.toml
+        rm -f .cargo/config.toml
         ci/check_no_duplicate_canonical_wit.sh
         ci/check_no_component_wizard_usage.sh
         ci/check_no_greentic_interfaces_bindings_usage.sh
