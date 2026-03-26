@@ -3,6 +3,10 @@
   "enabledManagers": ["custom.regex"],
   "baseBranches": ["develop", "release"],
   "labels": ["dependencies", "renovate"],
+  "platformAutomerge": true,
+  "automergeType": "pr",
+  "prCreation": "immediate",
+  "rebaseWhen": "never",
   "customManagers": [
     {
       "customType": "regex",
@@ -41,6 +45,8 @@
       "matchBaseBranches": ["release"],
       "matchFileNames": ["Cargo.toml"],
       "ignoreUnstable": true,
+      "automerge": true,
+      "automergeType": "pr",
       "additionalBranchPrefix": "release-"
     },
     {
