@@ -37,12 +37,12 @@ greentic-distributor-client = { version = "0.4", default-features = false, featu
 url = "2"
 wasmtime = { version = "41", features = ["component-model"] }
 wasmtime-wasi = "41"
-qa-spec = "=0.4.10"
+qa-spec = "=0.4.16"
 sys-locale = "0.3"
 unic-langid = "0.9"
 include_dir = "0.7"
 greentic-i18n-translator = { version = "0.4" }
-greentic-qa-lib = "=0.4.10"
+greentic-qa-lib = "=0.4.16"
 greentic-interfaces-wasmtime = "=0.4.106"
 
 [dev-dependencies]
