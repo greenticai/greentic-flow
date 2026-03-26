@@ -2778,7 +2778,7 @@ fn file_name_from_https_reference(reference: &str) -> Result<String> {
         .with_context(|| format!("parse remote asset URL {reference}"))?;
     let file_name = url
         .path_segments()
-        .and_then(|segments| segments.filter(|segment| !segment.is_empty()).next_back())
+        .and_then(|mut segments| segments.rfind(|segment| !segment.is_empty()))
         .ok_or_else(|| anyhow!("remote asset URL {reference} does not contain a file name"))?;
     Ok(file_name.to_string())
 }
