@@ -17,11 +17,7 @@ jobs:
         with:
           fetch-depth: 0
 
-      - uses: dtolnay/rust-toolchain@1.91.0
-        with:
-          toolchain: 1.91.0
-          override: true
-      - uses: Swatinem/rust-cache@v2
+      - uses: ./.github/actions/rust-setup
 
       - name: Install jq
         run: sudo apt-get update && sudo apt-get install -y jq

@@ -1,0 +1,43 @@
+name: Rust setup
+description: Install Rust, optionally remove local cargo overrides, and warm the cargo cache.
+
+inputs:
+  toolchain:
+    description: Rust toolchain version to install.
+    required: false
+    default: 1.94.0
+  components:
+    description: Comma-separated Rust components to install.
+    required: false
+    default: ""
+  targets:
+    description: Comma-separated Rust targets to install.
+    required: false
+    default: ""
+  override:
+    description: Whether to override the active Rust toolchain.
+    required: false
+    default: "true"
+  remove-local-cargo-config:
+    description: Remove .cargo/config.toml before configuring the toolchain.
+    required: false
+    default: "true"
+
+runs:
+  using: composite
+  steps:
+    - name: Remove local cargo override config if present
+      if: inputs.remove-local-cargo-config == 'true'
+      shell: bash
+      run: rm -f .cargo/config.toml
+
+    - name: Install Rust toolchain
+      uses: dtolnay/rust-toolchain@master
+      with:
+        toolchain: ${{ inputs.toolchain }}
+        override: ${{ inputs.override }}
+        components: ${{ inputs.components }}
+        targets: ${{ inputs.targets }}
+
+    - name: Restore cargo cache
+      uses: Swatinem/rust-cache@v2
