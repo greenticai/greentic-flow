@@ -1,7 +1,8 @@
 # Security Fix Report
 
-Date (UTC): 2026-03-25
-Branch: `ci/add-workflow-permissions`
+Date (UTC): 2026-03-26
+Branch: `chore/shared-dependabot-automerge`
+Commit: `d66ab56`
 
 ## Inputs Reviewed
 - Security alerts JSON:
@@ -10,29 +11,23 @@ Branch: `ci/add-workflow-permissions`
 - New PR dependency vulnerabilities: `[]`
 
 ## PR Dependency Change Review
-Compared this branch against `origin/main` (merge-base `e76f1f2ca555671467ec0a47d9e96bb5853668f0`).
+Base branch used for comparison: `origin/main`
 
-Files changed in PR:
-- `.github/workflows/dev-publish.yml`
-- `.github/workflows/publish.yml`
+Dependency manifests/lockfiles present in repo:
+- `Cargo.toml`
+- `Cargo.lock`
 
-Dependency manifests/lockfiles changed in PR:
+Dependency manifests/lockfiles changed in PR (`origin/main...HEAD`):
 - None
 
 ## Findings
-- No active Dependabot alerts were provided.
-- No active Code Scanning alerts were provided.
-- No new dependency vulnerabilities were provided for this PR.
-- No new dependency-related risk introduced by changed files (workflows only).
+- No Dependabot alerts were provided.
+- No Code Scanning alerts were provided.
+- No new PR dependency vulnerabilities were provided.
+- No dependency-file changes were introduced by this PR.
 
 ## Remediation Actions
-- No dependency or source-code remediation was required.
-- No package upgrades or lockfile changes were applied.
-
-## Validation Notes
-- Local repository inspection confirmed no dependency file changes in the PR.
-- `cargo-audit` is not available in this CI sandbox, so online advisory DB scanning could not be executed here.
+- No remediation changes were required or applied.
 
 ## Final Status
-- `No actionable vulnerabilities detected`.
-- `No security fixes necessary for this PR`.
+- No actionable vulnerabilities detected from provided alerts and PR dependency changes.

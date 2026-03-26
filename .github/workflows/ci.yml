@@ -1,79 +1,31 @@
-name: Rust CI
-permissions:
-  contents: read
-
+name: CI
 on:
+  workflow_call:
   push:
     branches: [main]
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
-  fmt:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Remove local cargo override config if present
-        run: rm -f .cargo/config.toml
-      - uses: dtolnay/rust-toolchain@1.91.0
-        with:
-          toolchain: 1.91.0
-          override: true
-          components: rustfmt
-      - name: rustc --version
-        run: rustc --version
-      - name: cargo fmt --check
-        run: cargo fmt --check
-      - name: verify canonical greentic component WIT is not vendored
-        run: ci/check_no_duplicate_canonical_wit.sh
-      - name: verify component-wizard ABI is not used in src/tests
-        run: ci/check_no_component_wizard_usage.sh
-      - name: verify greentic_interfaces bindings::* is not used in downstream code/docs
-        run: ci/check_no_greentic_interfaces_bindings_usage.sh
+  ci:
+    uses: greenticai/.github/.github/workflows/host-crate-ci.yml@main
+    with:
+      setup-script: |
+        rm -f .cargo/config.toml
+        ci/check_no_duplicate_canonical_wit.sh
+        ci/check_no_component_wizard_usage.sh
+        ci/check_no_greentic_interfaces_bindings_usage.sh
 
-  clippy:
+  doctor:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.91.0
+      - uses: Swatinem/rust-cache@v2
       - name: Remove local cargo override config if present
         run: rm -f .cargo/config.toml
-      - uses: dtolnay/rust-toolchain@1.91.0
-        with:
-          toolchain: 1.91.0
-          override: true
-          components: clippy
-      - name: rustc --version
-        run: rustc --version
-      - uses: Swatinem/rust-cache@v2
-      - name: verify canonical greentic component WIT is not vendored
-        run: ci/check_no_duplicate_canonical_wit.sh
-      - name: verify component-wizard ABI is not used in src/tests
-        run: ci/check_no_component_wizard_usage.sh
-      - name: verify greentic_interfaces bindings::* is not used in downstream code/docs
-        run: ci/check_no_greentic_interfaces_bindings_usage.sh
-      - name: cargo clippy
-        run: cargo clippy --all-targets --all-features -- -D warnings
-
-  test:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Remove local cargo override config if present
-        run: rm -f .cargo/config.toml
-      - uses: dtolnay/rust-toolchain@1.91.0
-        with:
-          toolchain: 1.91.0
-          override: true
-      - name: rustc --version
-        run: rustc --version
-      - uses: Swatinem/rust-cache@v2
-      - name: verify canonical greentic component WIT is not vendored
-        run: ci/check_no_duplicate_canonical_wit.sh
-      - name: verify component-wizard ABI is not used in src/tests
-        run: ci/check_no_component_wizard_usage.sh
-      - name: verify greentic_interfaces bindings::* is not used in downstream code/docs
-        run: ci/check_no_greentic_interfaces_bindings_usage.sh
-      - name: cargo test
-        run: cargo test --all-features
       - name: greentic-flow doctor --json smoke
         run: |
           cargo build --quiet --bin greentic-flow
@@ -82,11 +34,10 @@ jobs:
         run: |
           url="https://raw.githubusercontent.com/greenticai/greentic-flow/refs/heads/main/schemas/ygtc.flow.schema.json"
           curl -sSf "$url" -o /tmp/published-schema.json
-          python - <<'PY'
+          python3 - <<'PY'
           import json
           published = json.load(open("/tmp/published-schema.json"))
           local = json.load(open("schemas/ygtc.flow.schema.json"))
           if published.get("$id") != local.get("$id"):
               raise SystemExit(f"schema $id mismatch: remote={published.get('$id')} local={local.get('$id')}")
           PY
-
