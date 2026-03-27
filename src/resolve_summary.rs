@@ -93,26 +93,60 @@ fn summarize_node(
     source: &ComponentSourceRefV1,
 ) -> Result<NodeResolveSummaryV1> {
     let (source_ref, wasm_path, digest) = resolve_source(flow_path, source)?;
-    let manifest_path = find_manifest_for_wasm(&wasm_path).with_context(|| {
-        format!(
-            "component.manifest.json not found for node '{}' ({})",
-            node_id,
-            wasm_path.display()
-        )
-    })?;
-    let (component_id, manifest) = read_manifest_metadata(&manifest_path).with_context(|| {
-        format!(
-            "failed to read component.manifest.json for node '{}' ({})",
-            node_id,
-            manifest_path.display()
-        )
-    })?;
-    Ok(NodeResolveSummaryV1 {
-        component_id,
-        source: source_ref,
-        digest,
-        manifest,
-    })
+    match find_manifest_for_wasm(&wasm_path) {
+        Ok(manifest_path) => {
+            let (component_id, manifest) =
+                read_manifest_metadata(&manifest_path).with_context(|| {
+                    format!(
+                        "failed to read component.manifest.json for node '{}' ({})",
+                        node_id,
+                        manifest_path.display()
+                    )
+                })?;
+            Ok(NodeResolveSummaryV1 {
+                component_id,
+                source: source_ref,
+                digest,
+                manifest,
+            })
+        }
+        Err(_) if !matches!(source, ComponentSourceRefV1::Local { .. }) => {
+            let component_id = component_id_from_source(source)
+                .or_else(|| ComponentId::from_str(node_id).ok())
+                .unwrap_or_else(|| ComponentId::from_str("unknown").expect("valid component id"));
+            eprintln!(
+                "warning: component manifest metadata missing for node '{}'; summary will omit manifest",
+                node_id
+            );
+            Ok(NodeResolveSummaryV1 {
+                component_id,
+                source: source_ref,
+                digest,
+                manifest: None,
+            })
+        }
+        Err(e) => Err(e).with_context(|| {
+            format!(
+                "component.manifest.json not found for node '{}' ({})",
+                node_id,
+                wasm_path.display()
+            )
+        }),
+    }
+}
+
+fn component_id_from_source(source: &ComponentSourceRefV1) -> Option<ComponentId> {
+    let raw_ref = match source {
+        ComponentSourceRefV1::Oci { r#ref, .. } => r#ref,
+        ComponentSourceRefV1::Repo { r#ref, .. } => r#ref,
+        ComponentSourceRefV1::Store { r#ref, .. } => r#ref,
+        ComponentSourceRefV1::Local { .. } => return None,
+    };
+    // Extract component name from ref like "oci://ghcr.io/greenticai/components/templates:latest"
+    let path_part = raw_ref.split("://").last().unwrap_or(raw_ref);
+    let without_tag = path_part.split([':', '@']).next().unwrap_or(path_part);
+    let name = without_tag.rsplit('/').next().unwrap_or(without_tag);
+    ComponentId::from_str(name).ok()
 }
 
 fn resolve_source(
@@ -160,6 +194,16 @@ fn summary_source_ref(source: &ComponentSourceRefV1) -> FlowResolveSummarySource
     }
 }
 
+fn block_on_auto<F: std::future::Future>(fut: F) -> F::Output {
+    if let Ok(handle) = tokio::runtime::Handle::try_current() {
+        tokio::task::block_in_place(|| handle.block_on(fut))
+    } else {
+        tokio::runtime::Runtime::new()
+            .expect("create tokio runtime")
+            .block_on(fut)
+    }
+}
+
 fn resolve_remote(
     _flow_path: &Path,
     reference: &str,
@@ -167,14 +211,13 @@ fn resolve_remote(
     kind: RemoteKind,
 ) -> Result<(FlowResolveSummarySourceRefV1, PathBuf, String)> {
     let client = DistClient::new(Default::default());
-    let rt = tokio::runtime::Runtime::new().context("create tokio runtime")?;
     let digest = match digest_hint {
         Some(d) => d.to_string(),
         None => {
             let source = client
                 .parse_source(reference)
                 .map_err(|e| anyhow!("failed to resolve reference {reference}: {e}"))?;
-            rt.block_on(client.resolve(source, ResolvePolicy))
+            block_on_auto(client.resolve(source, ResolvePolicy))
                 .map_err(|e| anyhow!("failed to resolve reference {reference}: {e}"))?
                 .digest
         }
@@ -188,22 +231,18 @@ fn resolve_remote(
                 reference
             )
         })?;
-        let descriptor = rt
-            .block_on(client.resolve(source, ResolvePolicy))
-            .map_err(|e| {
-                anyhow!(
-                    "component reference {} not available locally: {e}",
-                    reference
-                )
-            })?;
-        let resolved = rt
-            .block_on(client.fetch(&descriptor, CachePolicy))
-            .map_err(|e| {
-                anyhow!(
-                    "component reference {} not available locally: {e}",
-                    reference
-                )
-            })?;
+        let descriptor = block_on_auto(client.resolve(source, ResolvePolicy)).map_err(|e| {
+            anyhow!(
+                "component reference {} not available locally: {e}",
+                reference
+            )
+        })?;
+        let resolved = block_on_auto(client.fetch(&descriptor, CachePolicy)).map_err(|e| {
+            anyhow!(
+                "component reference {} not available locally: {e}",
+                reference
+            )
+        })?;
         resolved
             .cache_path
             .ok_or_else(|| anyhow!("component reference {} has no cache path", reference))?
