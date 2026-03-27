@@ -339,13 +339,14 @@ mod host {
             runtime.component_cache.engine_profile_id().to_string(),
             compute_sha256_digest_for(wasm_bytes),
         );
-        runtime
-            .async_runtime
-            .block_on(
-                runtime
-                    .component_cache
-                    .get_component(&runtime.engine, &key, || Ok(wasm_bytes.to_vec())),
-            )
+        let fut = runtime
+            .component_cache
+            .get_component(&runtime.engine, &key, || Ok(wasm_bytes.to_vec()));
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            tokio::task::block_in_place(|| handle.block_on(fut))
+        } else {
+            runtime.async_runtime.block_on(fut)
+        }
     }
 
     fn add_wasi_imports(linker: &mut Linker<HostState>) -> Result<()> {
