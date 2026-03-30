@@ -1,8 +1,8 @@
 # Security Fix Report
 
-Date: 2026-03-27 (UTC)
+Date: 2026-03-30 (UTC)
 Reviewer: CI Security Reviewer
-Branch: `chore/sync-toolchain`
+Branch: `feat/codeql`
 
 ## Inputs Reviewed
 - Security alerts JSON:
@@ -11,25 +11,25 @@ Branch: `chore/sync-toolchain`
 - New PR dependency vulnerabilities: `[]`
 
 ## Repository Checks Performed
-1. Enumerated dependency manifests in the repo.
+1. Enumerated dependency manifests in the repository.
    - Found: `Cargo.toml`, `Cargo.lock`
-2. Checked for dependency-file changes introduced by this branch compared to `origin/main`.
-   - Command used: `git diff --name-status origin/main...HEAD -- Cargo.toml Cargo.lock`
-   - Result: no changes
-3. Attempted local vulnerability audit for Rust dependencies.
-   - Attempted command: `cargo audit -q --json`
-   - Result: unable to execute in this CI sandbox due to toolchain/network restrictions (Rustup/toolchain sync and advisory fetch unavailable).
+2. Checked PR-introduced dependency file changes against `origin/main`.
+   - Command: `git diff --name-status origin/main...HEAD -- Cargo.toml Cargo.lock`
+   - Result: no changes in dependency manifests or lockfile
+3. Attempted local Rust dependency vulnerability scan.
+   - Command: `cargo audit -q`
+   - Result: scan could not run in this CI sandbox because Rustup failed to create temp files in a read-only location (`/home/runner/.rustup/tmp/...`).
 
 ## Vulnerabilities Found
-- None from provided alert feeds.
-- None newly introduced in PR dependency files (no dependency-file diffs vs `origin/main`).
+- None in provided Dependabot alerts.
+- None in provided code scanning alerts.
+- None in provided PR dependency vulnerability feed.
+- No new dependency-file changes detected in this PR branch.
 
 ## Remediation Actions
-- No code or dependency changes were required.
-- No fixes applied because no actionable vulnerabilities were present in the provided inputs and no new dependency changes were introduced by this PR branch.
+- No repository changes were required to remediate vulnerabilities.
+- No dependency updates were applied because there were no actionable findings.
 
 ## Residual Risk / Notes
-- Local `cargo audit` could not be completed in this sandboxed environment.
-- In a network-enabled CI job, run:
-  - `cargo audit`
-  - and/or rely on GitHub Dependabot + CodeQL as authoritative gating.
+- Local `cargo audit` execution is blocked by CI sandbox filesystem restrictions in this environment.
+- If desired in a writable/network-enabled job, run `cargo audit` as an additional defense-in-depth check.
