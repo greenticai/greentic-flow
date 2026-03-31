@@ -38,7 +38,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           token: ${{ secrets.GH_PAT || github.token }}
-          ref: ${{ github.event.pull_request.head.ref || github.ref_name }}
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
           fetch-depth: 0
 
       - name: Initialize CodeQL
@@ -193,8 +193,6 @@ jobs:
       - name: Commit and push fixes
         id: commit_push
         if: (steps.alerts.outputs.count != '0' || github.event_name == 'pull_request')
-        env:
-          BRANCH: ${{ github.event.pull_request.head.ref || github.ref_name }}
         run: |
           set -euo pipefail
           CHANGED_FILES="$(git diff --name-only)"
@@ -218,11 +216,15 @@ jobs:
           git commit -m "chore(security): codex remediation for security alerts"
 
           if [ "${{ github.event_name }}" = "pull_request" ]; then
-            FIX_BRANCH="${BRANCH}"
+            FIX_BRANCH="$(jq -r '.pull_request.head.ref' "$GITHUB_EVENT_PATH")"
+            if ! [[ "${FIX_BRANCH}" =~ ^[A-Za-z0-9._/-]+$ ]] || [[ "${FIX_BRANCH}" == -* ]] || [[ "${FIX_BRANCH}" == *".."* ]]; then
+              echo "Unsafe pull request head ref: ${FIX_BRANCH}" >&2
+              exit 1
+            fi
             BASE_BRANCH="${{ github.event.pull_request.base.ref }}"
             git push origin "HEAD:${FIX_BRANCH}"
           else
-            BASE_BRANCH="${BRANCH}"
+            BASE_BRANCH="${{ github.ref_name }}"
             FIX_BRANCH="codex/security-fix-${GITHUB_RUN_ID}"
             git checkout -b "${FIX_BRANCH}"
             git push origin "HEAD:${FIX_BRANCH}"

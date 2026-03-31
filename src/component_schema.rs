@@ -38,6 +38,15 @@ impl SchemaResolution {
 }
 
 pub fn resolve_input_schema(manifest_path: &Path, operation: &str) -> Result<SchemaResolution> {
+    if manifest_path.file_name().and_then(|name| name.to_str()) != Some("component.manifest.json") {
+        return Err(FlowError::Internal {
+            message: format!(
+                "manifest path must point to component.manifest.json: {}",
+                manifest_path.display()
+            ),
+            location: FlowErrorLocation::at_path(manifest_path.display().to_string()),
+        });
+    }
     if manifest_path
         .components()
         .any(|component| matches!(component, Component::ParentDir))
@@ -67,6 +76,15 @@ pub fn resolve_input_schema(manifest_path: &Path, operation: &str) -> Result<Sch
             location: FlowErrorLocation::at_path(manifest_path.display().to_string()),
         })?
     };
+    if !safe_manifest_path.is_file() {
+        return Err(FlowError::Internal {
+            message: format!(
+                "manifest path is not a file: {}",
+                safe_manifest_path.display()
+            ),
+            location: FlowErrorLocation::at_path(safe_manifest_path.display().to_string()),
+        });
+    }
     let text = fs::read_to_string(&safe_manifest_path).map_err(|err| FlowError::Internal {
         message: format!("read manifest {}: {err}", safe_manifest_path.display()),
         location: FlowErrorLocation::at_path(safe_manifest_path.display().to_string()),

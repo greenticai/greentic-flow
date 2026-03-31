@@ -4102,12 +4102,10 @@ fn wizard_select_setup_mode<R: Read, W: Write>(
 }
 
 fn frequent_components_latest_url() -> String {
-    env::var("GREENTIC_FLOW_FREQUENT_COMPONENTS_LATEST_URL").unwrap_or_else(|_| {
-        format!(
-            "{}/releases/download/latest/frequent-components.json",
-            env!("CARGO_PKG_REPOSITORY")
-        )
-    })
+    format!(
+        "{}/releases/download/latest/frequent-components.json",
+        env!("CARGO_PKG_REPOSITORY")
+    )
 }
 
 fn is_allowed_frequent_components_host(host: &str) -> bool {
@@ -4167,7 +4165,7 @@ fn parse_frequent_components_catalog(text: &str) -> Result<FrequentComponentsCat
     Ok(catalog)
 }
 
-fn load_frequent_components_catalog_from_location(
+fn load_frequent_components_catalog_from_file_location(
     location: &str,
 ) -> Result<FrequentComponentsCatalog> {
     let trimmed = location.trim();
@@ -4192,39 +4190,47 @@ fn load_frequent_components_catalog_from_location(
         read_catalog_file(Path::new(path))?
     } else {
         let path = Path::new(trimmed);
-        if path.exists() {
-            read_catalog_file(path)?
-        } else {
-            let url = validate_frequent_components_url(trimmed)?;
-            let client = BlockingHttpClient::builder()
-                .timeout(Duration::from_secs(3))
-                .redirect(reqwest::redirect::Policy::custom(|attempt| {
-                    let url = attempt.url();
-                    let host_allowed = url
-                        .host_str()
-                        .map(is_allowed_frequent_components_host)
-                        .unwrap_or(false);
-                    if attempt.previous().len() >= 5 || url.scheme() != "https" || !host_allowed {
-                        attempt.stop()
-                    } else {
-                        attempt.follow()
-                    }
-                }))
-                .build()
-                .context("build HTTP client for frequent-components.json")?;
-            let response = client
-                .get(url)
-                .header(reqwest::header::USER_AGENT, "greentic-flow")
-                .send()
-                .with_context(|| format!("download frequent component catalog {trimmed}"))?;
-            response
-                .error_for_status()
-                .with_context(|| format!("download frequent component catalog {trimmed}"))?
-                .text()
-                .with_context(|| format!("read frequent component catalog response {trimmed}"))?
+        if !path.exists() {
+            anyhow::bail!("frequent component catalog file does not exist: {trimmed}");
         }
+        read_catalog_file(path)?
     };
 
+    parse_frequent_components_catalog(&text)
+}
+
+fn load_frequent_components_catalog_from_url(location: &str) -> Result<FrequentComponentsCatalog> {
+    let trimmed = location.trim();
+    if trimmed.is_empty() {
+        anyhow::bail!("frequent component catalog URL is empty");
+    }
+    let url = validate_frequent_components_url(trimmed)?;
+    let client = BlockingHttpClient::builder()
+        .timeout(Duration::from_secs(3))
+        .redirect(reqwest::redirect::Policy::custom(|attempt| {
+            let url = attempt.url();
+            let host_allowed = url
+                .host_str()
+                .map(is_allowed_frequent_components_host)
+                .unwrap_or(false);
+            if attempt.previous().len() >= 5 || url.scheme() != "https" || !host_allowed {
+                attempt.stop()
+            } else {
+                attempt.follow()
+            }
+        }))
+        .build()
+        .context("build HTTP client for frequent-components.json")?;
+    let response = client
+        .get(url)
+        .header(reqwest::header::USER_AGENT, "greentic-flow")
+        .send()
+        .with_context(|| format!("download frequent component catalog {trimmed}"))?;
+    let text = response
+        .error_for_status()
+        .with_context(|| format!("download frequent component catalog {trimmed}"))?
+        .text()
+        .with_context(|| format!("read frequent component catalog response {trimmed}"))?;
     parse_frequent_components_catalog(&text)
 }
 
@@ -4258,14 +4264,14 @@ fn load_frequent_components_catalog() -> FrequentComponentsCatalog {
     if let Ok(override_location) = env::var("GREENTIC_FLOW_FREQUENT_COMPONENTS_URL")
         && !override_location.trim().is_empty()
         && let Ok(catalog) =
-            load_frequent_components_catalog_from_location(override_location.trim())
+            load_frequent_components_catalog_from_file_location(override_location.trim())
     {
         return catalog;
     }
 
     let embedded = embedded_frequent_components_catalog();
     let latest = frequent_components_latest_url();
-    if let Ok(catalog) = load_frequent_components_catalog_from_location(&latest)
+    if let Ok(catalog) = load_frequent_components_catalog_from_url(&latest)
         && frequent_component_catalog_is_newer(&catalog, &embedded)
     {
         return catalog;
@@ -11922,10 +11928,19 @@ fn resolve_component_manifest_path(
                 validate_component_ref(r#ref)?;
                 ensure_cached_component_path(&client, r#ref)
             };
-            let mut candidate = cached
-                .ok()
-                .and_then(|artifact| artifact.parent().map(|p| p.join("component.manifest.json")))
-                .unwrap_or_else(|| PathBuf::from("component.manifest.json"));
+            let mut candidate = if let Some(parent) = cached.ok().and_then(|artifact| {
+                artifact
+                    .canonicalize()
+                    .ok()
+                    .and_then(|canonical| canonical.parent().map(Path::to_path_buf))
+            }) {
+                parent.join("component.manifest.json")
+            } else {
+                anyhow::bail!(
+                    "resolve component {}: cached artifact path unavailable",
+                    r#ref
+                );
+            };
             if candidate.exists() {
                 return Ok(candidate);
             }
@@ -11966,9 +11981,13 @@ fn resolve_component_manifest_path(
             }
             .map_err(|e| anyhow::anyhow!("resolve component {}: {e}", r#ref))?;
             artifact
-                .parent()
+                .canonicalize()
+                .ok()
+                .and_then(|canonical| canonical.parent().map(Path::to_path_buf))
                 .map(|p| p.join("component.manifest.json"))
-                .unwrap_or_else(|| PathBuf::from("component.manifest.json"))
+                .ok_or_else(|| {
+                    anyhow::anyhow!("resolve component {}: artifact parent missing", r#ref)
+                })?
         }
     };
 
@@ -12016,9 +12035,13 @@ fn load_component_payload(
             }
             .map_err(|e| anyhow::anyhow!("resolve component {}: {e}", r#ref))?;
             artifact
-                .parent()
+                .canonicalize()
+                .ok()
+                .and_then(|canonical| canonical.parent().map(Path::to_path_buf))
                 .map(|p| p.join("component.manifest.json"))
-                .unwrap_or_else(|| PathBuf::from("component.manifest.json"))
+                .ok_or_else(|| {
+                    anyhow::anyhow!("resolve component {}: artifact parent missing", r#ref)
+                })?
         }
     };
 

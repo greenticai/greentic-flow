@@ -137,6 +137,13 @@ pub fn load_ygtc_from_path(path: &Path) -> Result<FlowDoc> {
                 .with_source_path(Some(path)),
         })?
     };
+    if !safe_path.is_file() {
+        return Err(FlowError::Internal {
+            message: format!("flow path is not a file: {}", safe_path.display()),
+            location: FlowErrorLocation::at_path(safe_path.display().to_string())
+                .with_source_path(Some(&safe_path)),
+        });
+    }
     let content = fs::read_to_string(&safe_path).map_err(|e| FlowError::Internal {
         message: format!("failed to read {}: {e}", safe_path.display()),
         location: FlowErrorLocation::at_path(safe_path.display().to_string())
