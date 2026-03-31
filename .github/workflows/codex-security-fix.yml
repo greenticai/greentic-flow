@@ -72,21 +72,27 @@ jobs:
           GH_TOKEN: ${{ secrets.GH_PAT || github.token }}
           OWNER: ${{ github.repository_owner }}
           REPO: ${{ github.event.repository.name }}
+          EVENT_NAME: ${{ github.event_name }}
           MAX_ALERTS: ${{ github.event.inputs.max_alerts || 20 }}
           INCLUDE_ALL: ${{ github.event.inputs.include_all_alerts }}
           INCLUDE_MAIN_CODEQL: ${{ github.event.inputs.include_main_branch_codeql_alerts || vars.INCLUDE_MAIN_BRANCH_CODEQL_ALERTS || 'false' }}
+          PR_HEAD_REF: ${{ github.event.pull_request.head.ref }}
           PR_VULN_CHANGES: ${{ steps.dependency_review.outputs.vulnerable-changes }}
           PR_COMMENT_CONTENT: ${{ steps.dependency_review.outputs.comment-content }}
         run: |
           set -euo pipefail
 
-          if [ "${{ github.event_name }}" == "pull_request" ] && [ "${INCLUDE_ALL}" != "true" ]; then
+          if [ "${EVENT_NAME}" == "pull_request" ] && [ "${INCLUDE_ALL}" != "true" ]; then
             echo "$PR_VULN_CHANGES" > pr-vulnerable-changes.json
             echo "$PR_COMMENT_CONTENT" > pr-comment.md
             
             echo "[]" > all-dependabot-alerts.json
             echo "[]" > dependabot-alerts.json
-            PR_REF="refs/heads/${{ github.event.pull_request.head.ref }}"
+            if ! [[ "${PR_HEAD_REF}" =~ ^[A-Za-z0-9._/-]+$ ]]; then
+              echo "Invalid pull request head ref format" >&2
+              exit 1
+            fi
+            PR_REF="refs/heads/${PR_HEAD_REF}"
             # CodeQL results can appear shortly after analysis upload, so retry a few times.
             for i in 1 2 3; do
               gh api \

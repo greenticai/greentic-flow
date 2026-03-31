@@ -129,15 +129,24 @@ jobs:
           echo "archive=${archive}" >> "$GITHUB_OUTPUT"
           echo "checksum=${checksum}" >> "$GITHUB_OUTPUT"
       - name: Upload release artifacts
-        uses: softprops/action-gh-release@v2
-        with:
-          files: |
-            ${{ steps.package.outputs.archive }}
-            ${{ steps.package.outputs.checksum }}
-            frequent-components.json
-          tag_name: ${{ env.RELEASE_TAG }}
-          name: ${{ env.RELEASE_TITLE }}
-          target_commitish: ${{ github.sha }}
-          generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          if gh release view "${RELEASE_TAG}" >/dev/null 2>&1; then
+            gh release upload "${RELEASE_TAG}" \
+              "${{ steps.package.outputs.archive }}" \
+              "${{ steps.package.outputs.checksum }}" \
+              "frequent-components.json" \
+              --clobber
+            gh release edit "${RELEASE_TAG}" --latest
+          else
+            gh release create "${RELEASE_TAG}" \
+              "${{ steps.package.outputs.archive }}" \
+              "${{ steps.package.outputs.checksum }}" \
+              "frequent-components.json" \
+              --title "${RELEASE_TITLE}" \
+              --target "${{ github.sha }}" \
+              --notes "Automated release artifacts for ${RELEASE_TITLE}" \
+              --latest
+          fi

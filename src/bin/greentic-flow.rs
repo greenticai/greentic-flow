@@ -4110,6 +4110,28 @@ fn frequent_components_latest_url() -> String {
     })
 }
 
+fn is_allowed_frequent_components_host(host: &str) -> bool {
+    matches!(
+        host,
+        "github.com" | "raw.githubusercontent.com" | "objects.githubusercontent.com"
+    )
+}
+
+fn validate_frequent_components_url(raw: &str) -> Result<reqwest::Url> {
+    let parsed =
+        reqwest::Url::parse(raw).with_context(|| format!("invalid catalog URL '{raw}'"))?;
+    if parsed.scheme() != "https" {
+        anyhow::bail!("catalog URL must use https: {raw}");
+    }
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| anyhow!("catalog URL host is missing: {raw}"))?;
+    if !is_allowed_frequent_components_host(host) {
+        anyhow::bail!("catalog URL host is not allowlisted: {host}");
+    }
+    Ok(parsed)
+}
+
 fn parse_frequent_components_catalog(text: &str) -> Result<FrequentComponentsCatalog> {
     let catalog: FrequentComponentsCatalog =
         serde_json::from_str(text).context("parse frequent-components.json")?;
@@ -4162,12 +4184,25 @@ fn load_frequent_components_catalog_from_location(
             fs::read_to_string(path)
                 .with_context(|| format!("read frequent component catalog {}", path.display()))?
         } else {
+            let url = validate_frequent_components_url(trimmed)?;
             let client = BlockingHttpClient::builder()
                 .timeout(Duration::from_secs(3))
+                .redirect(reqwest::redirect::Policy::custom(|attempt| {
+                    let url = attempt.url();
+                    let host_allowed = url
+                        .host_str()
+                        .map(is_allowed_frequent_components_host)
+                        .unwrap_or(false);
+                    if attempt.previous().len() >= 5 || url.scheme() != "https" || !host_allowed {
+                        attempt.stop()
+                    } else {
+                        attempt.follow()
+                    }
+                }))
                 .build()
                 .context("build HTTP client for frequent-components.json")?;
             let response = client
-                .get(trimmed)
+                .get(url)
                 .header(reqwest::header::USER_AGENT, "greentic-flow")
                 .send()
                 .with_context(|| format!("download frequent component catalog {trimmed}"))?;
@@ -11923,9 +11958,15 @@ fn resolve_component_manifest_path(
         }
     };
 
-    if !manifest_path.exists() {
-        anyhow::bail!(
+    let manifest_path = fs::canonicalize(&manifest_path).with_context(|| {
+        format!(
             "component.manifest.json not found at {}",
+            manifest_path.display()
+        )
+    })?;
+    if !manifest_path.is_file() {
+        anyhow::bail!(
+            "component.manifest.json path is not a file: {}",
             manifest_path.display()
         );
     }

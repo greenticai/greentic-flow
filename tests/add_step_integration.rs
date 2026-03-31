@@ -9,6 +9,10 @@ use greentic_flow::{
 use indexmap::indexmap;
 use serde_json::{Map, Value, json};
 
+fn sanitize_for_log(value: &str) -> String {
+    value.replace('\n', "").replace('\r', "")
+}
+
 #[test]
 fn add_step_with_real_manifest_catalog() {
     let manifest_path = match env::var("ADD_STEP_REAL_MANIFEST") {
@@ -28,9 +32,10 @@ fn add_step_with_real_manifest_catalog() {
 
     let catalog = ManifestCatalog::load_from_paths(&[manifest_path]);
     let Some(meta) = catalog.resolve(&component_id) else {
+        let safe_component_id = sanitize_for_log(&component_id);
         eprintln!(
             "skip: component '{}' not found in manifest catalog",
-            component_id
+            safe_component_id
         );
         return;
     };

@@ -1,6 +1,7 @@
 use crate::{
     component_catalog::normalize_manifest_value,
     error::{FlowError, FlowErrorLocation, Result},
+    path_safety::normalize_under_root,
 };
 use jsonschema::Draft;
 use serde_json::{Map, Value};
@@ -37,13 +38,30 @@ impl SchemaResolution {
 }
 
 pub fn resolve_input_schema(manifest_path: &Path, operation: &str) -> Result<SchemaResolution> {
-    let text = fs::read_to_string(manifest_path).map_err(|err| FlowError::Internal {
-        message: format!("read manifest {}: {err}", manifest_path.display()),
-        location: FlowErrorLocation::at_path(manifest_path.display().to_string()),
+    let safe_manifest_path = if manifest_path.is_absolute() {
+        manifest_path
+            .canonicalize()
+            .map_err(|err| FlowError::Internal {
+                message: format!("canonicalize manifest {}: {err}", manifest_path.display()),
+                location: FlowErrorLocation::at_path(manifest_path.display().to_string()),
+            })?
+    } else {
+        let root = std::env::current_dir().map_err(|err| FlowError::Internal {
+            message: format!("resolve current directory for manifest: {err}"),
+            location: FlowErrorLocation::at_path(manifest_path.display().to_string()),
+        })?;
+        normalize_under_root(&root, manifest_path).map_err(|err| FlowError::Internal {
+            message: format!("validate manifest path {}: {err}", manifest_path.display()),
+            location: FlowErrorLocation::at_path(manifest_path.display().to_string()),
+        })?
+    };
+    let text = fs::read_to_string(&safe_manifest_path).map_err(|err| FlowError::Internal {
+        message: format!("read manifest {}: {err}", safe_manifest_path.display()),
+        location: FlowErrorLocation::at_path(safe_manifest_path.display().to_string()),
     })?;
     let mut json: Value = serde_json::from_str(&text).map_err(|err| FlowError::Internal {
-        message: format!("parse manifest {}: {err}", manifest_path.display()),
-        location: FlowErrorLocation::at_path(manifest_path.display().to_string()),
+        message: format!("parse manifest {}: {err}", safe_manifest_path.display()),
+        location: FlowErrorLocation::at_path(safe_manifest_path.display().to_string()),
     })?;
     normalize_manifest_value(&mut json);
     let component_id = json
@@ -65,7 +83,7 @@ pub fn resolve_input_schema(manifest_path: &Path, operation: &str) -> Result<Sch
     Ok(SchemaResolution::new(
         component_id,
         operation.to_string(),
-        manifest_path.to_path_buf(),
+        safe_manifest_path,
         schema,
     ))
 }

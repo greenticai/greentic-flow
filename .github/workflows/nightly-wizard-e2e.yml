@@ -17,7 +17,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/rust-setup
       - name: Install cargo-binstall
-        uses: taiki-e/install-action@cargo-binstall
+        run: cargo install cargo-binstall --locked
       - name: Install greentic-pack
         run: cargo binstall --no-confirm greentic-pack
       - name: Build greentic-flow

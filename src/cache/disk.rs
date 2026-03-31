@@ -151,10 +151,15 @@ impl DiskCache {
             .with_context(|| format!("failed to read {}", artifacts_dir.display()))?
         {
             let entry = entry?;
-            let path = entry.path();
-            if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+            let file_name = entry.file_name();
+            let file_name = file_name.to_string_lossy();
+            let Some(stem) = file_name.strip_suffix(".json") else {
+                continue;
+            };
+            if !is_valid_cache_stem(stem) {
                 continue;
             }
+            let path = artifacts_dir.join(format!("{stem}.json"));
             let raw = match fs::read_to_string(&path) {
                 Ok(raw) => raw,
                 Err(_) => continue,
@@ -164,7 +169,7 @@ impl DiskCache {
                 Err(_) => continue,
             };
             let access = meta.last_access_time();
-            let artifact_path = path.with_extension("cwasm");
+            let artifact_path = artifacts_dir.join(format!("{stem}.cwasm"));
             let size = fs::metadata(&artifact_path).map(|m| m.len()).unwrap_or(0);
             total_bytes = total_bytes.saturating_add(size);
             entries.push((access, meta, artifact_path, path, size));
@@ -248,6 +253,10 @@ impl DiskCache {
             meta_path,
         })
     }
+}
+
+fn is_valid_cache_stem(stem: &str) -> bool {
+    !stem.is_empty() && stem.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
 struct DiskPaths {
