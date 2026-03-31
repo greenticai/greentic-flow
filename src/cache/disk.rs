@@ -241,9 +241,12 @@ impl DiskCache {
         if key.engine_profile_id != self.profile.engine_profile_id {
             bail!("artifact key engine_profile_id mismatch");
         }
+        let Some(digest_hex) = digest_hex(&key.wasm_digest) else {
+            bail!("artifact key digest must be sha256:<64-hex>");
+        };
         let artifacts_dir = self.root.join("artifacts");
         let tmp_dir = self.root.join("tmp");
-        let name = digest_to_filename(&key.wasm_digest);
+        let name = format!("sha256_{digest_hex}");
         let artifact_path = artifacts_dir.join(format!("{}.cwasm", name));
         let meta_path = artifacts_dir.join(format!("{}.json", name));
         Ok(DiskPaths {
@@ -256,7 +259,9 @@ impl DiskCache {
 }
 
 fn is_valid_cache_stem(stem: &str) -> bool {
-    !stem.is_empty() && stem.bytes().all(|b| b.is_ascii_hexdigit())
+    stem.strip_prefix("sha256_")
+        .and_then(digest_hex)
+        .is_some()
 }
 
 struct DiskPaths {
@@ -277,6 +282,11 @@ impl DiskPaths {
     }
 }
 
-fn digest_to_filename(digest: &str) -> String {
-    digest.replace(':', "_")
+fn digest_hex(digest: &str) -> Option<&str> {
+    let hex = digest.strip_prefix("sha256:").unwrap_or(digest);
+    if hex.len() == 64 && hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+        Some(hex)
+    } else {
+        None
+    }
 }

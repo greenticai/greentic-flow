@@ -11349,7 +11349,22 @@ fn trim_sha256_prefix(digest: &str) -> &str {
     digest.strip_prefix("sha256:").unwrap_or(digest)
 }
 
+fn is_valid_sha256_digest(digest: &str) -> bool {
+    let trimmed = trim_sha256_prefix(digest);
+    trimmed.len() == 64 && trimmed.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+fn validate_component_digest(digest: &str) -> Result<()> {
+    if !is_valid_sha256_digest(digest) {
+        anyhow::bail!("component digest must be sha256:<64-hex>");
+    }
+    Ok(())
+}
+
 fn cached_component_manifest_from_digest(digest: &str) -> Option<PathBuf> {
+    if !is_valid_sha256_digest(digest) {
+        return None;
+    }
     let trimmed = trim_sha256_prefix(digest);
     let (prefix, rest) = trimmed.split_at(trimmed.len().min(2));
     let cache_root = distribution_cache_root();
@@ -11878,6 +11893,7 @@ fn ensure_sidecar_source_available(source: &ComponentSourceRefV1, flow_path: &Pa
         | ComponentSourceRefV1::Store { r#ref, digest, .. } => {
             let client = DistClient::new(Default::default());
             if let Some(d) = digest {
+                validate_component_digest(d)?;
                 client.open_cached(d).map_err(|e| {
                     anyhow::anyhow!(
                         "component digest {} not cached; pull or pin locally first: {e}",
@@ -11920,6 +11936,7 @@ fn resolve_component_manifest_path(
                 return Ok(manifest_path);
             }
             let cached: Result<PathBuf> = if let Some(d) = digest {
+                validate_component_digest(d)?;
                 client
                     .open_cached(d)
                     .map(|artifact| artifact.local_path)
@@ -11971,6 +11988,7 @@ fn resolve_component_manifest_path(
                 return Ok(manifest_path);
             }
             let artifact = if let Some(d) = digest {
+                validate_component_digest(d)?;
                 client
                     .open_cached(d)
                     .map(|artifact| artifact.local_path)
@@ -12026,6 +12044,7 @@ fn load_component_payload(
         | ComponentSourceRefV1::Store { r#ref, digest, .. } => {
             let client = DistClient::new(Default::default());
             let artifact = if let Some(d) = digest {
+                validate_component_digest(d)?;
                 client
                     .open_cached(d)
                     .map(|artifact| artifact.local_path)

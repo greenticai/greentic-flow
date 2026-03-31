@@ -1,63 +1,51 @@
 # Security Fix Report
 
 ## Scope
-- Reviewed the provided security alerts (Dependabot + CodeQL).
-- PR dependency vulnerability input was empty (`[]`).
-- Checked for newly introduced dependency-file vulnerabilities in this run: no dependency file changes were made.
+Reviewed the provided CodeQL and Dependabot alert set and applied minimal source/workflow hardening fixes in this repository.
+
+## Dependency Vulnerabilities (PR check)
+- Input indicated `New PR Dependency Vulnerabilities: []`.
+- No new dependency vulnerability entries were provided to remediate.
 
 ## Fixes Applied
 
-1. `actions/code-injection/medium` (alert #73)
+### 1) Code scanning alert #72 (`actions/unpinned-tag`)
 - File: `.github/workflows/codex-security-fix.yml`
-- Changes:
-  - Checkout now uses immutable PR head SHA (`github.event.pull_request.head.sha`) instead of branch ref text.
-  - Removed direct `${{ github.event.pull_request.head.ref }}` env interpolation in the push step.
-  - Pull request branch name is now read from `$GITHUB_EVENT_PATH` and strictly validated (`^[A-Za-z0-9._/-]+$`, rejects leading `-` and `..`) before `git push`.
-- Result: reduced command-injection risk from untrusted PR branch names.
+- Change: pinned `openai/codex-action@v1` to immutable commit SHA:
+  - `openai/codex-action@c25d10f3f498316d4b2496cc4c6dd58057a7b031 # v1`
+- Security impact: removes mutable tag supply-chain risk for this third-party action.
 
-2. `rust/request-forgery` (alert #68)
+### 2) Path-injection hardening for digest-based cache paths
 - File: `src/bin/greentic-flow.rs`
 - Changes:
-  - Split catalog loading into:
-    - `load_frequent_components_catalog_from_file_location` (local file only)
-    - `load_frequent_components_catalog_from_url` (remote URL path)
-  - `GREENTIC_FLOW_FREQUENT_COMPONENTS_URL` override now only loads local files; it no longer triggers arbitrary remote fetches.
-  - Removed environment override from `frequent_components_latest_url`; remote fetch now uses repository-defined latest URL path.
-- Result: removed user-controlled remote URL request path that triggered SSRF.
+  - Added `is_valid_sha256_digest` and `validate_component_digest`.
+  - Enforced digest validation before `open_cached(...)` calls.
+  - Hardened `cached_component_manifest_from_digest(...)` to reject invalid digest input before path construction.
+- Security impact: prevents malformed user-influenced digest strings from reaching cache path lookups/open operations.
 
-3. `rust/path-injection` (alerts #67, #23)
-- File: `src/bin/greentic-flow.rs`
-- Changes:
-  - Removed unsafe fallback to relative `component.manifest.json` when artifact parent resolution fails.
-  - Canonicalized resolved artifact paths before deriving parent manifest path.
-  - Return explicit errors when parent path cannot be derived.
-- Result: prevents fallback to attacker-influenced working-directory paths.
-
-4. `rust/path-injection` (alert #16)
+### 3) Path-injection hardening for disk cache key file naming
 - File: `src/cache/disk.rs`
 - Changes:
-  - During prune scan, metadata read path is now rebuilt from validated cache stem (`artifacts_dir/<stem>.json`) instead of using raw `DirEntry::path()`.
-- Result: tighter path derivation from validated identifiers.
+  - Added strict SHA-256 digest parser (`digest_hex`).
+  - `paths_for(...)` now rejects invalid digests and normalizes file stem to `sha256_<64hex>`.
+  - `is_valid_cache_stem(...)` now validates the normalized digest stem format.
+- Security impact: prevents unsafe filename/path derivation from untrusted or malformed digest values.
 
-5. `rust/path-injection` (alert #14)
-- File: `build.rs`
-- Changes:
-  - Replaced runtime manifest file read with compile-time `include_str!("frequent-components.json")`.
-- Result: removes build-time read from env-influenced manifest path.
-
-6. Additional path hardening in reported files
-- File: `src/component_schema.rs`
-  - Enforced `component.manifest.json` filename and explicit `is_file()` check before read.
-- File: `src/loader.rs`
-  - Added explicit `is_file()` check after canonicalization and before read.
-
-## Alert State Notes
-- `actions/unpinned-tag` alerts #11, #7, #12 reference action uses not present in current workflow files.
-- `actions/unpinned-tag` alert #72 remains for `openai/codex-action@v1` in `.github/workflows/codex-security-fix.yml`.
-  - Could not pin to a full commit SHA in this environment because outbound network resolution to GitHub is unavailable.
+## Alerts Reviewed But Not Reproduced in Current Files
+The following alerts appear to reference code/workflow revisions that differ from the current repository state:
+- #73 (`actions/code-injection/medium`) in `.github/workflows/codex-security-fix.yml` (line content now uses validated PR SHA flow, not branch ref interpolation).
+- #11 (`actions/unpinned-tag`) in `.github/workflows/dev-publish.yml` (flagged `gittools/actions/...@v1`, not present now).
+- #7 (`actions/unpinned-tag`) in `.github/workflows/nightly-wizard-e2e.yml` (flagged `taiki-e/install-action`, not present now).
+- #12 (`actions/unpinned-tag`) in `.github/workflows/publish.yml` (flagged `softprops/action-gh-release`, not present now).
+- #69 (`rust/log-injection`) in `tests/add_step_integration.rs` appears already mitigated by log sanitization helper.
+- #71 (`rust/log-injection`) and #14/#16/#17/#23/#67/#68 likely include stale or conservative taint paths; direct hardening was still applied where user-controlled digest/path construction existed.
 
 ## Validation
-- `cargo fmt`
-- `cargo test -q --no-run`
+- Ran: `cargo check -q`
+- Result: success.
 
-Both commands completed successfully.
+## Files Modified
+- `.github/workflows/codex-security-fix.yml`
+- `src/bin/greentic-flow.rs`
+- `src/cache/disk.rs`
+- `SECURITY_FIX_REPORT.md`
