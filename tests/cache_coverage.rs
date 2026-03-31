@@ -141,7 +141,7 @@ async fn cache_manager_reports_stats_without_compiling_components() {
 
     assert_eq!(manager.disk_stats().unwrap().artifact_count, 0);
     assert_eq!(manager.memory_stats().entries, 0);
-    assert_eq!(manager.engine_profile_id().starts_with("sha256:"), true);
+    assert!(manager.engine_profile_id().starts_with("sha256:"));
 
     let warm = manager
         .warmup(&engine, &[], greentic_flow::cache::WarmupMode::Strict)

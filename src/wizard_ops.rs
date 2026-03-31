@@ -978,6 +978,25 @@ mod host {
         Ok(())
     }
 
+    pub fn run_wizard_ops(
+        wasm_bytes: &[u8],
+        mode: WizardMode,
+        current_config: &[u8],
+        answers: &[u8],
+    ) -> Result<WizardOutput> {
+        let spec = fetch_wizard_spec(wasm_bytes, mode)?;
+        let config_cbor =
+            apply_wizard_answers(wasm_bytes, spec.abi, mode, current_config, answers)?;
+        Ok(WizardOutput {
+            abi: spec.abi,
+            describe_cbor: spec.describe_cbor,
+            descriptor: spec.descriptor,
+            qa_spec_cbor: spec.qa_spec_cbor,
+            answers_cbor: answers.to_vec(),
+            config_cbor,
+        })
+    }
+
     #[cfg(test)]
     mod host_helper_tests {
         use super::*;
@@ -1147,25 +1166,6 @@ mod host {
                     && matches!(value, ciborium::value::Value::Bytes(bytes) if bytes == &vec![0xbb])
             }));
         }
-    }
-
-    pub fn run_wizard_ops(
-        wasm_bytes: &[u8],
-        mode: WizardMode,
-        current_config: &[u8],
-        answers: &[u8],
-    ) -> Result<WizardOutput> {
-        let spec = fetch_wizard_spec(wasm_bytes, mode)?;
-        let config_cbor =
-            apply_wizard_answers(wasm_bytes, spec.abi, mode, current_config, answers)?;
-        Ok(WizardOutput {
-            abi: spec.abi,
-            describe_cbor: spec.describe_cbor,
-            descriptor: spec.descriptor,
-            qa_spec_cbor: spec.qa_spec_cbor,
-            answers_cbor: answers.to_vec(),
-            config_cbor,
-        })
     }
 }
 
