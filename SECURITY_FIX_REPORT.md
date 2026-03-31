@@ -1,54 +1,45 @@
 # Security Fix Report
 
-Date: 2026-03-31 (UTC)
+## Scope
+- Reviewed provided CodeQL and Dependabot alert list.
+- Checked repository for PR dependency vulnerability introductions.
+- Applied minimal remediation in source/workflow files.
 
-## Scope Reviewed
-- Alerts input: 0 Dependabot, 12 CodeQL alerts.
-- PR dependency vulnerability input: `[]` (none reported).
-- Repository check for dependency-file regressions: no dependency vulnerability entries were provided, and no dependency manifest changes were introduced by this remediation.
+## Remediation Applied
 
-## Fixes Applied
+### 1) GitHub Actions code-injection hardening
+- File updated: `.github/workflows/codex-security-fix.yml`
+- Changes:
+  - Replaced direct use of `${{ github.event.inputs.max_alerts }}` in jq expressions with validated shell-side normalization (`MAX_ALERTS_RAW` -> bounded numeric `MAX_ALERTS` in `[1,100]`, default `20`).
+  - Normalized boolean workflow inputs into strict `"true"|"false"` safe variables before control-flow use.
+  - Switched jq slicing to parameterized `--argjson max` instead of string-interpolated jq code.
+- Security impact:
+  - Eliminates expression/code-like interpolation of untrusted workflow input in script/jq contexts.
+  - Reduces injection surface in the alert-fetch step while preserving behavior.
 
-### 1) High severity path-injection hardening (`build.rs`)
-- Alert reference: CodeQL #14 (`rust/path-injection`), `build.rs:23`.
-- Change made:
-  - Replaced runtime `CARGO_MANIFEST_DIR` environment read with compile-time `env!("CARGO_MANIFEST_DIR")`.
-  - Added explicit rejection of `..` segments in `CARGO_TARGET_DIR` before path construction.
-- Security effect:
-  - Reduces trust on mutable runtime environment for manifest root resolution.
-  - Strengthens traversal prevention for target directory input.
+## Alert Analysis
 
-## Alerts Evaluated As Already Remediated In Current Tree
+### Alerts with direct actionable fix in this run
+- `#73 actions/code-injection/medium` (`.github/workflows/codex-security-fix.yml`): **Mitigated** by input normalization + non-interpolated jq arguments.
 
-### Workflow alerts
-- #73 (`actions/code-injection/medium`) in `.github/workflows/codex-security-fix.yml`
-  - Current workflow no longer interpolates `${{ github.event.pull_request.head.ref }}` in shell context.
-  - Uses validated `PR_HEAD_SHA` with strict 40-hex check before API use.
-- #72 (`actions/unpinned-tag`) in `.github/workflows/codex-security-fix.yml`
-  - `openai/codex-action` is pinned to full commit SHA.
-- #11 (`actions/unpinned-tag`) in `.github/workflows/dev-publish.yml`
-  - Reported `gittools/actions/gitversion/execute@v1` usage is not present.
-- #7 (`actions/unpinned-tag`) in `.github/workflows/nightly-wizard-e2e.yml`
-  - Reported `taiki-e/install-action@cargo-binstall` usage is not present.
-- #12 (`actions/unpinned-tag`) in `.github/workflows/publish.yml`
-  - Reported `softprops/action-gh-release@v2` usage is not present.
+### Alerts that appear stale/already remediated in current tree
+- `#72 actions/unpinned-tag` (`.github/workflows/codex-security-fix.yml`): current file already pins `openai/codex-action` to a full commit SHA.
+- `#11 actions/unpinned-tag` (`.github/workflows/dev-publish.yml`): referenced `gittools/actions/gitversion/execute@v1` step is not present; current workflow uses local shell/dotnet invocation.
+- `#7 actions/unpinned-tag` (`.github/workflows/nightly-wizard-e2e.yml`): referenced `taiki-e/install-action@cargo-binstall` step is not present; current workflow uses `cargo install` command.
+- `#12 actions/unpinned-tag` (`.github/workflows/publish.yml`): referenced `softprops/action-gh-release@v2` step is not present; current workflow uses `gh release` CLI.
 
-### Rust alerts
-- #68 (`rust/request-forgery`) in `src/bin/greentic-flow.rs`
-  - Current logic uses fixed release URL + HTTPS scheme enforcement + host allowlist + redirect host/scheme constraints.
-- #71, #69 (`rust/log-injection`) in `src/bin/greentic-flow.rs` and `tests/add_step_integration.rs`
-  - Test location already sanitizes untrusted value before logging.
-  - Reported binary line mapping appears stale relative to current source.
-- #67, #16, #17, #23 (`rust/path-injection`) in `src/bin/greentic-flow.rs`, `src/cache/disk.rs`, `src/component_schema.rs`, `src/loader.rs`
-  - Current code contains traversal/normalization/canonicalization guards at the reported paths; line mappings appear to reference older code states.
+### Rust path/log/SSRF alerts status
+- `#68 rust/request-forgery` and related path/log alerts (`#14`, `#16`, `#17`, `#23`, `#67`, `#69`, `#71`) target files that already contain explicit validation/normalization controls (allowlisted HTTPS host checks, digest/ref validation, root-bound canonicalization, newline sanitization in test logging).
+- No additional minimal safe source change was required beyond workflow hardening in this pass.
+
+## PR Dependency Vulnerability Check
+- Input artifact `New PR Dependency Vulnerabilities` was `[]`.
+- Repository diff check for dependency manifest/lockfile changes found no modified dependency files.
+- Result: **No new dependency vulnerabilities introduced in this PR context**.
 
 ## Validation
-- Ran: `cargo check -q`
-- Result: success.
-
-## Files Modified
-- `build.rs`
-- `SECURITY_FIX_REPORT.md`
+- Ran: `cargo check --quiet`
+- Result: success (exit code 0).
 
 ## Notes
-- `pr-comment.md` was already modified in the working tree before this remediation and was not changed by the security fix work.
+- Existing unrelated workspace change was preserved: `pr-comment.md` (pre-existing modification, not altered by this remediation).
