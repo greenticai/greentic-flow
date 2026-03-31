@@ -119,24 +119,16 @@ pub fn load_ygtc_from_path(path: &Path) -> Result<FlowDoc> {
                 .with_source_path(Some(path)),
         });
     }
-    let safe_path = if path.is_absolute() {
-        fs::canonicalize(path).map_err(|e| FlowError::Internal {
-            message: format!("failed to canonicalize {}: {e}", path.display()),
-            location: FlowErrorLocation::at_path(path.display().to_string())
-                .with_source_path(Some(path)),
-        })?
-    } else {
-        let root = std::env::current_dir().map_err(|e| FlowError::Internal {
-            message: format!("resolve load root: {e}"),
-            location: FlowErrorLocation::at_path(path.display().to_string())
-                .with_source_path(Some(path)),
-        })?;
-        normalize_under_root(&root, path).map_err(|e| FlowError::Internal {
-            message: format!("failed to validate {}: {e}", path.display()),
-            location: FlowErrorLocation::at_path(path.display().to_string())
-                .with_source_path(Some(path)),
-        })?
-    };
+    let root = std::env::current_dir().map_err(|e| FlowError::Internal {
+        message: format!("resolve load root: {e}"),
+        location: FlowErrorLocation::at_path(path.display().to_string())
+            .with_source_path(Some(path)),
+    })?;
+    let safe_path = normalize_under_root(&root, path).map_err(|e| FlowError::Internal {
+        message: format!("failed to validate {}: {e}", path.display()),
+        location: FlowErrorLocation::at_path(path.display().to_string())
+            .with_source_path(Some(path)),
+    })?;
     if !safe_path.is_file() {
         return Err(FlowError::Internal {
             message: format!("flow path is not a file: {}", safe_path.display()),
@@ -184,22 +176,12 @@ pub fn load_ygtc_from_str_with_source(
         location: FlowErrorLocation::at_path(schema_path.display().to_string())
             .with_source_path(Some(schema_path)),
     })?;
-    let safe_schema_path = if schema_path.is_absolute() {
-        fs::canonicalize(schema_path).map_err(|e| FlowError::Internal {
-            message: format!(
-                "schema path canonicalization for {}: {e}",
-                schema_path.display()
-            ),
-            location: FlowErrorLocation::at_path(schema_path.display().to_string())
-                .with_source_path(Some(schema_path)),
-        })?
-    } else {
+    let safe_schema_path =
         normalize_under_root(&schema_root, schema_path).map_err(|e| FlowError::Internal {
             message: format!("schema path validation for {}: {e}", schema_path.display()),
             location: FlowErrorLocation::at_path(schema_path.display().to_string())
                 .with_source_path(Some(schema_path)),
-        })?
-    };
+        })?;
     let schema_label = safe_schema_path.display().to_string();
     let schema_text = fs::read_to_string(&safe_schema_path).map_err(|e| FlowError::Internal {
         message: format!("schema read from {schema_label}: {e}"),

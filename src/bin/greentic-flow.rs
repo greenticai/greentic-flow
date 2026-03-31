@@ -51,6 +51,7 @@ use greentic_flow::{
     json_output::LintJsonOutput,
     lint::{lint_builtin_rules, lint_with_registry},
     loader::{ensure_config_schema_path, load_ygtc_from_path, load_ygtc_from_str},
+    path_safety::normalize_under_root,
     qa_runner,
     questions::{
         Answers as QuestionAnswers, Question, apply_writes_to, extract_answers_from_payload,
@@ -4199,12 +4200,9 @@ fn load_frequent_components_catalog_from_file_location(
     parse_frequent_components_catalog(&text)
 }
 
-fn load_frequent_components_catalog_from_url(location: &str) -> Result<FrequentComponentsCatalog> {
-    let trimmed = location.trim();
-    if trimmed.is_empty() {
-        anyhow::bail!("frequent component catalog URL is empty");
-    }
-    let url = validate_frequent_components_url(trimmed)?;
+fn load_frequent_components_catalog_from_url() -> Result<FrequentComponentsCatalog> {
+    let latest = frequent_components_latest_url();
+    let url = validate_frequent_components_url(&latest)?;
     let client = BlockingHttpClient::builder()
         .timeout(Duration::from_secs(3))
         .redirect(reqwest::redirect::Policy::custom(|attempt| {
@@ -4225,12 +4223,12 @@ fn load_frequent_components_catalog_from_url(location: &str) -> Result<FrequentC
         .get(url)
         .header(reqwest::header::USER_AGENT, "greentic-flow")
         .send()
-        .with_context(|| format!("download frequent component catalog {trimmed}"))?;
+        .with_context(|| format!("download frequent component catalog {latest}"))?;
     let text = response
         .error_for_status()
-        .with_context(|| format!("download frequent component catalog {trimmed}"))?
+        .with_context(|| format!("download frequent component catalog {latest}"))?
         .text()
-        .with_context(|| format!("read frequent component catalog response {trimmed}"))?;
+        .with_context(|| format!("read frequent component catalog response {latest}"))?;
     parse_frequent_components_catalog(&text)
 }
 
@@ -4270,8 +4268,7 @@ fn load_frequent_components_catalog() -> FrequentComponentsCatalog {
     }
 
     let embedded = embedded_frequent_components_catalog();
-    let latest = frequent_components_latest_url();
-    if let Ok(catalog) = load_frequent_components_catalog_from_url(&latest)
+    if let Ok(catalog) = load_frequent_components_catalog_from_url()
         && frequent_component_catalog_is_newer(&catalog, &embedded)
     {
         return catalog;
@@ -5386,7 +5383,7 @@ fn extract_config_value(payload: &serde_json::Value) -> serde_json::Value {
 fn resolve_source_to_wasm(flow_path: &Path, source: &ComponentSourceRefV1) -> Result<Vec<u8>> {
     match source {
         ComponentSourceRefV1::Local { path, .. } => {
-            let local_path = local_path_from_sidecar(path, flow_path);
+            let local_path = local_path_from_sidecar(path, flow_path)?;
             let bytes = fs::read(&local_path)
                 .with_context(|| format!("read wasm at {}", local_path.display()))?;
             Ok(bytes)
@@ -11250,7 +11247,7 @@ fn validate_sidecar_source(source: &ComponentSourceRefV1, flow_path: &Path) -> R
             if path.trim().is_empty() {
                 anyhow::bail!("local wasm path is empty");
             }
-            let abs = local_path_from_sidecar(path, flow_path);
+            let abs = local_path_from_sidecar(path, flow_path)?;
             if !abs.exists() {
                 anyhow::bail!("local wasm missing at {}", abs.display());
             }
@@ -11409,17 +11406,14 @@ fn normalize_local_wasm_path(local: &Path, flow_path: &Path) -> Result<(PathBuf,
     Ok((abs_path, format!("file://{rel_str}")))
 }
 
-fn local_path_from_sidecar(path: &str, flow_path: &Path) -> PathBuf {
+fn local_path_from_sidecar(path: &str, flow_path: &Path) -> Result<PathBuf> {
     let trimmed = path.strip_prefix("file://").unwrap_or(path);
-    let raw = PathBuf::from(trimmed);
-    if raw.is_absolute() {
-        raw
-    } else {
-        flow_path
-            .parent()
-            .unwrap_or_else(|| Path::new("."))
-            .join(raw)
-    }
+    let flow_dir = flow_path.parent().unwrap_or_else(|| Path::new("."));
+    let cwd = std::env::current_dir().context("resolve current directory for sidecar path")?;
+    let safe_flow_dir = normalize_under_root(&cwd, flow_dir)
+        .with_context(|| format!("validate flow path {}", flow_path.display()))?;
+    normalize_under_root(&safe_flow_dir, Path::new(trimmed))
+        .with_context(|| format!("validate sidecar local path {trimmed}"))
 }
 
 fn resolve_component_source_inputs(
@@ -11880,7 +11874,7 @@ fn resolve_component_id_reference(
 fn ensure_sidecar_source_available(source: &ComponentSourceRefV1, flow_path: &Path) -> Result<()> {
     match source {
         ComponentSourceRefV1::Local { path, .. } => {
-            let abs = local_path_from_sidecar(path, flow_path);
+            let abs = local_path_from_sidecar(path, flow_path)?;
             if !abs.exists() {
                 anyhow::bail!(
                     "local wasm for node missing at {}; rebuild component or update sidecar",
@@ -11918,7 +11912,7 @@ fn resolve_component_manifest_path(
     flow_path: &Path,
 ) -> Result<PathBuf> {
     let manifest_path = match source {
-        ComponentSourceRefV1::Local { path, .. } => local_path_from_sidecar(path, flow_path)
+        ComponentSourceRefV1::Local { path, .. } => local_path_from_sidecar(path, flow_path)?
             .parent()
             .map(|p| p.join("component.manifest.json"))
             .unwrap_or_else(|| {
@@ -12030,7 +12024,7 @@ fn load_component_payload(
 ) -> Result<Option<serde_json::Value>> {
     ensure_sidecar_source_available(source, flow_path)?;
     let manifest_path = match source {
-        ComponentSourceRefV1::Local { path, .. } => local_path_from_sidecar(path, flow_path)
+        ComponentSourceRefV1::Local { path, .. } => local_path_from_sidecar(path, flow_path)?
             .parent()
             .map(|p| p.join("component.manifest.json"))
             .unwrap_or_else(|| {

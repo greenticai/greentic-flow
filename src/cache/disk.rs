@@ -147,10 +147,21 @@ impl DiskCache {
         }
         let mut entries = Vec::new();
         let mut total_bytes = 0u64;
+        let artifacts_root = artifacts_dir
+            .canonicalize()
+            .with_context(|| format!("failed to canonicalize {}", artifacts_dir.display()))?;
         for entry in fs::read_dir(&artifacts_dir)
             .with_context(|| format!("failed to read {}", artifacts_dir.display()))?
         {
             let entry = entry?;
+            let meta_path = entry.path();
+            let canonical_meta = match meta_path.canonicalize() {
+                Ok(path) => path,
+                Err(_) => continue,
+            };
+            if !canonical_meta.starts_with(&artifacts_root) || !canonical_meta.is_file() {
+                continue;
+            }
             let file_name = entry.file_name();
             let file_name = file_name.to_string_lossy();
             let Some(stem) = file_name.strip_suffix(".json") else {
@@ -159,8 +170,7 @@ impl DiskCache {
             if !is_valid_cache_stem(stem) {
                 continue;
             }
-            let meta_path = artifacts_dir.join(format!("{stem}.json"));
-            let raw = match fs::read_to_string(&meta_path) {
+            let raw = match fs::read_to_string(&canonical_meta) {
                 Ok(raw) => raw,
                 Err(_) => continue,
             };
@@ -172,7 +182,7 @@ impl DiskCache {
             let artifact_path = artifacts_dir.join(format!("{stem}.cwasm"));
             let size = fs::metadata(&artifact_path).map(|m| m.len()).unwrap_or(0);
             total_bytes = total_bytes.saturating_add(size);
-            entries.push((access, meta, artifact_path, meta_path, size));
+            entries.push((access, meta, artifact_path, canonical_meta, size));
         }
         entries.sort_by_key(|(access, _, _, _, _)| {
             access.map(|ts| ts.timestamp()).unwrap_or(i64::MIN)

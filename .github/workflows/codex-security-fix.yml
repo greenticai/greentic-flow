@@ -193,6 +193,8 @@ jobs:
       - name: Commit and push fixes
         id: commit_push
         if: (steps.alerts.outputs.count != '0' || github.event_name == 'pull_request')
+        env:
+          PR_HEAD_REF: ${{ github.event.pull_request.head.ref }}
         run: |
           set -euo pipefail
           CHANGED_FILES="$(git diff --name-only)"
@@ -216,7 +218,7 @@ jobs:
           git commit -m "chore(security): codex remediation for security alerts"
 
           if [ "${{ github.event_name }}" = "pull_request" ]; then
-            FIX_BRANCH="$(jq -r '.pull_request.head.ref' "$GITHUB_EVENT_PATH")"
+            FIX_BRANCH="${PR_HEAD_REF:-}"
             if ! [[ "${FIX_BRANCH}" =~ ^[A-Za-z0-9._/-]+$ ]] || [[ "${FIX_BRANCH}" == -* ]] || [[ "${FIX_BRANCH}" == *".."* ]]; then
               echo "Unsafe pull request head ref: ${FIX_BRANCH}" >&2
               exit 1
