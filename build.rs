@@ -18,12 +18,18 @@ fn trusted_out_dir() -> PathBuf {
     let out_dir = trusted_env_path("OUT_DIR")
         .canonicalize()
         .expect("canonical OUT_DIR");
-    let manifest_dir = trusted_env_path("CARGO_MANIFEST_DIR")
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .canonicalize()
-        .expect("canonical CARGO_MANIFEST_DIR");
+        .expect("canonical build-time CARGO_MANIFEST_DIR");
     let target_root = env::var_os("CARGO_TARGET_DIR")
         .map(PathBuf::from)
         .map(|path| {
+            assert!(
+                !path
+                    .components()
+                    .any(|component| matches!(component, Component::ParentDir)),
+                "CARGO_TARGET_DIR must not contain parent traversal segments"
+            );
             if path.is_absolute() {
                 path
             } else {
