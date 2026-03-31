@@ -14,6 +14,11 @@ on:
         type: boolean
         required: false
         default: false
+      include_main_branch_codeql_alerts:
+        description: "Also include open CodeQL alerts from main branch"
+        type: boolean
+        required: false
+        default: false
 
 permissions:
   contents: write
@@ -68,6 +73,7 @@ jobs:
           REPO: ${{ github.event.repository.name }}
           MAX_ALERTS: ${{ github.event.inputs.max_alerts || 20 }}
           INCLUDE_ALL: ${{ github.event.inputs.include_all_alerts }}
+          INCLUDE_MAIN_CODEQL: ${{ github.event.inputs.include_main_branch_codeql_alerts || vars.INCLUDE_MAIN_BRANCH_CODEQL_ALERTS || 'false' }}
           PR_VULN_CHANGES: ${{ steps.dependency_review.outputs.vulnerable-changes }}
           PR_COMMENT_CONTENT: ${{ steps.dependency_review.outputs.comment-content }}
         run: |
@@ -88,7 +94,23 @@ jobs:
               if [ "$i" -lt 3 ]; then sleep 10; fi
             done
             [ -f all-code-scanning-alerts.json ] || echo "[]" > all-code-scanning-alerts.json
-            jq ".[0:(${MAX_ALERTS}|tonumber)]" all-code-scanning-alerts.json > code-scanning-alerts.json
+
+            jq ".[0:(${MAX_ALERTS}|tonumber)]" all-code-scanning-alerts.json > pr-code-scanning-alerts.json
+
+            if [ "${INCLUDE_MAIN_CODEQL}" = "true" ]; then
+              MAIN_REF="refs/heads/main"
+              gh api \
+                -H "Accept: application/vnd.github+json" \
+                "/repos/${OWNER}/${REPO}/code-scanning/alerts?state=open&ref=${MAIN_REF}&tool_name=CodeQL&per_page=100" > main-code-scanning-alerts.json || echo "[]" > main-code-scanning-alerts.json
+              jq -s '
+                add
+                | unique_by((.rule.id // "unknown") + "|" + (.most_recent_instance.location.path // ""))
+                | .[0:('"${MAX_ALERTS}"'|tonumber)]
+              ' pr-code-scanning-alerts.json main-code-scanning-alerts.json > code-scanning-alerts.json
+            else
+              cp pr-code-scanning-alerts.json code-scanning-alerts.json
+            fi
+            cp code-scanning-alerts.json all-code-scanning-alerts.json
             CODE_COUNT=$(jq 'length' code-scanning-alerts.json)
             echo '{"dependabot": [], "code_scanning": []}' > security-alerts.json
             jq -n \
@@ -96,7 +118,7 @@ jobs:
               --slurpfile code_scanning code-scanning-alerts.json \
               '{dependabot: $dependabot[0], code_scanning: $code_scanning[0]}' > security-alerts.json
             echo "count=${CODE_COUNT}" >> "$GITHUB_OUTPUT"
-            echo "Skipping global alerts fetch for pull request. Found ${CODE_COUNT} PR-branch CodeQL alerts."
+            echo "Skipping global alerts fetch for pull request. Found ${CODE_COUNT} CodeQL alerts (PR + optional main branch)."
             exit 0
           fi
           
@@ -109,10 +131,11 @@ jobs:
             "/repos/${OWNER}/${REPO}/dependabot/alerts?state=open&per_page=100" > all-dependabot-alerts.json || echo "[]" > all-dependabot-alerts.json
           jq ".[0:(${MAX_ALERTS}|tonumber)]" all-dependabot-alerts.json > dependabot-alerts.json
 
-          # Fetch Code Scanning alerts
+          # Fetch Code Scanning alerts from main branch so non-PR runs can create remediation branches/PRs.
+          MAIN_REF="refs/heads/main"
           gh api \
             -H "Accept: application/vnd.github+json" \
-            "/repos/${OWNER}/${REPO}/code-scanning/alerts?state=open&per_page=100" > all-code-scanning-alerts.json || echo "[]" > all-code-scanning-alerts.json
+            "/repos/${OWNER}/${REPO}/code-scanning/alerts?state=open&ref=${MAIN_REF}&tool_name=CodeQL&per_page=100" > all-code-scanning-alerts.json || echo "[]" > all-code-scanning-alerts.json
           jq ".[0:(${MAX_ALERTS}|tonumber)]" all-code-scanning-alerts.json > code-scanning-alerts.json
 
           DEP_COUNT=$(jq 'length' dependabot-alerts.json)
@@ -252,6 +275,8 @@ jobs:
           path: |
             all-dependabot-alerts.json
             all-code-scanning-alerts.json
+            pr-code-scanning-alerts.json
+            main-code-scanning-alerts.json
             dependabot-alerts.json
             code-scanning-alerts.json
             security-alerts.json
