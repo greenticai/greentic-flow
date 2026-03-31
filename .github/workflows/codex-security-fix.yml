@@ -89,6 +89,27 @@ jobs:
             done
             [ -f all-code-scanning-alerts.json ] || echo "[]" > all-code-scanning-alerts.json
             jq ".[0:(${MAX_ALERTS}|tonumber)]" all-code-scanning-alerts.json > code-scanning-alerts.json
+
+            # Fallback: if API hasn't indexed alerts yet, extract findings from CodeQL SARIF.
+            if [ "$(jq 'length' code-scanning-alerts.json)" -eq 0 ] && [ -f ../results/rust.sarif ]; then
+              jq -c '[
+                .runs[]?.results[]? |
+                {
+                  state: "open",
+                  rule: {
+                    id: .ruleId,
+                    description: (.message.text // "CodeQL finding")
+                  },
+                  most_recent_instance: {
+                    location: {
+                      path: (.locations[0].physicalLocation.artifactLocation.uri // "")
+                    }
+                  }
+                }
+              ]' ../results/rust.sarif > code-scanning-alerts.json || echo "[]" > code-scanning-alerts.json
+              cp code-scanning-alerts.json all-code-scanning-alerts.json
+            fi
+
             CODE_COUNT=$(jq 'length' code-scanning-alerts.json)
             echo '{"dependabot": [], "code_scanning": []}' > security-alerts.json
             jq -n \
