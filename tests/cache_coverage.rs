@@ -4,8 +4,8 @@ use greentic_flow::cache::metadata::ArtifactMetadata;
 use greentic_flow::cache::{ArtifactKey, CacheConfig, CacheManager, CpuPolicy, EngineProfile};
 use std::sync::Arc;
 use tempfile::tempdir;
-use wasmtime::{Config, Engine};
 use wasmtime::component::Component;
+use wasmtime::{Config, Engine};
 
 fn test_engine() -> Engine {
     let mut config = Config::new();
@@ -96,8 +96,14 @@ fn memory_cache_tracks_hits_misses_and_eviction_policy() {
     assert_eq!(stats.hits, 2);
     assert_eq!(stats.evictions, 1);
     assert_eq!(stats.entries, 1);
-    assert!(cache.get(&key_a).is_some(), "frequently used item should be protected");
-    assert!(cache.get(&key_b).is_none(), "newer item should have been evicted");
+    assert!(
+        cache.get(&key_a).is_some(),
+        "frequently used item should be protected"
+    );
+    assert!(
+        cache.get(&key_b).is_none(),
+        "newer item should have been evicted"
+    );
 }
 
 #[test]
@@ -137,7 +143,10 @@ async fn cache_manager_reports_stats_without_compiling_components() {
     assert_eq!(manager.memory_stats().entries, 0);
     assert_eq!(manager.engine_profile_id().starts_with("sha256:"), true);
 
-    let warm = manager.warmup(&engine, &[], greentic_flow::cache::WarmupMode::Strict).await.unwrap();
+    let warm = manager
+        .warmup(&engine, &[], greentic_flow::cache::WarmupMode::Strict)
+        .await
+        .unwrap();
     assert_eq!(warm.warmed, 0);
     assert_eq!(manager.doctor().entries_checked, 0);
 

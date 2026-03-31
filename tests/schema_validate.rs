@@ -139,7 +139,10 @@ fn schema_validate_reports_invalid_object_keys_additional_schema_and_refs() {
     };
     let value = CborValue::Map(vec![
         (CborValue::Integer(1.into()), CborValue::Bool(true)),
-        (CborValue::Text("extra".to_string()), CborValue::Text("x".to_string())),
+        (
+            CborValue::Text("extra".to_string()),
+            CborValue::Text("x".to_string()),
+        ),
     ]);
     let diags = validate_value_against_schema(&schema, &value);
     assert!(diags.iter().any(|d| d.code == "SCHEMA_INVALID_KEY"));

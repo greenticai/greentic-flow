@@ -12,7 +12,9 @@ use greentic_flow::{
     },
 };
 use greentic_types::i18n_text::I18nText;
-use greentic_types::schemas::component::v0_6_0::{ChoiceOption, ComponentQaSpec, QaMode, Question, QuestionKind};
+use greentic_types::schemas::component::v0_6_0::{
+    ChoiceOption, ComponentQaSpec, QaMode, Question, QuestionKind,
+};
 use serde_json::{Map, json};
 use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
@@ -33,7 +35,8 @@ fn normalize_under_root_accepts_nested_files_and_rejects_escape_attempts() {
         .expect_err("escape path should fail");
     assert!(format!("{err:#}").contains("failed to canonicalize"));
 
-    let err = normalize_under_root(dir.path(), file.as_path()).expect_err("absolute path should fail");
+    let err =
+        normalize_under_root(dir.path(), file.as_path()).expect_err("absolute path should fail");
     assert!(format!("{err:#}").contains("absolute paths are not allowed"));
 
     #[cfg(unix)]
@@ -94,15 +97,27 @@ fn wizard_ops_convert_and_validate_answer_payloads() {
     let json_cbor = json_to_cbor(&json).unwrap();
     assert_eq!(cbor_to_json(&json_cbor).unwrap(), json);
 
-    assert_eq!(cbor_value_to_json(&CborValue::Bytes(vec![1, 2])).unwrap(), json!([1, 2]));
-    assert_eq!(cbor_value_to_json(&CborValue::Tag(42, Box::new(CborValue::Bool(true)))).unwrap(), json!(true));
+    assert_eq!(
+        cbor_value_to_json(&CborValue::Bytes(vec![1, 2])).unwrap(),
+        json!([1, 2])
+    );
+    assert_eq!(
+        cbor_value_to_json(&CborValue::Tag(42, Box::new(CborValue::Bool(true)))).unwrap(),
+        json!(true)
+    );
 
-    let err = cbor_value_to_json(&CborValue::Map(vec![(CborValue::Integer(1.into()), CborValue::Null)]))
-        .expect_err("non-string map keys should fail");
+    let err = cbor_value_to_json(&CborValue::Map(vec![(
+        CborValue::Integer(1.into()),
+        CborValue::Null,
+    )]))
+    .expect_err("non-string map keys should fail");
     assert!(format!("{err}").contains("non-string map key"));
 
     let wide = cbor_value_to_json(&CborValue::Integer(u64::MAX.into())).unwrap();
-    assert!(wide.is_string(), "wide integers should round-trip as strings");
+    assert!(
+        wide.is_string(),
+        "wide integers should round-trip as strings"
+    );
 
     let err = cbor_value_to_json(&CborValue::Float(f64::NAN)).expect_err("nan should fail");
     assert!(format!("{err}").contains("float out of range"));
@@ -121,7 +136,10 @@ fn wizard_ops_misc_helpers_preserve_contract_shapes() {
     assert_eq!(cbor_to_json(&canonical).unwrap(), json!({"a": 1, "b": 2}));
 
     assert_eq!(empty_cbor_map(), vec![0xa0]);
-    assert_eq!(describe_exports_for_meta(WizardAbi::V6), vec!["describe", "invoke"]);
+    assert_eq!(
+        describe_exports_for_meta(WizardAbi::V6),
+        vec!["describe", "invoke"]
+    );
     assert_eq!(abi_version_from_abi(WizardAbi::V6), "0.6.0");
     assert_eq!(WizardMode::Default.as_qa_mode(), QaMode::Default);
     assert_eq!(WizardMode::Setup.as_str(), "setup");
@@ -238,14 +256,29 @@ fn wizard_ops_decode_spec_and_project_questions_and_defaults() {
 
     let questions = qa_spec_to_questions(&decoded, &Default::default(), "en");
     assert_eq!(questions.len(), 6);
-    assert_eq!(questions[0].kind, greentic_flow::questions::QuestionKind::String);
+    assert_eq!(
+        questions[0].kind,
+        greentic_flow::questions::QuestionKind::String
+    );
     assert_eq!(questions[0].default, Some(json!("Ada")));
     assert_eq!(questions[1].choices, vec![json!("fast"), json!("safe")]);
     assert_eq!(questions[1].default, Some(json!("safe")));
-    assert_eq!(questions[2].kind, greentic_flow::questions::QuestionKind::Bool);
-    assert_eq!(questions[3].kind, greentic_flow::questions::QuestionKind::Float);
-    assert_eq!(questions[4].kind, greentic_flow::questions::QuestionKind::String);
-    assert_eq!(questions[5].kind, greentic_flow::questions::QuestionKind::String);
+    assert_eq!(
+        questions[2].kind,
+        greentic_flow::questions::QuestionKind::Bool
+    );
+    assert_eq!(
+        questions[3].kind,
+        greentic_flow::questions::QuestionKind::Float
+    );
+    assert_eq!(
+        questions[4].kind,
+        greentic_flow::questions::QuestionKind::String
+    );
+    assert_eq!(
+        questions[5].kind,
+        greentic_flow::questions::QuestionKind::String
+    );
 
     let mut seed = HashMap::from([("enabled".to_string(), json!(false))]);
     merge_default_answers(&decoded, &mut seed);
@@ -260,7 +293,10 @@ fn wizard_ops_decode_spec_and_project_questions_and_defaults() {
         ..decoded
     };
     merge_default_answers(&invalid_defaults, &mut seed);
-    assert!(!seed.contains_key("broken"), "invalid default cbor should be ignored");
+    assert!(
+        !seed.contains_key("broken"),
+        "invalid default cbor should be ignored"
+    );
 }
 
 #[test]
@@ -269,7 +305,7 @@ fn wizard_ops_decode_spec_rejects_invalid_payloads() {
         .expect_err("invalid payload should fail");
     assert!(format!("{err}").contains("adapt legacy qa-spec json"));
 
-    let err = decode_component_qa_spec(&[], WizardMode::Default)
-        .expect_err("empty payload should fail");
+    let err =
+        decode_component_qa_spec(&[], WizardMode::Default).expect_err("empty payload should fail");
     assert!(format!("{err}").contains("not valid CBOR or legacy JSON"));
 }

@@ -80,12 +80,16 @@ fn run_interactive_with_io<R: BufRead, W: Write>(
         loop {
             let label = resolve_text(&question.label, catalog, locale);
             if let Some(help) = question.help.as_ref() {
-                writeln!(writer, "{} ({})", label, resolve_text(help, catalog, locale)).map_err(
-                    |err| FlowError::Internal {
-                        message: format!("write prompt: {err}"),
-                        location: FlowErrorLocation::new(None, None, None),
-                    },
-                )?;
+                writeln!(
+                    writer,
+                    "{} ({})",
+                    label,
+                    resolve_text(help, catalog, locale)
+                )
+                .map_err(|err| FlowError::Internal {
+                    message: format!("write prompt: {err}"),
+                    location: FlowErrorLocation::new(None, None, None),
+                })?;
             } else {
                 writeln!(writer, "{label}").map_err(|err| FlowError::Internal {
                     message: format!("write prompt: {err}"),
@@ -421,7 +425,12 @@ mod tests {
         I18nText::new(key, Some(fallback.to_string()))
     }
 
-    fn question(id: &str, kind: QuestionKind, required: bool, default: Option<ciborium::value::Value>) -> Question {
+    fn question(
+        id: &str,
+        kind: QuestionKind,
+        required: bool,
+        default: Option<ciborium::value::Value>,
+    ) -> Question {
         Question {
             id: id.to_string(),
             label: text(id, id),
@@ -551,7 +560,13 @@ mod tests {
             .unwrap(),
             json!("./asset.json")
         );
-        assert_eq!(parse_answer(&QuestionKind::Bool, "YES").unwrap(), json!(true));
-        assert_eq!(parse_answer(&QuestionKind::Bool, "no").unwrap(), json!(false));
+        assert_eq!(
+            parse_answer(&QuestionKind::Bool, "YES").unwrap(),
+            json!(true)
+        );
+        assert_eq!(
+            parse_answer(&QuestionKind::Bool, "no").unwrap(),
+            json!(false)
+        );
     }
 }

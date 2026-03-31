@@ -351,7 +351,10 @@ mod tests {
     fn map_flow_type_supports_known_aliases() {
         assert_eq!(map_flow_type("messaging").unwrap(), FlowKind::Messaging);
         assert_eq!(map_flow_type("events").unwrap(), FlowKind::Event);
-        assert_eq!(map_flow_type("component-config").unwrap(), FlowKind::ComponentConfig);
+        assert_eq!(
+            map_flow_type("component-config").unwrap(),
+            FlowKind::ComponentConfig
+        );
         assert!(matches!(
             map_flow_type("unknown").unwrap_err(),
             crate::error::FlowError::UnknownFlowType { .. }
@@ -379,7 +382,13 @@ nodes:
 
         let flow = compile_ygtc_str(yaml).expect("compile flow");
         assert_eq!(flow.entrypoints.get("default"), Some(&json!("start")));
-        match flow.nodes.get(&NodeId::new("start").unwrap()).unwrap().routing.clone() {
+        match flow
+            .nodes
+            .get(&NodeId::new("start").unwrap())
+            .unwrap()
+            .routing
+            .clone()
+        {
             Routing::Branch { on_status, default } => {
                 assert_eq!(on_status.get("ok").unwrap().as_str(), "done");
                 assert_eq!(default.unwrap().as_str(), "fallback");

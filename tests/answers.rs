@@ -45,10 +45,25 @@ fn write_answers_rejects_existing_files_without_overwrite() {
     let mut answers = BTreeMap::new();
     answers.insert("name".to_string(), Value::String("Widget".to_string()));
 
-    write_answers(dir.path(), "flow-main", "node-1", "default", &answers, false).unwrap();
+    write_answers(
+        dir.path(),
+        "flow-main",
+        "node-1",
+        "default",
+        &answers,
+        false,
+    )
+    .unwrap();
 
-    let err = write_answers(dir.path(), "flow-main", "node-1", "default", &answers, false)
-        .expect_err("existing answers should be protected");
+    let err = write_answers(
+        dir.path(),
+        "flow-main",
+        "node-1",
+        "default",
+        &answers,
+        false,
+    )
+    .expect_err("existing answers should be protected");
     assert!(format!("{err}").contains("--overwrite-answers"));
 }
 

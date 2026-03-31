@@ -988,12 +988,21 @@ mod host {
                 schema_source_to_cbor(&SchemaSource::InlineCbor(vec![1, 2]), "qa-spec").unwrap(),
                 vec![1, 2]
             );
-            assert!(schema_source_to_cbor(&SchemaSource::CborSchemaId("schema-id".into()), "qa")
-                .is_err());
-            assert!(schema_source_to_cbor(&SchemaSource::RefPackPath("pack/path".into()), "qa")
-                .is_err());
-            assert!(schema_source_to_cbor(&SchemaSource::RefUri("https://example.invalid".into()), "qa")
-                .is_err());
+            assert!(
+                schema_source_to_cbor(&SchemaSource::CborSchemaId("schema-id".into()), "qa")
+                    .is_err()
+            );
+            assert!(
+                schema_source_to_cbor(&SchemaSource::RefPackPath("pack/path".into()), "qa")
+                    .is_err()
+            );
+            assert!(
+                schema_source_to_cbor(
+                    &SchemaSource::RefUri("https://example.invalid".into()),
+                    "qa"
+                )
+                .is_err()
+            );
         }
 
         #[test]
@@ -1106,11 +1115,18 @@ mod host {
                     && matches!(value, ciborium::value::Value::Null)
             }));
 
-            let invalid_list = wasmtime::component::Val::List(vec![wasmtime::component::Val::Bool(true)]);
+            let invalid_list =
+                wasmtime::component::Val::List(vec![wasmtime::component::Val::Bool(true)]);
             assert!(val_to_bytes(&invalid_list).is_err());
-            assert!(!is_missing_node_instance_error(&anyhow::anyhow!("different error")));
-            assert!(!is_missing_setup_apply_error(&anyhow::anyhow!("different error")));
-            assert!(!is_missing_setup_contract_error(&anyhow::anyhow!("different error")));
+            assert!(!is_missing_node_instance_error(&anyhow::anyhow!(
+                "different error"
+            )));
+            assert!(!is_missing_setup_apply_error(&anyhow::anyhow!(
+                "different error"
+            )));
+            assert!(!is_missing_setup_contract_error(&anyhow::anyhow!(
+                "different error"
+            )));
         }
 
         #[test]
@@ -1310,13 +1326,11 @@ mod tests {
 
     #[test]
     fn setup_payload_and_byte_value_helpers_encode_expected_shapes() {
-        let payload = super::host::setup_apply_payload(
-            super::WizardMode::Update,
-            &[0xaa],
-            &[0xbb, 0xcc],
-        )
-        .expect("payload");
-        let decoded: CValue = ciborium::de::from_reader(payload.as_slice()).expect("decode payload");
+        let payload =
+            super::host::setup_apply_payload(super::WizardMode::Update, &[0xaa], &[0xbb, 0xcc])
+                .expect("payload");
+        let decoded: CValue =
+            ciborium::de::from_reader(payload.as_slice()).expect("decode payload");
         let CValue::Map(entries) = decoded else {
             panic!("expected cbor map");
         };
@@ -1338,16 +1352,28 @@ mod tests {
 
     #[test]
     fn wizard_host_error_classifiers_match_expected_messages() {
-        assert_eq!(super::host::descriptor_mode_name(super::WizardMode::Default), "default");
-        assert_eq!(super::host::descriptor_mode_name(super::WizardMode::Setup), "setup");
-        assert_eq!(super::host::descriptor_mode_name(super::WizardMode::Update), "update");
-        assert_eq!(super::host::descriptor_mode_name(super::WizardMode::Remove), "remove");
-        assert!(super::host::is_missing_node_instance_error(&anyhow::anyhow!(
-            "no exported instance named `greentic:component/node@0.6.0`"
-        )));
-        assert!(super::host::is_missing_setup_contract_error(&anyhow::anyhow!(
-            "component descriptor missing setup.qa-spec"
-        )));
+        assert_eq!(
+            super::host::descriptor_mode_name(super::WizardMode::Default),
+            "default"
+        );
+        assert_eq!(
+            super::host::descriptor_mode_name(super::WizardMode::Setup),
+            "setup"
+        );
+        assert_eq!(
+            super::host::descriptor_mode_name(super::WizardMode::Update),
+            "update"
+        );
+        assert_eq!(
+            super::host::descriptor_mode_name(super::WizardMode::Remove),
+            "remove"
+        );
+        assert!(super::host::is_missing_node_instance_error(
+            &anyhow::anyhow!("no exported instance named `greentic:component/node@0.6.0`")
+        ));
+        assert!(super::host::is_missing_setup_contract_error(
+            &anyhow::anyhow!("component descriptor missing setup.qa-spec")
+        ));
         assert!(super::host::is_missing_setup_apply_error(&anyhow::anyhow!(
             "missing setup.apply_answers function"
         )));
@@ -1360,10 +1386,22 @@ mod tests {
         assert_eq!(super::WizardMode::Update.as_str(), "update");
         assert_eq!(super::WizardMode::Remove.as_str(), "remove");
 
-        assert_eq!(super::WizardMode::Default.as_qa_mode(), greentic_types::schemas::component::v0_6_0::QaMode::Default);
-        assert_eq!(super::WizardMode::Setup.as_qa_mode(), greentic_types::schemas::component::v0_6_0::QaMode::Setup);
-        assert_eq!(super::WizardMode::Update.as_qa_mode(), greentic_types::schemas::component::v0_6_0::QaMode::Update);
-        assert_eq!(super::WizardMode::Remove.as_qa_mode(), greentic_types::schemas::component::v0_6_0::QaMode::Remove);
+        assert_eq!(
+            super::WizardMode::Default.as_qa_mode(),
+            greentic_types::schemas::component::v0_6_0::QaMode::Default
+        );
+        assert_eq!(
+            super::WizardMode::Setup.as_qa_mode(),
+            greentic_types::schemas::component::v0_6_0::QaMode::Setup
+        );
+        assert_eq!(
+            super::WizardMode::Update.as_qa_mode(),
+            greentic_types::schemas::component::v0_6_0::QaMode::Update
+        );
+        assert_eq!(
+            super::WizardMode::Remove.as_qa_mode(),
+            greentic_types::schemas::component::v0_6_0::QaMode::Remove
+        );
     }
 
     #[test]
@@ -1440,8 +1478,10 @@ mod tests {
             )
             .is_err()
         );
-        assert!(super::run_wizard_ops(b"not-a-component", super::WizardMode::Default, &[], &[])
-            .is_err());
+        assert!(
+            super::run_wizard_ops(b"not-a-component", super::WizardMode::Default, &[], &[])
+                .is_err()
+        );
     }
 }
 

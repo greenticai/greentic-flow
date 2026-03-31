@@ -20,11 +20,16 @@ async fn singleflight_serializes_same_key_and_releases_after_drop() {
         tokio::task::yield_now().await;
     }
     assert!(
-        matches!(entered_rx.try_recv(), Err(tokio::sync::oneshot::error::TryRecvError::Empty)),
+        matches!(
+            entered_rx.try_recv(),
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+        ),
         "second acquire should block while first guard is held"
     );
 
     drop(guard);
 
-    waiter.await.expect("waiter should finish once the guard drops");
+    waiter
+        .await
+        .expect("waiter should finish once the guard drops");
 }

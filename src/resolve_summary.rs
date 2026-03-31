@@ -475,7 +475,10 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(manifest_wasm_from_dir(dir.path()).unwrap(), Some(wasm_path.clone()));
+        assert_eq!(
+            manifest_wasm_from_dir(dir.path()).unwrap(),
+            Some(wasm_path.clone())
+        );
         assert!(compute_sha256(&wasm_path).unwrap().starts_with("sha256:"));
 
         fs::write(
