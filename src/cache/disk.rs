@@ -179,7 +179,10 @@ impl DiskCache {
                 Err(_) => continue,
             };
             let access = meta.last_access_time();
-            let artifact_path = artifacts_dir.join(format!("{stem}.cwasm"));
+            let artifact_path = canonical_meta.with_extension("cwasm");
+            if !artifact_path.starts_with(&artifacts_root) {
+                continue;
+            }
             let size = fs::metadata(&artifact_path).map(|m| m.len()).unwrap_or(0);
             total_bytes = total_bytes.saturating_add(size);
             entries.push((access, meta, artifact_path, canonical_meta, size));

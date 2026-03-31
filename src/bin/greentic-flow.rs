@@ -11923,6 +11923,7 @@ fn resolve_component_manifest_path(
             }),
         ComponentSourceRefV1::Oci { r#ref, digest } => {
             let client = DistClient::new(Default::default());
+            validate_component_ref(r#ref)?;
             if let Some(manifest_path) = digest
                 .as_deref()
                 .and_then(cached_component_manifest_from_digest)
@@ -11975,6 +11976,7 @@ fn resolve_component_manifest_path(
         ComponentSourceRefV1::Repo { r#ref, digest }
         | ComponentSourceRefV1::Store { r#ref, digest, .. } => {
             let client = DistClient::new(Default::default());
+            validate_component_ref(r#ref)?;
             if let Some(manifest_path) = digest
                 .as_deref()
                 .and_then(cached_component_manifest_from_digest)
@@ -12037,6 +12039,7 @@ fn load_component_payload(
         | ComponentSourceRefV1::Repo { r#ref, digest }
         | ComponentSourceRefV1::Store { r#ref, digest, .. } => {
             let client = DistClient::new(Default::default());
+            validate_component_ref(r#ref)?;
             let artifact = if let Some(d) = digest {
                 validate_component_digest(d)?;
                 client
@@ -12061,8 +12064,13 @@ fn load_component_payload(
     if !manifest_path.exists() {
         return Ok(None);
     }
-    let text = fs::read_to_string(&manifest_path)
-        .with_context(|| format!("read manifest {}", manifest_path.display()))?;
+    let manifest_path = fs::canonicalize(&manifest_path)
+        .with_context(|| format!("resolve manifest {}", manifest_path.display()))?;
+    if !manifest_path.is_file() {
+        return Ok(None);
+    }
+    let text =
+        fs::read_to_string(&manifest_path).with_context(|| format!("read manifest {}", manifest_path.display()))?;
     let json: serde_json::Value =
         serde_json::from_str(&text).context("parse manifest JSON for defaults")?;
     if let Some(props) = json

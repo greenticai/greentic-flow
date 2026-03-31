@@ -1,5 +1,8 @@
 use std::env;
-use std::{fs, path::PathBuf};
+use std::{
+    fs,
+    path::{Component, PathBuf},
+};
 
 fn trusted_env_path(var: &str) -> PathBuf {
     let raw = env::var(var).unwrap_or_else(|_| panic!("{var}"));
@@ -28,6 +31,23 @@ fn trusted_out_dir() -> PathBuf {
             }
         })
         .unwrap_or_else(|| manifest_dir.join("target"));
+    let target_root = if target_root.exists() {
+        target_root
+            .canonicalize()
+            .expect("canonical CARGO_TARGET_DIR/target")
+    } else {
+        assert!(
+            target_root.is_absolute(),
+            "target root must resolve to an absolute path"
+        );
+        assert!(
+            !target_root
+                .components()
+                .any(|component| matches!(component, Component::ParentDir)),
+            "target root must not contain parent traversal segments"
+        );
+        target_root
+    };
     assert!(
         out_dir.starts_with(&target_root),
         "OUT_DIR must stay under the cargo target directory"
