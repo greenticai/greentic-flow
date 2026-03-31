@@ -101,9 +101,11 @@ jobs:
           cat ci/cargo-patch-dev.toml >> Cargo.toml
 
       - name: Setup GitVersion
-        uses: gittools/actions/gitversion/setup@v1
-        with:
-          versionSpec: "5.x"
+        shell: bash
+        run: |
+          set -euo pipefail
+          dotnet tool update --global GitVersion.Tool --version "5.*"
+          echo "$HOME/.dotnet/tools" >> "$GITHUB_PATH"
       - name: Determine dev version
         id: gitversion
         shell: bash

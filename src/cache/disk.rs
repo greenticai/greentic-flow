@@ -151,6 +151,10 @@ impl DiskCache {
             .with_context(|| format!("failed to read {}", artifacts_dir.display()))?
         {
             let entry = entry?;
+            let path = entry.path();
+            if path.parent() != Some(artifacts_dir.as_path()) {
+                continue;
+            }
             let file_name = entry.file_name();
             let file_name = file_name.to_string_lossy();
             let Some(stem) = file_name.strip_suffix(".json") else {
@@ -159,7 +163,6 @@ impl DiskCache {
             if !is_valid_cache_stem(stem) {
                 continue;
             }
-            let path = artifacts_dir.join(format!("{stem}.json"));
             let raw = match fs::read_to_string(&path) {
                 Ok(raw) => raw,
                 Err(_) => continue,

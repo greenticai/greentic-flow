@@ -30,7 +30,9 @@ fn main() {
 
     let rendered =
         serde_json::to_string_pretty(&json).expect("serialize embedded frequent-components.json");
-    let out_dir = trusted_env_path("OUT_DIR");
+    let out_dir = trusted_env_path("OUT_DIR")
+        .canonicalize()
+        .expect("canonical OUT_DIR");
     let out_path = out_dir.join("frequent-components.embedded.json");
     fs::write(&out_path, format!("{rendered}\n"))
         .unwrap_or_else(|err| panic!("write {}: {err}", out_path.display()));

@@ -7,7 +7,7 @@ use jsonschema::Draft;
 use serde_json::{Map, Value};
 use std::{
     fs,
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
 };
 use url::Url;
 
@@ -38,6 +38,18 @@ impl SchemaResolution {
 }
 
 pub fn resolve_input_schema(manifest_path: &Path, operation: &str) -> Result<SchemaResolution> {
+    if manifest_path
+        .components()
+        .any(|component| matches!(component, Component::ParentDir))
+    {
+        return Err(FlowError::Internal {
+            message: format!(
+                "manifest path must not contain parent traversal segments: {}",
+                manifest_path.display()
+            ),
+            location: FlowErrorLocation::at_path(manifest_path.display().to_string()),
+        });
+    }
     let safe_manifest_path = if manifest_path.is_absolute() {
         manifest_path
             .canonicalize()

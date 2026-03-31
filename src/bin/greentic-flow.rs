@@ -4175,14 +4175,25 @@ fn load_frequent_components_catalog_from_location(
         anyhow::bail!("frequent component catalog location is empty");
     }
 
+    fn read_catalog_file(path: &Path) -> Result<String> {
+        let canonical = fs::canonicalize(path)
+            .with_context(|| format!("resolve frequent component catalog {}", path.display()))?;
+        if !canonical.is_file() {
+            anyhow::bail!(
+                "frequent component catalog path is not a file: {}",
+                canonical.display()
+            );
+        }
+        fs::read_to_string(&canonical)
+            .with_context(|| format!("read frequent component catalog {}", canonical.display()))
+    }
+
     let text = if let Some(path) = trimmed.strip_prefix("file://") {
-        fs::read_to_string(path)
-            .with_context(|| format!("read frequent component catalog {path}"))?
+        read_catalog_file(Path::new(path))?
     } else {
         let path = Path::new(trimmed);
         if path.exists() {
-            fs::read_to_string(path)
-                .with_context(|| format!("read frequent component catalog {}", path.display()))?
+            read_catalog_file(path)?
         } else {
             let url = validate_frequent_components_url(trimmed)?;
             let client = BlockingHttpClient::builder()
@@ -11908,6 +11919,7 @@ fn resolve_component_manifest_path(
                     .map(|artifact| artifact.local_path)
                     .map_err(anyhow::Error::from)
             } else {
+                validate_component_ref(r#ref)?;
                 ensure_cached_component_path(&client, r#ref)
             };
             let mut candidate = cached
@@ -11926,6 +11938,7 @@ fn resolve_component_manifest_path(
             } else {
                 r#ref.to_string()
             };
+            validate_component_ref(&resolved_ref)?;
             let path = ensure_cached_component_path(&client, &resolved_ref)
                 .map_err(|e| anyhow::anyhow!("resolve component {}: {e}", resolved_ref))?;
             if let Some(parent) = path.parent() {
@@ -11948,6 +11961,7 @@ fn resolve_component_manifest_path(
                     .map(|artifact| artifact.local_path)
                     .map_err(anyhow::Error::from)
             } else {
+                validate_component_ref(r#ref)?;
                 ensure_cached_component_path(&client, r#ref)
             }
             .map_err(|e| anyhow::anyhow!("resolve component {}: {e}", r#ref))?;

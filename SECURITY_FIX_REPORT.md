@@ -1,95 +1,54 @@
 # Security Fix Report
 
 ## Scope
-Reviewed the provided CodeQL/Actions alerts and applied minimal, targeted remediations in the reported files.
-
-- Dependabot alerts in input: `0`
-- PR dependency vulnerability input: `[]`
-- Dependency files checked: `Cargo.toml`, `Cargo.lock` (no changes required; no new dependency vulnerabilities provided)
+- Reviewed provided CodeQL and Dependabot alerts.
+- Checked PR dependency vulnerability input: `[]` (no new dependency vulnerabilities reported).
+- Applied minimal, direct fixes in reported source/workflow files.
 
 ## Remediations Applied
 
-### 1) Code injection in workflow (`actions/code-injection/medium`)
-- Alert: `#73`
+1. Code injection hardening in workflow (`actions/code-injection/medium`)
 - File: `.github/workflows/codex-security-fix.yml`
-- Fix:
-  - Removed direct interpolation of `${{ github.event.pull_request.head.ref }}` inside `run:` script logic.
-  - Moved event data to environment variables (`EVENT_NAME`, `PR_HEAD_REF`).
-  - Added branch ref allowlist validation: `^[A-Za-z0-9._/-]+$` before constructing `PR_REF`.
+- Change: replaced PR branch ref input with PR head SHA (`github.event.pull_request.head.sha`), added strict SHA validation (`^[0-9a-fA-F]{40}$`), and used that validated SHA in API filtering.
+- Why: removes reliance on user-controllable branch-name text in shell/API query construction.
 
-### 2) Unpinned action usage (`actions/unpinned-tag`)
+2. Unpinned third-party action removed (`actions/unpinned-tag`)
+- File: `.github/workflows/dev-publish.yml`
+- Change: replaced `gittools/actions/gitversion/setup@v1` with explicit `dotnet tool update --global GitVersion.Tool --version "5.*"` setup.
+- Why: removes unpinned third-party GitHub Action usage from this workflow step.
 
-- Alert: `#11` (`gittools/actions/gitversion/execute@v1`)
-  - File: `.github/workflows/dev-publish.yml`
-  - Fix: Replaced third-party `uses:` execution step with a shell step invoking `dotnet-gitversion` and exporting outputs via `GITHUB_OUTPUT`.
-
-- Alert: `#7` (`taiki-e/install-action@cargo-binstall`)
-  - File: `.github/workflows/nightly-wizard-e2e.yml`
-  - Fix: Replaced with shell install command: `cargo install cargo-binstall --locked`.
-
-- Alert: `#12` (`softprops/action-gh-release@v2`)
-  - File: `.github/workflows/publish.yml`
-  - Fix: Replaced with `gh` CLI release logic (create-or-upload path, idempotent, with `--clobber` on upload).
-
-- Alert: `#72` (`openai/codex-action@v1`)
-  - File: `.github/workflows/codex-security-fix.yml`
-  - Status: **Not pinned in this run**.
-  - Reason: this runner has no network access to resolve/verify the immutable commit SHA for `openai/codex-action@v1`. Replacing this step with an equivalent local command would materially change workflow behavior and runtime assumptions.
-  - Recommended follow-up: pin `openai/codex-action` to a verified full commit SHA from the upstream action repository.
-
-### 3) Rust SSRF (`rust/request-forgery`)
-- Alert: `#68`
+3. Frequent-components load path and network input hardening (`rust/request-forgery` + path safety)
 - File: `src/bin/greentic-flow.rs`
-- Fix:
-  - Added `validate_frequent_components_url` to enforce `https` and host allowlist.
-  - Added redirect policy enforcement that only follows redirects to allowlisted hosts and limits redirect depth.
-  - Remote fetch now uses validated `reqwest::Url`.
+- Change: added canonicalized file-reader helper for local catalog files (`read_catalog_file`), enforcing resolved path + file type checks before read.
+- Change: ensured remote component refs are validated via `validate_component_ref(...)` before cache/resolve operations in `resolve_component_manifest_path`.
+- Why: narrows unsafe path usage and enforces reference validation before resolution/fetch flows.
 
-### 4) Rust path injection (`rust/path-injection`)
-- Alerts: `#14`, `#16`, `#17`, `#23`, `#67`
-- Files and fixes:
+4. Path traversal guards in schema/flow loaders (`rust/path-injection`)
+- File: `src/component_schema.rs`
+- Change: reject manifest paths containing parent traversal components (`..`) before resolution.
+- File: `src/loader.rs`
+- Change: added shared parent-traversal check and enforced it for flow and schema paths before canonicalization/loading.
+- Why: blocks straightforward traversal-form inputs prior to file operations.
 
-- `build.rs` (`#14`)
-  - Added `trusted_env_path` guard for cargo-provided env paths and canonicalized `CARGO_MANIFEST_DIR`.
+5. Disk cache metadata file path tightening (`rust/path-injection`)
+- File: `src/cache/disk.rs`
+- Change: switched to `DirEntry::path()` and required parent directory match to `artifacts_dir` before reading metadata.
+- Why: avoids reconstructing paths from potentially manipulated names and enforces directory locality.
 
-- `src/component_schema.rs` (`#17` path flow)
-  - Canonicalized absolute manifest paths.
-  - Validated relative paths via `normalize_under_root` against current working directory.
-  - Reads now use validated/canonicalized path.
+6. Build script env path hardening (`rust/path-injection`)
+- File: `build.rs`
+- Change: canonicalized `OUT_DIR` before composing output path.
+- Why: ensures trusted canonical output location usage.
 
-- `src/loader.rs` (`#23` path flow)
-  - `load_ygtc_from_path`: canonicalized absolute paths and validated relative paths via `normalize_under_root`.
-  - `load_ygtc_from_str_with_source`: canonicalized absolute schema paths.
+## Alerts Observed vs Current Repository State
+- Alert #7 (`taiki-e/install-action`) and #12 (`softprops/action-gh-release`) reference workflow steps not present in current workflow files; no matching `uses:` entries exist now.
+- Alert #69 (`tests/add_step_integration.rs` log injection) appears already mitigated in current code via newline/carriage-return sanitization helper used in logging.
 
-- `src/cache/disk.rs` (`#16` path flow)
-  - Hardened cache pruning path handling by reconstructing paths from validated hex stems (`*.json`), avoiding direct tainted path chaining.
+## Remaining Risk / Follow-up
+- `.github/workflows/codex-security-fix.yml` still contains `openai/codex-action@v1` (third-party action tag). This remains an `actions/unpinned-tag` candidate until pinned to a full commit SHA.
+- Network access was unavailable in this CI environment, so action tag-to-SHA resolution could not be performed here.
 
-- `src/bin/greentic-flow.rs` (`#67` path flow)
-  - In `resolve_component_manifest_path`, replaced existence-only check with canonicalization + `is_file` validation before returning path.
+## Validation Performed
+- `cargo fmt --all`
+- `cargo check --all-targets` (passed)
 
-### 5) Rust log injection (`rust/log-injection`)
-- Alert: `#69` (test classification)
-- File: `tests/add_step_integration.rs`
-- Fix:
-  - Added `sanitize_for_log` to strip CR/LF from externally-derived values before logging in test output.
-
-- Alert: `#71`
-  - Reported location in `src/bin/greentic-flow.rs` points to code that does not currently log untrusted data at that line in this checkout.
-  - No direct sink at the reported location was reproducible in current source layout.
-
-## Validation
-- Ran: `cargo check --all-targets`
-- Result: **pass**
-
-## Files Modified
-- `.github/workflows/codex-security-fix.yml`
-- `.github/workflows/dev-publish.yml`
-- `.github/workflows/nightly-wizard-e2e.yml`
-- `.github/workflows/publish.yml`
-- `build.rs`
-- `src/bin/greentic-flow.rs`
-- `src/cache/disk.rs`
-- `src/component_schema.rs`
-- `src/loader.rs`
-- `tests/add_step_integration.rs`
-- `SECURITY_FIX_REPORT.md`

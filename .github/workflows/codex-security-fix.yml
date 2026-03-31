@@ -76,7 +76,7 @@ jobs:
           MAX_ALERTS: ${{ github.event.inputs.max_alerts || 20 }}
           INCLUDE_ALL: ${{ github.event.inputs.include_all_alerts }}
           INCLUDE_MAIN_CODEQL: ${{ github.event.inputs.include_main_branch_codeql_alerts || vars.INCLUDE_MAIN_BRANCH_CODEQL_ALERTS || 'false' }}
-          PR_HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           PR_VULN_CHANGES: ${{ steps.dependency_review.outputs.vulnerable-changes }}
           PR_COMMENT_CONTENT: ${{ steps.dependency_review.outputs.comment-content }}
         run: |
@@ -88,11 +88,11 @@ jobs:
             
             echo "[]" > all-dependabot-alerts.json
             echo "[]" > dependabot-alerts.json
-            if ! [[ "${PR_HEAD_REF}" =~ ^[A-Za-z0-9._/-]+$ ]]; then
-              echo "Invalid pull request head ref format" >&2
+            if ! [[ "${PR_HEAD_SHA}" =~ ^[0-9a-fA-F]{40}$ ]]; then
+              echo "Invalid pull request head sha format" >&2
               exit 1
             fi
-            PR_REF="refs/heads/${PR_HEAD_REF}"
+            PR_REF="${PR_HEAD_SHA}"
             # CodeQL results can appear shortly after analysis upload, so retry a few times.
             for i in 1 2 3; do
               gh api \
