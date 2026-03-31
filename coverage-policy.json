@@ -1,0 +1,29 @@
+{
+  "version": 1,
+  "global": {
+    "line_coverage_min": 60.0
+  },
+  "defaults": {
+    "per_file_line_coverage_min": 60.0
+  },
+  "exclusions": {
+    "files": [
+      "build.rs",
+      "src/bin/greentic-flow.rs"
+    ]
+  },
+  "per_file": {
+    "src/path_safety.rs": {
+      "line_coverage_min": 85.0
+    },
+    "src/schema_validate.rs": {
+      "line_coverage_min": 80.0
+    },
+    "src/resolve.rs": {
+      "line_coverage_min": 75.0
+    },
+    "src/wizard_ops.rs": {
+      "line_coverage_min": 75.0
+    }
+  }
+}

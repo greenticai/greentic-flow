@@ -181,3 +181,113 @@ fn config_flow_template_branching_renders_json() {
         .unwrap();
     assert_eq!(interaction.get("enabled"), Some(&json!(true)));
 }
+
+#[test]
+fn config_flow_requires_missing_answers_when_no_default_exists() {
+    let yaml = r#"id: cfg
+type: component-config
+start: ask
+nodes:
+  ask:
+    questions:
+      fields:
+        - id: message
+          prompt: "message"
+          type: "string"
+    routing:
+      - to: emit
+  emit:
+    template: |
+      { "node_id": "hello", "node": { "go": { "input": "{{state.message}}" } } }
+"#;
+
+    let err = run_config_flow(
+        yaml,
+        Path::new("schemas/ygtc.flow.schema.json"),
+        &Map::new(),
+        None,
+    )
+    .expect_err("missing required answers should fail");
+
+    assert!(format!("{err}").contains("missing answer for 'message'"));
+}
+
+#[test]
+fn config_flow_rejects_unsupported_components_and_routing_shapes() {
+    let unsupported_component = r#"id: cfg
+type: component-config
+nodes:
+  only:
+    ai.greentic.process:
+      value: "x"
+"#;
+    let err = run_config_flow(
+        unsupported_component,
+        Path::new("schemas/ygtc.flow.schema.json"),
+        &Map::new(),
+        None,
+    )
+    .expect_err("unsupported component should fail");
+    assert!(format!("{err}").contains("unsupported component"));
+
+    let unsupported_routing = r#"id: cfg
+type: component-config
+nodes:
+  ask:
+    questions:
+      fields:
+        - id: message
+          default: "hi"
+          prompt: "message"
+          type: "string"
+    routing:
+      - status: ok
+        to: emit
+  emit:
+    template: |
+      { "node_id": "hello", "node": { "go": { "input": "hi" } } }
+"#;
+    let err = run_config_flow(
+        unsupported_routing,
+        Path::new("schemas/ygtc.flow.schema.json"),
+        &Map::new(),
+        None,
+    )
+    .expect_err("branch routing should fail");
+    assert!(format!("{err}").contains("unsupported routing shape"));
+}
+
+#[test]
+fn config_flow_rejects_placeholder_node_ids_and_missing_output_fields() {
+    let placeholder = r#"id: cfg
+type: component-config
+nodes:
+  emit:
+    template: |
+      { "node_id": "COMPONENT_STEP", "node": { "go": { "input": "hi" } } }
+"#;
+    let err = run_config_flow(
+        placeholder,
+        Path::new("schemas/ygtc.flow.schema.json"),
+        &Map::new(),
+        None,
+    )
+    .expect_err("placeholder node ids should fail");
+    assert!(format!("{err}").contains("placeholder node id"));
+
+    let missing_node = r#"id: cfg
+type: component-config
+nodes:
+  emit:
+    template: |
+      { "node_id": "hello" }
+"#;
+    let err = run_config_flow(
+        missing_node,
+        Path::new("schemas/ygtc.flow.schema.json"),
+        &Map::new(),
+        None,
+    )
+    .expect_err("missing node payload should fail");
+    assert!(format!("{err}").contains("missing node"));
+}

@@ -9,9 +9,10 @@ LOCAL_CHECK_ONLINE=${LOCAL_CHECK_ONLINE:-0}
 LOCAL_CHECK_STRICT=${LOCAL_CHECK_STRICT:-0}
 LOCAL_CHECK_VERBOSE=${LOCAL_CHECK_VERBOSE:-0}
 LOCAL_CHECK_ALLOW_SKIP=${LOCAL_CHECK_ALLOW_SKIP:-0}
-LOCAL_CHECK_RUST_MM=${LOCAL_CHECK_RUST_MM:-1.91}
+LOCAL_CHECK_RUST_MM=${LOCAL_CHECK_RUST_MM:-}
 LOCAL_CHECK_SCHEMA_REF=${LOCAL_CHECK_SCHEMA_REF:-main}
 SKIPPED_REQUIRED=0
+declare -a REQUIRED_SKIP_REASONS=()
 
 if [[ "${LOCAL_CHECK_VERBOSE}" == "1" ]]; then
   set -x
@@ -31,6 +32,7 @@ skip_step() {
   local required=${2:-0}
   if [[ "${required}" == "1" ]]; then
     SKIPPED_REQUIRED=1
+    REQUIRED_SKIP_REASONS+=("${reason}")
   fi
   if [[ "${LOCAL_CHECK_STRICT}" == "1" ]]; then
     echo "[FAIL] ${reason}"
@@ -43,11 +45,20 @@ skip_step() {
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "${repo_root}"
 
+if [[ -z "${LOCAL_CHECK_RUST_MM}" ]]; then
+  if [[ -f rust-toolchain.toml ]]; then
+    LOCAL_CHECK_RUST_MM="$(sed -nE 's/^[[:space:]]*channel[[:space:]]*=[[:space:]]*"([0-9]+\.[0-9]+)(\.[0-9]+)?".*/\1/p' rust-toolchain.toml | head -n 1)"
+  fi
+fi
+if [[ -z "${LOCAL_CHECK_RUST_MM}" ]]; then
+  LOCAL_CHECK_RUST_MM="$(sed -nE 's/^[[:space:]]*rust-version[[:space:]]*=[[:space:]]*"([0-9]+\.[0-9]+)(\.[0-9]+)?".*/\1/p' Cargo.toml | head -n 1)"
+fi
+
 step "Toolchain versions"
 if need rustc; then
   rustc --version
   rustc_mm="$(rustc -V | awk '{print $2}' | cut -d. -f1,2)"
-  if [[ "${rustc_mm}" != "${LOCAL_CHECK_RUST_MM}" ]]; then
+  if [[ -n "${LOCAL_CHECK_RUST_MM}" && "${rustc_mm}" != "${LOCAL_CHECK_RUST_MM}" ]]; then
     skip_step "rustc ${LOCAL_CHECK_RUST_MM}.x required (found $(rustc -V | awk '{print $2}'))" 1
   fi
 else
@@ -87,23 +98,23 @@ else
   skip_step "cargo fmt requires cargo"
 fi
 
-step "cargo clippy --all-targets --all-features -D warnings"
+step "cargo clippy --workspace --all-targets --all-features -D warnings"
 if need cargo; then
-  cargo clippy --all-targets --all-features -- -D warnings
+  cargo clippy --workspace --all-targets --all-features -- -D warnings
 else
   skip_step "cargo clippy requires cargo"
 fi
 
-step "cargo build --workspace --locked"
+step "cargo build --workspace --locked --all-features"
 if need cargo; then
-  cargo build --workspace --locked
+  cargo build --workspace --locked --all-features
 else
   skip_step "cargo build requires cargo"
 fi
 
-step "cargo test --all-features"
+step "cargo test --workspace --all-features"
 if need cargo; then
-  cargo test --all-features
+  cargo test --workspace --all-features
 else
   skip_step "cargo test requires cargo"
 fi
@@ -146,7 +157,11 @@ fi
 
 if [[ "${SKIPPED_REQUIRED}" == "1" && "${LOCAL_CHECK_ALLOW_SKIP}" != "1" ]]; then
   echo ""
-  echo "[FAIL] Required CI steps were skipped. Re-run with LOCAL_CHECK_ONLINE=1 and all tools installed, or set LOCAL_CHECK_ALLOW_SKIP=1 to override."
+  echo "[FAIL] Required CI steps were skipped:"
+  for reason in "${REQUIRED_SKIP_REASONS[@]}"; do
+    echo "  - ${reason}"
+  done
+  echo "Re-run with the required tools installed, or set LOCAL_CHECK_ALLOW_SKIP=1 to override."
   exit 2
 fi
 
