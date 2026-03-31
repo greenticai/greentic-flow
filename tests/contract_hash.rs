@@ -58,3 +58,33 @@ fn describe_hash_is_deterministic() {
     let hash2 = contracts::describe_hash(&describe).unwrap();
     assert_eq!(hash1, hash2);
 }
+
+#[test]
+fn decode_component_describe_rejects_empty_payload() {
+    let err = contracts::decode_component_describe(&[]).expect_err("empty payload must fail");
+    assert!(format!("{err}").contains("empty payload"));
+}
+
+#[test]
+fn find_operation_reports_missing_operation_id() {
+    let describe = ComponentDescribe {
+        info: ComponentInfo {
+            id: "acme.widget".to_string(),
+            version: "0.1.0".to_string(),
+            role: "tool".to_string(),
+            display_name: None,
+        },
+        provided_capabilities: Vec::new(),
+        required_capabilities: Vec::new(),
+        metadata: BTreeMap::new(),
+        operations: Vec::new(),
+        config_schema: SchemaIr::Object {
+            properties: BTreeMap::new(),
+            required: Vec::new(),
+            additional: AdditionalProperties::Allow,
+        },
+    };
+
+    let err = contracts::find_operation(&describe, "missing").expect_err("missing op must fail");
+    assert!(format!("{err}").contains("operation 'missing' not found"));
+}

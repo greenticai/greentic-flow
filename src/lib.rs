@@ -236,6 +236,11 @@ fn compile_routing(
         if route.reply.unwrap_or(false) {
             return Ok(Routing::Reply);
         }
+        if route.status.is_some() {
+            // A single status route is still conditional; preserve it as custom routing
+            // instead of silently treating it as an unconditional next-hop.
+            return Ok(Routing::Custom(raw.clone()));
+        }
         if let Some(to) = &route.to {
             if to == "out" || is_out {
                 return Ok(Routing::End);
@@ -264,10 +269,6 @@ fn compile_routing(
         }
         if is_out {
             return Ok(Routing::End);
-        }
-        if route.status.is_some() {
-            // single status route without a destination is ambiguous
-            return Ok(Routing::Custom(raw.clone()));
         }
     }
 
@@ -337,4 +338,89 @@ fn resolve_entry(doc: &FlowDoc) -> Option<String> {
         return Some("in".to_string());
     }
     doc.nodes.keys().next().cloned()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::loader::load_ygtc_from_str;
+    use serde_json::json;
+    use tempfile::tempdir;
+
+    #[test]
+    fn map_flow_type_supports_known_aliases() {
+        assert_eq!(map_flow_type("messaging").unwrap(), FlowKind::Messaging);
+        assert_eq!(map_flow_type("events").unwrap(), FlowKind::Event);
+        assert_eq!(map_flow_type("component-config").unwrap(), FlowKind::ComponentConfig);
+        assert!(matches!(
+            map_flow_type("unknown").unwrap_err(),
+            crate::error::FlowError::UnknownFlowType { .. }
+        ));
+    }
+
+    #[test]
+    fn compile_flow_builds_entrypoints_and_branch_routing() {
+        let yaml = r#"id: demo
+type: messaging
+nodes:
+  start:
+    qa.process: {}
+    routing:
+      - status: ok
+        to: done
+      - to: fallback
+  done:
+    template: "ok"
+    routing: out
+  fallback:
+    template: "fallback"
+    routing: reply
+"#;
+
+        let flow = compile_ygtc_str(yaml).expect("compile flow");
+        assert_eq!(flow.entrypoints.get("default"), Some(&json!("start")));
+        match flow.nodes.get(&NodeId::new("start").unwrap()).unwrap().routing.clone() {
+            Routing::Branch { on_status, default } => {
+                assert_eq!(on_status.get("ok").unwrap().as_str(), "done");
+                assert_eq!(default.unwrap().as_str(), "fallback");
+            }
+            other => panic!("expected branch routing, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn compile_ygtc_file_reports_invalid_routing_targets() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("bad.ygtc");
+        std::fs::write(
+            &path,
+            r#"id: demo
+type: messaging
+nodes:
+  start:
+    qa.process: {}
+    routing:
+      - to: missing
+"#,
+        )
+        .unwrap();
+
+        let err = compile_ygtc_file(&path).expect_err("missing routing target should fail");
+        assert!(matches!(err, crate::error::FlowError::MissingNode { .. }));
+    }
+
+    #[test]
+    fn compile_flow_rejects_invalid_routing_shorthand() {
+        let err = load_ygtc_from_str(
+            r#"id: demo
+type: messaging
+nodes:
+  start:
+    qa.process: {}
+    routing: invalid
+"#,
+        )
+        .expect_err("invalid shorthand should fail during load");
+        assert!(matches!(err, crate::error::FlowError::Routing { .. }));
+    }
 }

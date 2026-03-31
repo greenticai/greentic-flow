@@ -433,7 +433,7 @@ mod host {
         }
     }
 
-    fn extract_setup_contract(
+    pub(super) fn extract_setup_contract(
         descriptor: &ComponentDescriptor,
     ) -> Result<(Vec<u8>, Option<Vec<u8>>)> {
         let qa_ref = crate::component_setup::qa_spec_ref(descriptor)
@@ -445,7 +445,7 @@ mod host {
         Ok((qa_spec_cbor, answers_schema_cbor))
     }
 
-    fn ensure_setup_apply_answers_op(descriptor: &ComponentDescriptor) -> Result<()> {
+    pub(super) fn ensure_setup_apply_answers_op(descriptor: &ComponentDescriptor) -> Result<()> {
         if descriptor
             .ops
             .iter()
@@ -589,7 +589,7 @@ mod host {
         }
     }
 
-    fn setup_apply_payload(
+    pub(super) fn setup_apply_payload(
         mode: WizardMode,
         current_config: &[u8],
         answers: &[u8],
@@ -663,7 +663,7 @@ mod host {
         Ok(output_cbor)
     }
 
-    fn descriptor_mode_name(mode: WizardMode) -> &'static str {
+    pub(super) fn descriptor_mode_name(mode: WizardMode) -> &'static str {
         match mode {
             WizardMode::Default => "default",
             WizardMode::Setup => "setup",
@@ -672,11 +672,11 @@ mod host {
         }
     }
 
-    fn is_missing_node_instance_error(err: &anyhow::Error) -> bool {
+    pub(super) fn is_missing_node_instance_error(err: &anyhow::Error) -> bool {
         format!("{err:#}").contains("no exported instance named `greentic:component/node@0.6.0`")
     }
 
-    fn is_missing_setup_contract_error(err: &anyhow::Error) -> bool {
+    pub(super) fn is_missing_setup_contract_error(err: &anyhow::Error) -> bool {
         let msg = format!("{err:#}");
         msg.contains("component descriptor missing setup.qa-spec")
             || msg.contains(
@@ -684,7 +684,7 @@ mod host {
             )
     }
 
-    fn is_missing_setup_apply_error(err: &anyhow::Error) -> bool {
+    pub(super) fn is_missing_setup_apply_error(err: &anyhow::Error) -> bool {
         format!("{err:#}").contains("setup.apply_answers")
     }
 
@@ -833,11 +833,11 @@ mod host {
         )
     }
 
-    fn bytes_to_val(bytes: &[u8]) -> Val {
+    pub(super) fn bytes_to_val(bytes: &[u8]) -> Val {
         Val::List(bytes.iter().copied().map(Val::U8).collect())
     }
 
-    fn val_to_bytes(value: &Val) -> Result<Vec<u8>> {
+    pub(super) fn val_to_bytes(value: &Val) -> Result<Vec<u8>> {
         match value {
             Val::List(values) => values
                 .iter()
@@ -978,6 +978,161 @@ mod host {
         Ok(())
     }
 
+    #[cfg(test)]
+    mod host_helper_tests {
+        use super::*;
+
+        #[test]
+        fn schema_source_to_cbor_accepts_inline_and_rejects_references() {
+            assert_eq!(
+                schema_source_to_cbor(&SchemaSource::InlineCbor(vec![1, 2]), "qa-spec").unwrap(),
+                vec![1, 2]
+            );
+            assert!(schema_source_to_cbor(&SchemaSource::CborSchemaId("schema-id".into()), "qa")
+                .is_err());
+            assert!(schema_source_to_cbor(&SchemaSource::RefPackPath("pack/path".into()), "qa")
+                .is_err());
+            assert!(schema_source_to_cbor(&SchemaSource::RefUri("https://example.invalid".into()), "qa")
+                .is_err());
+        }
+
+        #[test]
+        fn convert_runtime_descriptor_helpers_preserve_fields() {
+            let io_schema = runtime::node::IoSchema {
+                schema: runtime::node::SchemaSource::CborSchemaId("input-schema".to_string()),
+                content_type: "application/cbor".to_string(),
+                schema_version: Some("1".to_string()),
+            };
+            let example = runtime::node::Example {
+                title: "demo".to_string(),
+                input_cbor: vec![4],
+                output_cbor: vec![5],
+            };
+            let op = runtime::node::Op {
+                name: "run".to_string(),
+                summary: Some("summary".to_string()),
+                input: io_schema.clone(),
+                output: runtime::node::IoSchema {
+                    schema: runtime::node::SchemaSource::RefPackPath("schemas/output.cbor".into()),
+                    content_type: "application/cbor".to_string(),
+                    schema_version: Some("2".to_string()),
+                },
+                examples: vec![example],
+            };
+            let schema_ref = runtime::node::SchemaRef {
+                id: "schema-id".to_string(),
+                content_type: "application/json".to_string(),
+                blake3_hash: "hash".to_string(),
+                version: "1".to_string(),
+                bytes: Some(vec![9]),
+                uri: Some("https://example.invalid/schema".to_string()),
+            };
+            let setup = runtime::node::SetupContract {
+                qa_spec: runtime::node::SchemaSource::RefUri(
+                    "https://example.invalid/qa-spec".to_string(),
+                ),
+                answers_schema: runtime::node::SchemaSource::InlineCbor(vec![7]),
+                examples: vec![runtime::node::SetupExample {
+                    title: "setup".to_string(),
+                    answers_cbor: vec![8],
+                }],
+                outputs: vec![
+                    runtime::node::SetupOutput::ConfigOnly,
+                    runtime::node::SetupOutput::TemplateScaffold(
+                        runtime::node::SetupTemplateScaffold {
+                            template_ref: "template".to_string(),
+                            output_layout: Some("layout".to_string()),
+                        },
+                    ),
+                ],
+            };
+
+            let descriptor = convert_descriptor(runtime::node::ComponentDescriptor {
+                name: "component".to_string(),
+                version: "0.1.0".to_string(),
+                summary: Some("summary".to_string()),
+                capabilities: vec!["http".to_string()],
+                ops: vec![op],
+                schemas: vec![schema_ref],
+                setup: Some(setup),
+            });
+
+            assert_eq!(descriptor.name, "component");
+            assert_eq!(descriptor.ops[0].name, "run");
+            assert_eq!(descriptor.ops[0].examples.len(), 1);
+            assert!(matches!(
+                descriptor.ops[0].input.schema,
+                canonical_node::SchemaSource::CborSchemaId(ref id) if id == "input-schema"
+            ));
+            assert!(matches!(
+                descriptor.ops[0].output.schema,
+                canonical_node::SchemaSource::RefPackPath(ref path) if path == "schemas/output.cbor"
+            ));
+            assert_eq!(descriptor.schemas[0].id, "schema-id");
+            assert_eq!(descriptor.setup.as_ref().unwrap().examples.len(), 1);
+            assert_eq!(descriptor.setup.as_ref().unwrap().outputs.len(), 2);
+            assert!(matches!(
+                descriptor.setup.as_ref().unwrap().qa_spec,
+                canonical_node::SchemaSource::RefUri(ref uri)
+                    if uri == "https://example.invalid/qa-spec"
+            ));
+            assert!(matches!(
+                descriptor.setup.as_ref().unwrap().answers_schema,
+                canonical_node::SchemaSource::InlineCbor(ref bytes) if bytes == &vec![7]
+            ));
+        }
+
+        #[test]
+        fn invoke_envelope_sets_local_context_defaults() {
+            let envelope = invoke_envelope(vec![1, 2, 3]);
+            assert_eq!(envelope.flow_id, "wizard-flow");
+            assert_eq!(envelope.step_id, "wizard-step");
+            assert_eq!(envelope.payload_cbor, vec![1, 2, 3]);
+            assert_eq!(envelope.ctx.tenant_id, "local");
+            assert_eq!(envelope.ctx.i18n_id, "en-US");
+        }
+
+        #[test]
+        fn setup_payload_and_error_helpers_cover_null_and_negative_paths() {
+            let payload = setup_apply_payload(super::super::WizardMode::Remove, &[0xaa], &[0xbb])
+                .expect("payload");
+            let decoded: ciborium::value::Value =
+                ciborium::de::from_reader(payload.as_slice()).expect("decode payload");
+            let ciborium::value::Value::Map(entries) = decoded else {
+                panic!("expected cbor map");
+            };
+            assert!(entries.iter().any(|(key, value)| {
+                matches!(key, ciborium::value::Value::Text(text) if text == "answers_cbor")
+                    && matches!(value, ciborium::value::Value::Null)
+            }));
+
+            let invalid_list = wasmtime::component::Val::List(vec![wasmtime::component::Val::Bool(true)]);
+            assert!(val_to_bytes(&invalid_list).is_err());
+            assert!(!is_missing_node_instance_error(&anyhow::anyhow!("different error")));
+            assert!(!is_missing_setup_apply_error(&anyhow::anyhow!("different error")));
+            assert!(!is_missing_setup_contract_error(&anyhow::anyhow!("different error")));
+        }
+
+        #[test]
+        fn setup_payload_default_mode_omits_current_config_but_keeps_answers() {
+            let payload = setup_apply_payload(super::super::WizardMode::Default, &[0xaa], &[0xbb])
+                .expect("payload");
+            let decoded: ciborium::value::Value =
+                ciborium::de::from_reader(payload.as_slice()).expect("decode payload");
+            let ciborium::value::Value::Map(entries) = decoded else {
+                panic!("expected cbor map");
+            };
+            assert!(entries.iter().any(|(key, value)| {
+                matches!(key, ciborium::value::Value::Text(text) if text == "current_config_cbor")
+                    && matches!(value, ciborium::value::Value::Null)
+            }));
+            assert!(entries.iter().any(|(key, value)| {
+                matches!(key, ciborium::value::Value::Text(text) if text == "answers_cbor")
+                    && matches!(value, ciborium::value::Value::Bytes(bytes) if bytes == &vec![0xbb])
+            }));
+        }
+    }
+
     pub fn run_wizard_ops(
         wasm_bytes: &[u8],
         mode: WizardMode,
@@ -1006,7 +1161,11 @@ mod tests {
     use std::fs;
     use std::path::PathBuf;
 
+    use ciborium::value::Value as CValue;
     use greentic_distributor_client::{CachePolicy, DistClient, ResolvePolicy};
+    use greentic_interfaces_host::component_v0_6::exports::greentic::component::node::{
+        ComponentDescriptor, IoSchema, Op, SchemaSource, SetupContract,
+    };
     use serde::Deserialize;
 
     fn adaptive_card_wasm_bytes() -> Option<Vec<u8>> {
@@ -1093,6 +1252,121 @@ mod tests {
     }
 
     #[test]
+    fn setup_apply_result_fallback_classifier_ignores_normal_payloads_and_garbage() {
+        let ok_payload = super::json_to_cbor(&serde_json::json!({ "ok": true })).unwrap();
+        assert!(!super::host::setup_apply_result_requires_descriptor_fallback(&ok_payload));
+        assert!(!super::host::setup_apply_result_requires_descriptor_fallback(b"not-cbor"));
+    }
+
+    #[test]
+    fn setup_contract_helpers_require_inline_cbor_and_setup_apply_op() {
+        let descriptor = ComponentDescriptor {
+            name: "component".to_string(),
+            version: "0.1.0".to_string(),
+            summary: None,
+            capabilities: Vec::new(),
+            ops: vec![Op {
+                name: "setup.apply_answers".to_string(),
+                summary: None,
+                input: IoSchema {
+                    schema: SchemaSource::InlineCbor(vec![1]),
+                    content_type: "application/cbor".to_string(),
+                    schema_version: None,
+                },
+                output: IoSchema {
+                    schema: SchemaSource::InlineCbor(vec![2]),
+                    content_type: "application/cbor".to_string(),
+                    schema_version: None,
+                },
+                examples: Vec::new(),
+            }],
+            schemas: Vec::new(),
+            setup: Some(SetupContract {
+                qa_spec: SchemaSource::InlineCbor(vec![1, 2, 3]),
+                answers_schema: SchemaSource::InlineCbor(vec![4, 5, 6]),
+                examples: Vec::new(),
+                outputs: Vec::new(),
+            }),
+        };
+
+        let (qa_spec, answers_schema) = super::host::extract_setup_contract(&descriptor).unwrap();
+        assert_eq!(qa_spec, vec![1, 2, 3]);
+        assert_eq!(answers_schema, Some(vec![4, 5, 6]));
+        super::host::ensure_setup_apply_answers_op(&descriptor).unwrap();
+
+        let bad_descriptor = ComponentDescriptor {
+            setup: Some(SetupContract {
+                qa_spec: SchemaSource::RefUri("https://example.invalid/schema".to_string()),
+                answers_schema: SchemaSource::InlineCbor(vec![1]),
+                examples: Vec::new(),
+                outputs: Vec::new(),
+            }),
+            ops: Vec::new(),
+            ..descriptor
+        };
+        assert!(super::host::extract_setup_contract(&bad_descriptor).is_err());
+        assert!(super::host::ensure_setup_apply_answers_op(&bad_descriptor).is_err());
+    }
+
+    #[test]
+    fn setup_payload_and_byte_value_helpers_encode_expected_shapes() {
+        let payload = super::host::setup_apply_payload(
+            super::WizardMode::Update,
+            &[0xaa],
+            &[0xbb, 0xcc],
+        )
+        .expect("payload");
+        let decoded: CValue = ciborium::de::from_reader(payload.as_slice()).expect("decode payload");
+        let CValue::Map(entries) = decoded else {
+            panic!("expected cbor map");
+        };
+        assert!(entries.iter().any(|(key, value)| {
+            matches!(key, CValue::Text(text) if text == "mode")
+                && matches!(value, CValue::Text(mode) if mode == "update")
+        }));
+        assert!(entries.iter().any(|(key, value)| {
+            matches!(key, CValue::Text(text) if text == "answers_cbor")
+                && matches!(value, CValue::Bytes(bytes) if bytes == &vec![0xbb, 0xcc])
+        }));
+
+        let val = super::host::bytes_to_val(&[1, 2, 3]);
+        assert_eq!(super::host::val_to_bytes(&val).unwrap(), vec![1, 2, 3]);
+        let err = super::host::val_to_bytes(&wasmtime::component::Val::Bool(true))
+            .expect_err("non-byte list should fail");
+        assert!(format!("{err}").contains("expected list<u8> result"));
+    }
+
+    #[test]
+    fn wizard_host_error_classifiers_match_expected_messages() {
+        assert_eq!(super::host::descriptor_mode_name(super::WizardMode::Default), "default");
+        assert_eq!(super::host::descriptor_mode_name(super::WizardMode::Setup), "setup");
+        assert_eq!(super::host::descriptor_mode_name(super::WizardMode::Update), "update");
+        assert_eq!(super::host::descriptor_mode_name(super::WizardMode::Remove), "remove");
+        assert!(super::host::is_missing_node_instance_error(&anyhow::anyhow!(
+            "no exported instance named `greentic:component/node@0.6.0`"
+        )));
+        assert!(super::host::is_missing_setup_contract_error(&anyhow::anyhow!(
+            "component descriptor missing setup.qa-spec"
+        )));
+        assert!(super::host::is_missing_setup_apply_error(&anyhow::anyhow!(
+            "missing setup.apply_answers function"
+        )));
+    }
+
+    #[test]
+    fn wizard_mode_maps_to_expected_strings_and_qa_modes() {
+        assert_eq!(super::WizardMode::Default.as_str(), "default");
+        assert_eq!(super::WizardMode::Setup.as_str(), "setup");
+        assert_eq!(super::WizardMode::Update.as_str(), "update");
+        assert_eq!(super::WizardMode::Remove.as_str(), "remove");
+
+        assert_eq!(super::WizardMode::Default.as_qa_mode(), greentic_types::schemas::component::v0_6_0::QaMode::Default);
+        assert_eq!(super::WizardMode::Setup.as_qa_mode(), greentic_types::schemas::component::v0_6_0::QaMode::Setup);
+        assert_eq!(super::WizardMode::Update.as_qa_mode(), greentic_types::schemas::component::v0_6_0::QaMode::Update);
+        assert_eq!(super::WizardMode::Remove.as_qa_mode(), greentic_types::schemas::component::v0_6_0::QaMode::Remove);
+    }
+
+    #[test]
     fn wizard_component_cache_reuses_compiled_artifact() {
         let Some(wasm_bytes) = adaptive_card_wasm_bytes() else {
             return;
@@ -1151,6 +1425,23 @@ mod tests {
             !message.contains("matching implementation was not found in the linker"),
             "expected greentic-flow host linker fix to be active, got: {message}"
         );
+    }
+
+    #[test]
+    fn public_wizard_entrypoints_fail_cleanly_for_invalid_component_bytes() {
+        assert!(super::fetch_wizard_spec(b"not-a-component", super::WizardMode::Default).is_err());
+        assert!(
+            super::apply_wizard_answers(
+                b"not-a-component",
+                super::WizardAbi::V6,
+                super::WizardMode::Default,
+                &[],
+                &[],
+            )
+            .is_err()
+        );
+        assert!(super::run_wizard_ops(b"not-a-component", super::WizardMode::Default, &[], &[])
+            .is_err());
     }
 }
 

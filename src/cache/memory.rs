@@ -121,24 +121,22 @@ impl MemoryCache {
         if self.max_bytes == 0 {
             return;
         }
-        let mut evicted_any = false;
         let mut attempts = state.lru.len();
         while state.total_bytes > self.max_bytes && attempts > 0 {
             attempts -= 1;
             let Some(candidate) = state.lru.pop_back() else {
                 break;
             };
-            if should_skip_candidate(state, &candidate, true, self.lfu_protect_hits) {
+            if should_skip_candidate(state, &candidate, true, true, self.lfu_protect_hits) {
                 state.lru.push_front(candidate);
                 continue;
             }
             if let Some(entry) = state.entries.remove(&candidate) {
                 state.total_bytes = state.total_bytes.saturating_sub(entry.bytes_estimate);
                 state.evictions = state.evictions.saturating_add(1);
-                evicted_any = true;
             }
         }
-        if state.total_bytes <= self.max_bytes || !evicted_any {
+        if state.total_bytes <= self.max_bytes {
             return;
         }
         let mut attempts = state.lru.len();
@@ -147,7 +145,7 @@ impl MemoryCache {
             let Some(candidate) = state.lru.pop_back() else {
                 break;
             };
-            if should_skip_candidate(state, &candidate, false, self.lfu_protect_hits) {
+            if should_skip_candidate(state, &candidate, false, false, self.lfu_protect_hits) {
                 state.lru.push_front(candidate);
                 continue;
             }
@@ -162,13 +160,14 @@ impl MemoryCache {
 fn should_skip_candidate(
     state: &MemoryState,
     key: &ArtifactKey,
+    protect_pinned: bool,
     protect_lfu: bool,
     lfu_threshold: u64,
 ) -> bool {
     let Some(entry) = state.entries.get(key) else {
         return false;
     };
-    if entry.pinned {
+    if protect_pinned && entry.pinned {
         return true;
     }
     if protect_lfu && lfu_threshold > 0 && entry.hit_count >= lfu_threshold {

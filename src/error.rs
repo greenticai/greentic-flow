@@ -165,3 +165,27 @@ pub enum FlowError {
 
 #[allow(clippy::result_large_err)]
 pub type Result<T> = std::result::Result<T, FlowError>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    #[test]
+    fn flow_error_location_describes_paths_and_positions() {
+        let loc = FlowErrorLocation::at_path_with_position("nodes.start", Some(3), Some(9))
+            .with_source_path(Some(Path::new("flow.ygtc")))
+            .with_json_pointer(Some("/nodes/start"));
+        assert_eq!(loc.describe().as_deref(), Some("nodes.start:3:9"));
+        assert_eq!(loc.source_path.as_deref(), Some(Path::new("flow.ygtc")));
+        assert_eq!(loc.json_pointer.as_deref(), Some("/nodes/start"));
+        assert_eq!(loc.to_string(), " at nodes.start:3:9");
+    }
+
+    #[test]
+    fn flow_error_location_handles_empty_location() {
+        let loc = FlowErrorLocation::new(None, None, None);
+        assert_eq!(loc.describe(), None);
+        assert_eq!(loc.to_string(), "");
+    }
+}
