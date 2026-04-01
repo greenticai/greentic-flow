@@ -197,7 +197,15 @@ jobs:
             exit 0
           fi
 
-          NON_ARTIFACT_CHANGES="$(printf '%s\n' "${CHANGED_FILES}" | grep -Ev '^(SECURITY_FIX_REPORT.md|pr-comment.md|codex-prompt.txt|security-alerts.json|dependabot-alerts.json|code-scanning-alerts.json|all-dependabot-alerts.json|all-code-scanning-alerts.json|pr-vulnerable-changes.json)$' || true)"
+          if printf '%s\n' "${CHANGED_FILES}" | grep -q '^\.github/workflows/'; then
+            echo "Workflow file changes detected; resetting them to avoid GitHub App workflow permission failures."
+            git restore --source=HEAD --staged --worktree .github/workflows || true
+          fi
+
+          rm -f main-code-scanning-alerts.json pr-code-scanning-alerts.json
+
+          CHANGED_FILES="$(git diff --name-only)"
+          NON_ARTIFACT_CHANGES="$(printf '%s\n' "${CHANGED_FILES}" | grep -Ev '^(SECURITY_FIX_REPORT.md|pr-comment.md|codex-prompt.txt|security-alerts.json|dependabot-alerts.json|code-scanning-alerts.json|all-dependabot-alerts.json|all-code-scanning-alerts.json|main-code-scanning-alerts.json|pr-code-scanning-alerts.json|pr-vulnerable-changes.json)$' || true)"
           if [ -z "${NON_ARTIFACT_CHANGES}" ]; then
             echo "Only report/input artifacts changed; skipping commit."
             echo "committed=false" >> "$GITHUB_OUTPUT"
