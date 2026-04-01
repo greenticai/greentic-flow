@@ -101,15 +101,23 @@ jobs:
           cat ci/cargo-patch-dev.toml >> Cargo.toml
 
       - name: Setup GitVersion
-        uses: gittools/actions/gitversion/setup@v1
-        with:
-          versionSpec: "5.x"
+        shell: bash
+        run: |
+          set -euo pipefail
+          dotnet tool update --global GitVersion.Tool --version "5.*"
+          echo "$HOME/.dotnet/tools" >> "$GITHUB_PATH"
       - name: Determine dev version
         id: gitversion
-        uses: gittools/actions/gitversion/execute@v1
-        with:
-          useConfigFile: true
-          configFilePath: GitVersion.yml
+        shell: bash
+        run: |
+          set -euo pipefail
+          json="$(dotnet-gitversion /config GitVersion.yml /output json)"
+          major_minor_patch="$(printf '%s' "${json}" | jq -r '.MajorMinorPatch')"
+          pre_release_tag="$(printf '%s' "${json}" | jq -r '.PreReleaseTag')"
+          full_semver="$(printf '%s' "${json}" | jq -r '.FullSemVer')"
+          echo "MajorMinorPatch=${major_minor_patch}" >> "$GITHUB_OUTPUT"
+          echo "PreReleaseTag=${pre_release_tag}" >> "$GITHUB_OUTPUT"
+          echo "FullSemVer=${full_semver}" >> "$GITHUB_OUTPUT"
 
       - name: Update package version to dev
         shell: bash

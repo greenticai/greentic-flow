@@ -1,12 +1,13 @@
 use crate::{
     component_catalog::normalize_manifest_value,
     error::{FlowError, FlowErrorLocation, Result},
+    path_safety::normalize_under_root,
 };
 use jsonschema::Draft;
 use serde_json::{Map, Value};
 use std::{
     fs,
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
 };
 use url::Url;
 
@@ -37,13 +38,52 @@ impl SchemaResolution {
 }
 
 pub fn resolve_input_schema(manifest_path: &Path, operation: &str) -> Result<SchemaResolution> {
-    let text = fs::read_to_string(manifest_path).map_err(|err| FlowError::Internal {
-        message: format!("read manifest {}: {err}", manifest_path.display()),
+    if manifest_path.file_name().and_then(|name| name.to_str()) != Some("component.manifest.json") {
+        return Err(FlowError::Internal {
+            message: format!(
+                "manifest path must point to component.manifest.json: {}",
+                manifest_path.display()
+            ),
+            location: FlowErrorLocation::at_path(manifest_path.display().to_string()),
+        });
+    }
+    if manifest_path
+        .components()
+        .any(|component| matches!(component, Component::ParentDir))
+    {
+        return Err(FlowError::Internal {
+            message: format!(
+                "manifest path must not contain parent traversal segments: {}",
+                manifest_path.display()
+            ),
+            location: FlowErrorLocation::at_path(manifest_path.display().to_string()),
+        });
+    }
+    let root = std::env::current_dir().map_err(|err| FlowError::Internal {
+        message: format!("resolve current directory for manifest: {err}"),
         location: FlowErrorLocation::at_path(manifest_path.display().to_string()),
     })?;
+    let safe_manifest_path =
+        normalize_under_root(&root, manifest_path).map_err(|err| FlowError::Internal {
+            message: format!("validate manifest path {}: {err}", manifest_path.display()),
+            location: FlowErrorLocation::at_path(manifest_path.display().to_string()),
+        })?;
+    if !safe_manifest_path.is_file() {
+        return Err(FlowError::Internal {
+            message: format!(
+                "manifest path is not a file: {}",
+                safe_manifest_path.display()
+            ),
+            location: FlowErrorLocation::at_path(safe_manifest_path.display().to_string()),
+        });
+    }
+    let text = fs::read_to_string(&safe_manifest_path).map_err(|err| FlowError::Internal {
+        message: format!("read manifest {}: {err}", safe_manifest_path.display()),
+        location: FlowErrorLocation::at_path(safe_manifest_path.display().to_string()),
+    })?;
     let mut json: Value = serde_json::from_str(&text).map_err(|err| FlowError::Internal {
-        message: format!("parse manifest {}: {err}", manifest_path.display()),
-        location: FlowErrorLocation::at_path(manifest_path.display().to_string()),
+        message: format!("parse manifest {}: {err}", safe_manifest_path.display()),
+        location: FlowErrorLocation::at_path(safe_manifest_path.display().to_string()),
     })?;
     normalize_manifest_value(&mut json);
     let component_id = json
@@ -65,7 +105,7 @@ pub fn resolve_input_schema(manifest_path: &Path, operation: &str) -> Result<Sch
     Ok(SchemaResolution::new(
         component_id,
         operation.to_string(),
-        manifest_path.to_path_buf(),
+        safe_manifest_path,
         schema,
     ))
 }

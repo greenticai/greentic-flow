@@ -51,6 +51,7 @@ use greentic_flow::{
     json_output::LintJsonOutput,
     lint::{lint_builtin_rules, lint_with_registry},
     loader::{ensure_config_schema_path, load_ygtc_from_path, load_ygtc_from_str},
+    path_safety::normalize_under_root,
     qa_runner,
     questions::{
         Answers as QuestionAnswers, Question, apply_writes_to, extract_answers_from_payload,
@@ -4102,12 +4103,32 @@ fn wizard_select_setup_mode<R: Read, W: Write>(
 }
 
 fn frequent_components_latest_url() -> String {
-    env::var("GREENTIC_FLOW_FREQUENT_COMPONENTS_LATEST_URL").unwrap_or_else(|_| {
-        format!(
-            "{}/releases/download/latest/frequent-components.json",
-            env!("CARGO_PKG_REPOSITORY")
-        )
-    })
+    format!(
+        "{}/releases/download/latest/frequent-components.json",
+        env!("CARGO_PKG_REPOSITORY")
+    )
+}
+
+fn is_allowed_frequent_components_host(host: &str) -> bool {
+    matches!(
+        host,
+        "github.com" | "raw.githubusercontent.com" | "objects.githubusercontent.com"
+    )
+}
+
+fn validate_frequent_components_url(raw: &str) -> Result<reqwest::Url> {
+    let parsed =
+        reqwest::Url::parse(raw).with_context(|| format!("invalid catalog URL '{raw}'"))?;
+    if parsed.scheme() != "https" {
+        anyhow::bail!("catalog URL must use https: {raw}");
+    }
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| anyhow!("catalog URL host is missing: {raw}"))?;
+    if !is_allowed_frequent_components_host(host) {
+        anyhow::bail!("catalog URL host is not allowlisted: {host}");
+    }
+    Ok(parsed)
 }
 
 fn parse_frequent_components_catalog(text: &str) -> Result<FrequentComponentsCatalog> {
@@ -4145,7 +4166,7 @@ fn parse_frequent_components_catalog(text: &str) -> Result<FrequentComponentsCat
     Ok(catalog)
 }
 
-fn load_frequent_components_catalog_from_location(
+fn load_frequent_components_catalog_from_file_location(
     location: &str,
 ) -> Result<FrequentComponentsCatalog> {
     let trimmed = location.trim();
@@ -4153,32 +4174,61 @@ fn load_frequent_components_catalog_from_location(
         anyhow::bail!("frequent component catalog location is empty");
     }
 
+    fn read_catalog_file(path: &Path) -> Result<String> {
+        let canonical = fs::canonicalize(path)
+            .with_context(|| format!("resolve frequent component catalog {}", path.display()))?;
+        if !canonical.is_file() {
+            anyhow::bail!(
+                "frequent component catalog path is not a file: {}",
+                canonical.display()
+            );
+        }
+        fs::read_to_string(&canonical)
+            .with_context(|| format!("read frequent component catalog {}", canonical.display()))
+    }
+
     let text = if let Some(path) = trimmed.strip_prefix("file://") {
-        fs::read_to_string(path)
-            .with_context(|| format!("read frequent component catalog {path}"))?
+        read_catalog_file(Path::new(path))?
     } else {
         let path = Path::new(trimmed);
-        if path.exists() {
-            fs::read_to_string(path)
-                .with_context(|| format!("read frequent component catalog {}", path.display()))?
-        } else {
-            let client = BlockingHttpClient::builder()
-                .timeout(Duration::from_secs(3))
-                .build()
-                .context("build HTTP client for frequent-components.json")?;
-            let response = client
-                .get(trimmed)
-                .header(reqwest::header::USER_AGENT, "greentic-flow")
-                .send()
-                .with_context(|| format!("download frequent component catalog {trimmed}"))?;
-            response
-                .error_for_status()
-                .with_context(|| format!("download frequent component catalog {trimmed}"))?
-                .text()
-                .with_context(|| format!("read frequent component catalog response {trimmed}"))?
+        if !path.exists() {
+            anyhow::bail!("frequent component catalog file does not exist: {trimmed}");
         }
+        read_catalog_file(path)?
     };
 
+    parse_frequent_components_catalog(&text)
+}
+
+fn load_frequent_components_catalog_from_url() -> Result<FrequentComponentsCatalog> {
+    let latest = frequent_components_latest_url();
+    let url = validate_frequent_components_url(&latest)?;
+    let client = BlockingHttpClient::builder()
+        .timeout(Duration::from_secs(3))
+        .redirect(reqwest::redirect::Policy::custom(|attempt| {
+            let url = attempt.url();
+            let host_allowed = url
+                .host_str()
+                .map(is_allowed_frequent_components_host)
+                .unwrap_or(false);
+            if attempt.previous().len() >= 5 || url.scheme() != "https" || !host_allowed {
+                attempt.stop()
+            } else {
+                attempt.follow()
+            }
+        }))
+        .build()
+        .context("build HTTP client for frequent-components.json")?;
+    let response = client
+        .get(url)
+        .header(reqwest::header::USER_AGENT, "greentic-flow")
+        .send()
+        .with_context(|| format!("download frequent component catalog {latest}"))?;
+    let text = response
+        .error_for_status()
+        .with_context(|| format!("download frequent component catalog {latest}"))?
+        .text()
+        .with_context(|| format!("read frequent component catalog response {latest}"))?;
     parse_frequent_components_catalog(&text)
 }
 
@@ -4212,14 +4262,13 @@ fn load_frequent_components_catalog() -> FrequentComponentsCatalog {
     if let Ok(override_location) = env::var("GREENTIC_FLOW_FREQUENT_COMPONENTS_URL")
         && !override_location.trim().is_empty()
         && let Ok(catalog) =
-            load_frequent_components_catalog_from_location(override_location.trim())
+            load_frequent_components_catalog_from_file_location(override_location.trim())
     {
         return catalog;
     }
 
     let embedded = embedded_frequent_components_catalog();
-    let latest = frequent_components_latest_url();
-    if let Ok(catalog) = load_frequent_components_catalog_from_location(&latest)
+    if let Ok(catalog) = load_frequent_components_catalog_from_url()
         && frequent_component_catalog_is_newer(&catalog, &embedded)
     {
         return catalog;
@@ -5334,7 +5383,7 @@ fn extract_config_value(payload: &serde_json::Value) -> serde_json::Value {
 fn resolve_source_to_wasm(flow_path: &Path, source: &ComponentSourceRefV1) -> Result<Vec<u8>> {
     match source {
         ComponentSourceRefV1::Local { path, .. } => {
-            let local_path = local_path_from_sidecar(path, flow_path);
+            let local_path = local_path_from_sidecar(path, flow_path)?;
             let bytes = fs::read(&local_path)
                 .with_context(|| format!("read wasm at {}", local_path.display()))?;
             Ok(bytes)
@@ -11198,7 +11247,7 @@ fn validate_sidecar_source(source: &ComponentSourceRefV1, flow_path: &Path) -> R
             if path.trim().is_empty() {
                 anyhow::bail!("local wasm path is empty");
             }
-            let abs = local_path_from_sidecar(path, flow_path);
+            let abs = local_path_from_sidecar(path, flow_path)?;
             if !abs.exists() {
                 anyhow::bail!("local wasm missing at {}", abs.display());
             }
@@ -11297,7 +11346,22 @@ fn trim_sha256_prefix(digest: &str) -> &str {
     digest.strip_prefix("sha256:").unwrap_or(digest)
 }
 
+fn is_valid_sha256_digest(digest: &str) -> bool {
+    let trimmed = trim_sha256_prefix(digest);
+    trimmed.len() == 64 && trimmed.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+fn validate_component_digest(digest: &str) -> Result<()> {
+    if !is_valid_sha256_digest(digest) {
+        anyhow::bail!("component digest must be sha256:<64-hex>");
+    }
+    Ok(())
+}
+
 fn cached_component_manifest_from_digest(digest: &str) -> Option<PathBuf> {
+    if !is_valid_sha256_digest(digest) {
+        return None;
+    }
     let trimmed = trim_sha256_prefix(digest);
     let (prefix, rest) = trimmed.split_at(trimmed.len().min(2));
     let cache_root = distribution_cache_root();
@@ -11342,17 +11406,14 @@ fn normalize_local_wasm_path(local: &Path, flow_path: &Path) -> Result<(PathBuf,
     Ok((abs_path, format!("file://{rel_str}")))
 }
 
-fn local_path_from_sidecar(path: &str, flow_path: &Path) -> PathBuf {
+fn local_path_from_sidecar(path: &str, flow_path: &Path) -> Result<PathBuf> {
     let trimmed = path.strip_prefix("file://").unwrap_or(path);
-    let raw = PathBuf::from(trimmed);
-    if raw.is_absolute() {
-        raw
-    } else {
-        flow_path
-            .parent()
-            .unwrap_or_else(|| Path::new("."))
-            .join(raw)
-    }
+    let flow_dir = flow_path.parent().unwrap_or_else(|| Path::new("."));
+    let cwd = std::env::current_dir().context("resolve current directory for sidecar path")?;
+    let safe_flow_dir = normalize_under_root(&cwd, flow_dir)
+        .with_context(|| format!("validate flow path {}", flow_path.display()))?;
+    normalize_under_root(&safe_flow_dir, Path::new(trimmed))
+        .with_context(|| format!("validate sidecar local path {trimmed}"))
 }
 
 fn resolve_component_source_inputs(
@@ -11813,7 +11874,7 @@ fn resolve_component_id_reference(
 fn ensure_sidecar_source_available(source: &ComponentSourceRefV1, flow_path: &Path) -> Result<()> {
     match source {
         ComponentSourceRefV1::Local { path, .. } => {
-            let abs = local_path_from_sidecar(path, flow_path);
+            let abs = local_path_from_sidecar(path, flow_path)?;
             if !abs.exists() {
                 anyhow::bail!(
                     "local wasm for node missing at {}; rebuild component or update sidecar",
@@ -11826,6 +11887,7 @@ fn ensure_sidecar_source_available(source: &ComponentSourceRefV1, flow_path: &Pa
         | ComponentSourceRefV1::Store { r#ref, digest, .. } => {
             let client = DistClient::new(Default::default());
             if let Some(d) = digest {
+                validate_component_digest(d)?;
                 client.open_cached(d).map_err(|e| {
                     anyhow::anyhow!(
                         "component digest {} not cached; pull or pin locally first: {e}",
@@ -11850,7 +11912,7 @@ fn resolve_component_manifest_path(
     flow_path: &Path,
 ) -> Result<PathBuf> {
     let manifest_path = match source {
-        ComponentSourceRefV1::Local { path, .. } => local_path_from_sidecar(path, flow_path)
+        ComponentSourceRefV1::Local { path, .. } => local_path_from_sidecar(path, flow_path)?
             .parent()
             .map(|p| p.join("component.manifest.json"))
             .unwrap_or_else(|| {
@@ -11861,6 +11923,7 @@ fn resolve_component_manifest_path(
             }),
         ComponentSourceRefV1::Oci { r#ref, digest } => {
             let client = DistClient::new(Default::default());
+            validate_component_ref(r#ref)?;
             if let Some(manifest_path) = digest
                 .as_deref()
                 .and_then(cached_component_manifest_from_digest)
@@ -11868,17 +11931,28 @@ fn resolve_component_manifest_path(
                 return Ok(manifest_path);
             }
             let cached: Result<PathBuf> = if let Some(d) = digest {
+                validate_component_digest(d)?;
                 client
                     .open_cached(d)
                     .map(|artifact| artifact.local_path)
                     .map_err(anyhow::Error::from)
             } else {
+                validate_component_ref(r#ref)?;
                 ensure_cached_component_path(&client, r#ref)
             };
-            let mut candidate = cached
-                .ok()
-                .and_then(|artifact| artifact.parent().map(|p| p.join("component.manifest.json")))
-                .unwrap_or_else(|| PathBuf::from("component.manifest.json"));
+            let mut candidate = if let Some(parent) = cached.ok().and_then(|artifact| {
+                artifact
+                    .canonicalize()
+                    .ok()
+                    .and_then(|canonical| canonical.parent().map(Path::to_path_buf))
+            }) {
+                parent.join("component.manifest.json")
+            } else {
+                anyhow::bail!(
+                    "resolve component {}: cached artifact path unavailable",
+                    r#ref
+                );
+            };
             if candidate.exists() {
                 return Ok(candidate);
             }
@@ -11891,6 +11965,7 @@ fn resolve_component_manifest_path(
             } else {
                 r#ref.to_string()
             };
+            validate_component_ref(&resolved_ref)?;
             let path = ensure_cached_component_path(&client, &resolved_ref)
                 .map_err(|e| anyhow::anyhow!("resolve component {}: {e}", resolved_ref))?;
             if let Some(parent) = path.parent() {
@@ -11901,6 +11976,7 @@ fn resolve_component_manifest_path(
         ComponentSourceRefV1::Repo { r#ref, digest }
         | ComponentSourceRefV1::Store { r#ref, digest, .. } => {
             let client = DistClient::new(Default::default());
+            validate_component_ref(r#ref)?;
             if let Some(manifest_path) = digest
                 .as_deref()
                 .and_then(cached_component_manifest_from_digest)
@@ -11908,24 +11984,36 @@ fn resolve_component_manifest_path(
                 return Ok(manifest_path);
             }
             let artifact = if let Some(d) = digest {
+                validate_component_digest(d)?;
                 client
                     .open_cached(d)
                     .map(|artifact| artifact.local_path)
                     .map_err(anyhow::Error::from)
             } else {
+                validate_component_ref(r#ref)?;
                 ensure_cached_component_path(&client, r#ref)
             }
             .map_err(|e| anyhow::anyhow!("resolve component {}: {e}", r#ref))?;
             artifact
-                .parent()
+                .canonicalize()
+                .ok()
+                .and_then(|canonical| canonical.parent().map(Path::to_path_buf))
                 .map(|p| p.join("component.manifest.json"))
-                .unwrap_or_else(|| PathBuf::from("component.manifest.json"))
+                .ok_or_else(|| {
+                    anyhow::anyhow!("resolve component {}: artifact parent missing", r#ref)
+                })?
         }
     };
 
-    if !manifest_path.exists() {
-        anyhow::bail!(
+    let manifest_path = fs::canonicalize(&manifest_path).with_context(|| {
+        format!(
             "component.manifest.json not found at {}",
+            manifest_path.display()
+        )
+    })?;
+    if !manifest_path.is_file() {
+        anyhow::bail!(
+            "component.manifest.json path is not a file: {}",
             manifest_path.display()
         );
     }
@@ -11938,7 +12026,7 @@ fn load_component_payload(
 ) -> Result<Option<serde_json::Value>> {
     ensure_sidecar_source_available(source, flow_path)?;
     let manifest_path = match source {
-        ComponentSourceRefV1::Local { path, .. } => local_path_from_sidecar(path, flow_path)
+        ComponentSourceRefV1::Local { path, .. } => local_path_from_sidecar(path, flow_path)?
             .parent()
             .map(|p| p.join("component.manifest.json"))
             .unwrap_or_else(|| {
@@ -11951,7 +12039,9 @@ fn load_component_payload(
         | ComponentSourceRefV1::Repo { r#ref, digest }
         | ComponentSourceRefV1::Store { r#ref, digest, .. } => {
             let client = DistClient::new(Default::default());
+            validate_component_ref(r#ref)?;
             let artifact = if let Some(d) = digest {
+                validate_component_digest(d)?;
                 client
                     .open_cached(d)
                     .map(|artifact| artifact.local_path)
@@ -11961,17 +12051,26 @@ fn load_component_payload(
             }
             .map_err(|e| anyhow::anyhow!("resolve component {}: {e}", r#ref))?;
             artifact
-                .parent()
+                .canonicalize()
+                .ok()
+                .and_then(|canonical| canonical.parent().map(Path::to_path_buf))
                 .map(|p| p.join("component.manifest.json"))
-                .unwrap_or_else(|| PathBuf::from("component.manifest.json"))
+                .ok_or_else(|| {
+                    anyhow::anyhow!("resolve component {}: artifact parent missing", r#ref)
+                })?
         }
     };
 
     if !manifest_path.exists() {
         return Ok(None);
     }
-    let text = fs::read_to_string(&manifest_path)
-        .with_context(|| format!("read manifest {}", manifest_path.display()))?;
+    let manifest_path = fs::canonicalize(&manifest_path)
+        .with_context(|| format!("resolve manifest {}", manifest_path.display()))?;
+    if !manifest_path.is_file() {
+        return Ok(None);
+    }
+    let text =
+        fs::read_to_string(&manifest_path).with_context(|| format!("read manifest {}", manifest_path.display()))?;
     let json: serde_json::Value =
         serde_json::from_str(&text).context("parse manifest JSON for defaults")?;
     if let Some(props) = json

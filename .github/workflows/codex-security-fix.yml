@@ -37,7 +37,8 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.pull_request.head.ref || github.ref_name }}
+          token: ${{ secrets.GH_PAT || github.token }}
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
           fetch-depth: 0
 
       - name: Initialize CodeQL
@@ -71,21 +72,39 @@ jobs:
           GH_TOKEN: ${{ secrets.GH_PAT || github.token }}
           OWNER: ${{ github.repository_owner }}
           REPO: ${{ github.event.repository.name }}
-          MAX_ALERTS: ${{ github.event.inputs.max_alerts || 20 }}
+          EVENT_NAME: ${{ github.event_name }}
+          MAX_ALERTS_RAW: ${{ github.event.inputs.max_alerts || 20 }}
           INCLUDE_ALL: ${{ github.event.inputs.include_all_alerts }}
           INCLUDE_MAIN_CODEQL: ${{ github.event.inputs.include_main_branch_codeql_alerts || vars.INCLUDE_MAIN_BRANCH_CODEQL_ALERTS || 'false' }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           PR_VULN_CHANGES: ${{ steps.dependency_review.outputs.vulnerable-changes }}
           PR_COMMENT_CONTENT: ${{ steps.dependency_review.outputs.comment-content }}
         run: |
           set -euo pipefail
+          MAX_ALERTS=20
+          if [[ "${MAX_ALERTS_RAW:-}" =~ ^[0-9]+$ ]] && [ "${MAX_ALERTS_RAW}" -ge 1 ] && [ "${MAX_ALERTS_RAW}" -le 100 ]; then
+            MAX_ALERTS="${MAX_ALERTS_RAW}"
+          fi
+          INCLUDE_ALL_SAFE="false"
+          if [ "${INCLUDE_ALL}" = "true" ]; then
+            INCLUDE_ALL_SAFE="true"
+          fi
+          INCLUDE_MAIN_CODEQL_SAFE="false"
+          if [ "${INCLUDE_MAIN_CODEQL}" = "true" ]; then
+            INCLUDE_MAIN_CODEQL_SAFE="true"
+          fi
 
-          if [ "${{ github.event_name }}" == "pull_request" ] && [ "${INCLUDE_ALL}" != "true" ]; then
+          if [ "${EVENT_NAME}" == "pull_request" ] && [ "${INCLUDE_ALL_SAFE}" != "true" ]; then
             echo "$PR_VULN_CHANGES" > pr-vulnerable-changes.json
             echo "$PR_COMMENT_CONTENT" > pr-comment.md
             
             echo "[]" > all-dependabot-alerts.json
             echo "[]" > dependabot-alerts.json
-            PR_REF="refs/heads/${{ github.event.pull_request.head.ref }}"
+            if ! [[ "${PR_HEAD_SHA}" =~ ^[0-9a-fA-F]{40}$ ]]; then
+              echo "Invalid pull request head sha format" >&2
+              exit 1
+            fi
+            PR_REF="${PR_HEAD_SHA}"
             # CodeQL results can appear shortly after analysis upload, so retry a few times.
             for i in 1 2 3; do
               gh api \
@@ -95,9 +114,9 @@ jobs:
             done
             [ -f all-code-scanning-alerts.json ] || echo "[]" > all-code-scanning-alerts.json
 
-            jq ".[0:(${MAX_ALERTS}|tonumber)]" all-code-scanning-alerts.json > pr-code-scanning-alerts.json
+            jq --argjson max "${MAX_ALERTS}" '.[0:$max]' all-code-scanning-alerts.json > pr-code-scanning-alerts.json
 
-            if [ "${INCLUDE_MAIN_CODEQL}" = "true" ]; then
+            if [ "${INCLUDE_MAIN_CODEQL_SAFE}" = "true" ]; then
               MAIN_REF="refs/heads/main"
               gh api \
                 -H "Accept: application/vnd.github+json" \
@@ -105,8 +124,8 @@ jobs:
               jq -s '
                 add
                 | unique_by((.rule.id // "unknown") + "|" + (.most_recent_instance.location.path // ""))
-                | .[0:('"${MAX_ALERTS}"'|tonumber)]
-              ' pr-code-scanning-alerts.json main-code-scanning-alerts.json > code-scanning-alerts.json
+                | .[0:$max]
+              ' --argjson max "${MAX_ALERTS}" pr-code-scanning-alerts.json main-code-scanning-alerts.json > code-scanning-alerts.json
             else
               cp pr-code-scanning-alerts.json code-scanning-alerts.json
             fi
@@ -129,14 +148,14 @@ jobs:
           gh api \
             -H "Accept: application/vnd.github+json" \
             "/repos/${OWNER}/${REPO}/dependabot/alerts?state=open&per_page=100" > all-dependabot-alerts.json || echo "[]" > all-dependabot-alerts.json
-          jq ".[0:(${MAX_ALERTS}|tonumber)]" all-dependabot-alerts.json > dependabot-alerts.json
+          jq --argjson max "${MAX_ALERTS}" '.[0:$max]' all-dependabot-alerts.json > dependabot-alerts.json
 
           # Fetch Code Scanning alerts from main branch so non-PR runs can create remediation branches/PRs.
           MAIN_REF="refs/heads/main"
           gh api \
             -H "Accept: application/vnd.github+json" \
             "/repos/${OWNER}/${REPO}/code-scanning/alerts?state=open&ref=${MAIN_REF}&tool_name=CodeQL&per_page=100" > all-code-scanning-alerts.json || echo "[]" > all-code-scanning-alerts.json
-          jq ".[0:(${MAX_ALERTS}|tonumber)]" all-code-scanning-alerts.json > code-scanning-alerts.json
+          jq --argjson max "${MAX_ALERTS}" '.[0:$max]' all-code-scanning-alerts.json > code-scanning-alerts.json
 
           DEP_COUNT=$(jq 'length' dependabot-alerts.json)
           CODE_COUNT=$(jq 'length' code-scanning-alerts.json)
@@ -177,7 +196,7 @@ jobs:
 
       - name: Run Codex remediation
         if: steps.alerts.outputs.count != '0' || github.event_name == 'pull_request'
-        uses: openai/codex-action@v1
+        uses: openai/codex-action@c25d10f3f498316d4b2496cc4c6dd58057a7b031 # v1
         with:
           openai-api-key: ${{ secrets.OPENAI_API_KEY || secrets.CODEX_OPENAI_API_KEY }}
           prompt-file: codex-prompt.txt
@@ -186,8 +205,6 @@ jobs:
       - name: Commit and push fixes
         id: commit_push
         if: (steps.alerts.outputs.count != '0' || github.event_name == 'pull_request')
-        env:
-          BRANCH: ${{ github.event.pull_request.head.ref || github.ref_name }}
         run: |
           set -euo pipefail
           CHANGED_FILES="$(git diff --name-only)"
@@ -211,11 +228,15 @@ jobs:
           git commit -m "chore(security): codex remediation for security alerts"
 
           if [ "${{ github.event_name }}" = "pull_request" ]; then
-            FIX_BRANCH="${BRANCH}"
+            FIX_BRANCH="${GITHUB_HEAD_REF:-}"
+            if ! [[ "${FIX_BRANCH}" =~ ^[A-Za-z0-9._/-]+$ ]] || [[ "${FIX_BRANCH}" == -* ]] || [[ "${FIX_BRANCH}" == *".."* ]]; then
+              echo "Unsafe pull request head ref: ${FIX_BRANCH}" >&2
+              exit 1
+            fi
             BASE_BRANCH="${{ github.event.pull_request.base.ref }}"
             git push origin "HEAD:${FIX_BRANCH}"
           else
-            BASE_BRANCH="${BRANCH}"
+            BASE_BRANCH="${{ github.ref_name }}"
             FIX_BRANCH="codex/security-fix-${GITHUB_RUN_ID}"
             git checkout -b "${FIX_BRANCH}"
             git push origin "HEAD:${FIX_BRANCH}"

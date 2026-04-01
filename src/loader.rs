@@ -10,13 +10,18 @@ use serde_json::Value;
 use serde_yaml_bw::Location as YamlLocation;
 use std::{
     fs, io,
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
     sync::OnceLock,
 };
 
 const INLINE_SOURCE: &str = "<inline>";
 const DEFAULT_SCHEMA_LABEL: &str = "https://raw.githubusercontent.com/greenticai/greentic-flow/refs/heads/master/schemas/ygtc.flow.schema.json";
 const EMBEDDED_SCHEMA: &str = include_str!("../schemas/ygtc.flow.schema.json");
+
+fn has_parent_traversal(path: &Path) -> bool {
+    path.components()
+        .any(|component| matches!(component, Component::ParentDir))
+}
 
 fn schema_file_valid(path: &Path) -> bool {
     let Ok(text) = fs::read_to_string(path) else {
@@ -104,18 +109,45 @@ pub fn load_ygtc_from_str(yaml: &str) -> Result<FlowDoc> {
 
 /// Load YGTC YAML from a file path using the embedded schema.
 pub fn load_ygtc_from_path(path: &Path) -> Result<FlowDoc> {
-    let content = fs::read_to_string(path).map_err(|e| FlowError::Internal {
-        message: format!("failed to read {}: {e}", path.display()),
+    if has_parent_traversal(path) {
+        return Err(FlowError::Internal {
+            message: format!(
+                "flow path must not contain parent traversal segments: {}",
+                path.display()
+            ),
+            location: FlowErrorLocation::at_path(path.display().to_string())
+                .with_source_path(Some(path)),
+        });
+    }
+    let root = std::env::current_dir().map_err(|e| FlowError::Internal {
+        message: format!("resolve load root: {e}"),
         location: FlowErrorLocation::at_path(path.display().to_string())
             .with_source_path(Some(path)),
+    })?;
+    let safe_path = normalize_under_root(&root, path).map_err(|e| FlowError::Internal {
+        message: format!("failed to validate {}: {e}", path.display()),
+        location: FlowErrorLocation::at_path(path.display().to_string())
+            .with_source_path(Some(path)),
+    })?;
+    if !safe_path.is_file() {
+        return Err(FlowError::Internal {
+            message: format!("flow path is not a file: {}", safe_path.display()),
+            location: FlowErrorLocation::at_path(safe_path.display().to_string())
+                .with_source_path(Some(&safe_path)),
+        });
+    }
+    let content = fs::read_to_string(&safe_path).map_err(|e| FlowError::Internal {
+        message: format!("failed to read {}: {e}", safe_path.display()),
+        location: FlowErrorLocation::at_path(safe_path.display().to_string())
+            .with_source_path(Some(&safe_path)),
     })?;
     load_with_schema_text(
         &content,
         EMBEDDED_SCHEMA,
         DEFAULT_SCHEMA_LABEL.to_string(),
         None,
-        path.display().to_string(),
-        Some(path),
+        safe_path.display().to_string(),
+        Some(&safe_path),
     )
 }
 
@@ -129,20 +161,27 @@ pub fn load_ygtc_from_str_with_source(
     schema_path: &Path,
     source_label: impl Into<String>,
 ) -> Result<FlowDoc> {
+    if has_parent_traversal(schema_path) {
+        return Err(FlowError::Internal {
+            message: format!(
+                "schema path must not contain parent traversal segments: {}",
+                schema_path.display()
+            ),
+            location: FlowErrorLocation::at_path(schema_path.display().to_string())
+                .with_source_path(Some(schema_path)),
+        });
+    }
     let schema_root = std::env::current_dir().map_err(|e| FlowError::Internal {
         message: format!("resolve schema root: {e}"),
         location: FlowErrorLocation::at_path(schema_path.display().to_string())
             .with_source_path(Some(schema_path)),
     })?;
-    let safe_schema_path = if schema_path.is_absolute() {
-        schema_path.to_path_buf()
-    } else {
+    let safe_schema_path =
         normalize_under_root(&schema_root, schema_path).map_err(|e| FlowError::Internal {
             message: format!("schema path validation for {}: {e}", schema_path.display()),
             location: FlowErrorLocation::at_path(schema_path.display().to_string())
                 .with_source_path(Some(schema_path)),
-        })?
-    };
+        })?;
     let schema_label = safe_schema_path.display().to_string();
     let schema_text = fs::read_to_string(&safe_schema_path).map_err(|e| FlowError::Internal {
         message: format!("schema read from {schema_label}: {e}"),
