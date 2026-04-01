@@ -19,6 +19,10 @@ fn main() {
     let rendered =
         serde_json::to_string_pretty(&json).expect("serialize embedded frequent-components.json");
     let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR"));
+    // Keep this validation compatible with `cargo package` verification. During
+    // tarball checks the packaged crate lives under `target/package/...`, but
+    // Cargo still points OUT_DIR at the normal build tree under `target/debug`
+    // or `target/release`.
     if out_dir.as_os_str().is_empty()
         || out_dir
             .components()
