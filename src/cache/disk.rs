@@ -172,7 +172,9 @@ impl DiskCache {
                 Ok(path) if path.starts_with(&canonical_artifacts_dir) => path,
                 _ => continue,
             };
-            let size = fs::metadata(&canonical_artifact).map(|m| m.len()).unwrap_or(0);
+            let size = fs::metadata(&canonical_artifact)
+                .map(|m| m.len())
+                .unwrap_or(0);
             total_bytes = total_bytes.saturating_add(size);
             entries.push((access, meta, canonical_artifact, path, size));
         }
@@ -276,5 +278,20 @@ impl DiskPaths {
 }
 
 fn digest_to_filename(digest: &str) -> String {
-    digest.replace(':', "_")
+    let sanitized: String = digest
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_') {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let trimmed = sanitized.trim_matches('_');
+    if trimmed.is_empty() {
+        "artifact".to_string()
+    } else {
+        trimmed.to_string()
+    }
 }

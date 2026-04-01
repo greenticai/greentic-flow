@@ -3059,10 +3059,20 @@ fn file_name_from_https_reference(reference: &str) -> Result<String> {
     Ok(file_name.to_string())
 }
 
-fn validate_no_private_host_url(raw: &str, label: &str) -> Result<()> {
+fn parse_and_validate_outbound_url(raw: &str, label: &str) -> Result<reqwest::Url> {
     let parsed = reqwest::Url::parse(raw).with_context(|| format!("parse {label} URL"))?;
-    if parsed.scheme() != "https" && !is_test_local_http_reference(raw) {
+    let allow_test_local_http = is_test_local_http_reference(raw);
+    if parsed.scheme() != "https" && !allow_test_local_http {
         anyhow::bail!("{label} URL must use https");
+    }
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        anyhow::bail!("{label} URL must not contain userinfo");
+    }
+    if parsed.fragment().is_some() {
+        anyhow::bail!("{label} URL must not contain a fragment");
+    }
+    if allow_test_local_http {
+        return Ok(parsed);
     }
     let Some(host) = parsed.host_str() else {
         anyhow::bail!("{label} URL missing host");
@@ -3071,12 +3081,12 @@ fn validate_no_private_host_url(raw: &str, label: &str) -> Result<()> {
     if matches!(host_lc.as_str(), "localhost" | "localhost.localdomain") {
         anyhow::bail!("{label} URL host is not allowed: {host}");
     }
-    if let Ok(ip) = host.parse::<IpAddr>() {
-        if is_private_or_local_ip(ip) {
-            anyhow::bail!("{label} URL host is not allowed: {host}");
-        }
+    if let Ok(ip) = host.parse::<IpAddr>()
+        && is_private_or_local_ip(ip)
+    {
+        anyhow::bail!("{label} URL host is not allowed: {host}");
     }
-    Ok(())
+    Ok(parsed)
 }
 
 fn is_private_or_local_ip(ip: IpAddr) -> bool {
@@ -3100,7 +3110,9 @@ fn is_private_or_local_ip(ip: IpAddr) -> bool {
                 || v6.segments()[0] == 0x2001 && v6.segments()[1] == 0x0db8
                 || v6 == Ipv6Addr::LOCALHOST
                 || v6 == Ipv6Addr::UNSPECIFIED
-                || v6.to_ipv4().is_some_and(|v4| is_private_or_local_ip(IpAddr::V4(v4)))
+                || v6
+                    .to_ipv4()
+                    .is_some_and(|v4| is_private_or_local_ip(IpAddr::V4(v4)))
         }
     }
 }
@@ -3174,22 +3186,22 @@ fn prompt_asset_conflict_stdin(target: &Path) -> Result<AssetConflictChoice> {
 
 fn fetch_remote_asset(reference: &str) -> Result<(Vec<u8>, String)> {
     if reference.starts_with("https://") || is_test_local_http_reference(reference) {
-        validate_no_private_host_url(reference, "remote asset")?;
+        let validated_url = parse_and_validate_outbound_url(reference, "remote asset")?;
         let client = BlockingHttpClient::builder()
             .timeout(Duration::from_secs(30))
             .build()
             .context("build HTTP client")?;
         let response = client
-            .get(reference)
+            .get(validated_url.clone())
             .header(reqwest::header::USER_AGENT, "greentic-flow")
             .send()
-            .with_context(|| format!("download remote asset {reference}"))?
+            .with_context(|| format!("download remote asset {validated_url}"))?
             .error_for_status()
-            .with_context(|| format!("download remote asset {reference}"))?;
-        let file_name = file_name_from_https_reference(reference)?;
+            .with_context(|| format!("download remote asset {validated_url}"))?;
+        let file_name = file_name_from_https_reference(validated_url.as_str())?;
         let bytes = response
             .bytes()
-            .with_context(|| format!("read remote asset response body {reference}"))?;
+            .with_context(|| format!("read remote asset response body {validated_url}"))?;
         return Ok((bytes.to_vec(), file_name));
     }
 
@@ -4905,21 +4917,24 @@ fn load_frequent_components_catalog_from_location(
             fs::read_to_string(path)
                 .with_context(|| format!("read frequent component catalog {}", path.display()))?
         } else {
-            validate_no_private_host_url(trimmed, "frequent component catalog")?;
+            let validated_url =
+                parse_and_validate_outbound_url(trimmed, "frequent component catalog")?;
             let client = BlockingHttpClient::builder()
                 .timeout(Duration::from_secs(3))
                 .build()
                 .context("build HTTP client for frequent-components.json")?;
             let response = client
-                .get(trimmed)
+                .get(validated_url.clone())
                 .header(reqwest::header::USER_AGENT, "greentic-flow")
                 .send()
-                .with_context(|| format!("download frequent component catalog {trimmed}"))?;
+                .with_context(|| format!("download frequent component catalog {validated_url}"))?;
             response
                 .error_for_status()
-                .with_context(|| format!("download frequent component catalog {trimmed}"))?
+                .with_context(|| format!("download frequent component catalog {validated_url}"))?
                 .text()
-                .with_context(|| format!("read frequent component catalog response {trimmed}"))?
+                .with_context(|| {
+                    format!("read frequent component catalog response {validated_url}")
+                })?
         }
     };
 
@@ -12817,7 +12832,7 @@ fn resolve_component_id_reference(
     let base_url = distributor_url.ok_or_else(|| {
         anyhow::anyhow!("--distributor-url is required for component_id resolution")
     })?;
-    validate_no_private_host_url(base_url, "distributor")?;
+    let validated_base_url = parse_and_validate_outbound_url(base_url, "distributor")?;
     let tenant = tenant
         .ok_or_else(|| anyhow::anyhow!("--tenant is required for component_id resolution"))?;
     let env =
@@ -12829,7 +12844,7 @@ fn resolve_component_id_reference(
     })?;
 
     let cfg = DistributorClientConfig {
-        base_url: Some(base_url.to_string()),
+        base_url: Some(validated_base_url.to_string()),
         environment_id: DistributorEnvironmentId::from(env.as_str()),
         tenant: TenantCtx::new(
             EnvId::try_from(env.as_str()).map_err(|e| anyhow::anyhow!("env id: {e}"))?,
