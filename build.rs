@@ -18,28 +18,17 @@ fn main() {
 
     let rendered =
         serde_json::to_string_pretty(&json).expect("serialize embedded frequent-components.json");
-    let out_dir_raw = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR"));
-    if out_dir_raw.as_os_str().is_empty()
-        || out_dir_raw
+    let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR"));
+    // Keep this validation compatible with `cargo package` verification. During
+    // tarball checks the packaged crate lives under `target/package/...`, but
+    // Cargo still points OUT_DIR at the normal build tree under `target/debug`
+    // or `target/release`.
+    if out_dir.as_os_str().is_empty()
+        || out_dir
             .components()
             .any(|component| matches!(component, Component::ParentDir))
     {
-        panic!("invalid OUT_DIR: {}", out_dir_raw.display());
-    }
-    let out_dir = out_dir_raw
-        .canonicalize()
-        .unwrap_or_else(|err| panic!("canonicalize OUT_DIR {}: {err}", out_dir_raw.display()));
-
-    let target_root = env::var("CARGO_TARGET_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| manifest_dir.join("target"));
-    let target_root = target_root.canonicalize().unwrap_or(target_root);
-    if !out_dir.starts_with(&target_root) {
-        panic!(
-            "invalid OUT_DIR outside target root ({}): {}",
-            target_root.display(),
-            out_dir.display()
-        );
+        panic!("invalid OUT_DIR: {}", out_dir.display());
     }
 
     let out_path = out_dir.join("frequent-components.embedded.json");
