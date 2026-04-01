@@ -3061,8 +3061,12 @@ fn file_name_from_https_reference(reference: &str) -> Result<String> {
 
 fn validate_no_private_host_url(raw: &str, label: &str) -> Result<()> {
     let parsed = reqwest::Url::parse(raw).with_context(|| format!("parse {label} URL"))?;
-    if parsed.scheme() != "https" && !is_test_local_http_reference(raw) {
+    let allow_test_local_http = is_test_local_http_reference(raw);
+    if parsed.scheme() != "https" && !allow_test_local_http {
         anyhow::bail!("{label} URL must use https");
+    }
+    if allow_test_local_http {
+        return Ok(());
     }
     let Some(host) = parsed.host_str() else {
         anyhow::bail!("{label} URL missing host");
