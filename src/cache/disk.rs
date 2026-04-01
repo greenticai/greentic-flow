@@ -278,5 +278,20 @@ impl DiskPaths {
 }
 
 fn digest_to_filename(digest: &str) -> String {
-    digest.replace(':', "_")
+    let sanitized: String = digest
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_') {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let trimmed = sanitized.trim_matches('_');
+    if trimmed.is_empty() {
+        "artifact".to_string()
+    } else {
+        trimmed.to_string()
+    }
 }

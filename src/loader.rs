@@ -10,7 +10,7 @@ use serde_json::Value;
 use serde_yaml_bw::Location as YamlLocation;
 use std::{
     fs, io,
-    path::{Component, Path, PathBuf},
+    path::{Path, PathBuf},
     sync::OnceLock,
 };
 
@@ -104,36 +104,43 @@ pub fn load_ygtc_from_str(yaml: &str) -> Result<FlowDoc> {
 
 /// Load YGTC YAML from a file path using the embedded schema.
 pub fn load_ygtc_from_path(path: &Path) -> Result<FlowDoc> {
-    validate_user_path(path).map_err(|err| FlowError::Internal {
+    let safe_path = canonicalize_user_path(path).map_err(|err| FlowError::Internal {
         message: format!("invalid flow path {}: {err}", path.display()),
         location: FlowErrorLocation::at_path(path.display().to_string())
             .with_source_path(Some(path)),
     })?;
-    let content = fs::read_to_string(path).map_err(|e| FlowError::Internal {
-        message: format!("failed to read {}: {e}", path.display()),
-        location: FlowErrorLocation::at_path(path.display().to_string())
-            .with_source_path(Some(path)),
+    let content = fs::read_to_string(&safe_path).map_err(|e| FlowError::Internal {
+        message: format!("failed to read {}: {e}", safe_path.display()),
+        location: FlowErrorLocation::at_path(safe_path.display().to_string())
+            .with_source_path(Some(&safe_path)),
     })?;
     load_with_schema_text(
         &content,
         EMBEDDED_SCHEMA,
         DEFAULT_SCHEMA_LABEL.to_string(),
         None,
-        path.display().to_string(),
-        Some(path),
+        safe_path.display().to_string(),
+        Some(&safe_path),
     )
 }
 
-fn validate_user_path(path: &Path) -> std::result::Result<(), &'static str> {
+fn canonicalize_user_path(path: &Path) -> io::Result<PathBuf> {
     if path.as_os_str().is_empty() {
-        return Err("path is empty");
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "path is empty"));
     }
-    for component in path.components() {
-        if matches!(component, Component::ParentDir) {
-            return Err("path traversal is not allowed");
-        }
+    let candidate = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()?.join(path)
+    };
+    let canonical = candidate.canonicalize()?;
+    if !canonical.is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "path does not reference a regular file",
+        ));
     }
-    Ok(())
+    Ok(canonical)
 }
 
 /// Load YGTC YAML from a string using a schema file on disk.
