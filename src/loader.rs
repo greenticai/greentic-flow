@@ -10,7 +10,7 @@ use serde_json::Value;
 use serde_yaml_bw::Location as YamlLocation;
 use std::{
     fs, io,
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
     sync::OnceLock,
 };
 
@@ -104,6 +104,11 @@ pub fn load_ygtc_from_str(yaml: &str) -> Result<FlowDoc> {
 
 /// Load YGTC YAML from a file path using the embedded schema.
 pub fn load_ygtc_from_path(path: &Path) -> Result<FlowDoc> {
+    validate_user_path(path).map_err(|err| FlowError::Internal {
+        message: format!("invalid flow path {}: {err}", path.display()),
+        location: FlowErrorLocation::at_path(path.display().to_string())
+            .with_source_path(Some(path)),
+    })?;
     let content = fs::read_to_string(path).map_err(|e| FlowError::Internal {
         message: format!("failed to read {}: {e}", path.display()),
         location: FlowErrorLocation::at_path(path.display().to_string())
@@ -117,6 +122,18 @@ pub fn load_ygtc_from_path(path: &Path) -> Result<FlowDoc> {
         path.display().to_string(),
         Some(path),
     )
+}
+
+fn validate_user_path(path: &Path) -> std::result::Result<(), &'static str> {
+    if path.as_os_str().is_empty() {
+        return Err("path is empty");
+    }
+    for component in path.components() {
+        if matches!(component, Component::ParentDir) {
+            return Err("path traversal is not allowed");
+        }
+    }
+    Ok(())
 }
 
 /// Load YGTC YAML from a string using a schema file on disk.

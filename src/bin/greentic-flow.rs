@@ -7,6 +7,7 @@ use std::{
     ffi::{OsStr, OsString},
     fs,
     io::{self, Read, Write},
+    net::{IpAddr, Ipv6Addr},
     path::{Path, PathBuf},
     sync::{Mutex, OnceLock},
 };
@@ -384,6 +385,10 @@ fn normalize_help_key_part(raw: &str) -> String {
             _ => '_',
         })
         .collect()
+}
+
+fn sanitize_for_log(value: &str) -> String {
+    value.replace(['\n', '\r'], "")
 }
 
 fn help_path_key(path: &[String]) -> String {
@@ -3054,6 +3059,52 @@ fn file_name_from_https_reference(reference: &str) -> Result<String> {
     Ok(file_name.to_string())
 }
 
+fn validate_no_private_host_url(raw: &str, label: &str) -> Result<()> {
+    let parsed = reqwest::Url::parse(raw).with_context(|| format!("parse {label} URL"))?;
+    if parsed.scheme() != "https" && !is_test_local_http_reference(raw) {
+        anyhow::bail!("{label} URL must use https");
+    }
+    let Some(host) = parsed.host_str() else {
+        anyhow::bail!("{label} URL missing host");
+    };
+    let host_lc = host.to_ascii_lowercase();
+    if matches!(host_lc.as_str(), "localhost" | "localhost.localdomain") {
+        anyhow::bail!("{label} URL host is not allowed: {host}");
+    }
+    if let Ok(ip) = host.parse::<IpAddr>() {
+        if is_private_or_local_ip(ip) {
+            anyhow::bail!("{label} URL host is not allowed: {host}");
+        }
+    }
+    Ok(())
+}
+
+fn is_private_or_local_ip(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => {
+            v4.is_loopback()
+                || v4.is_private()
+                || v4.is_link_local()
+                || v4.is_broadcast()
+                || v4.is_documentation()
+                || v4.is_unspecified()
+                || v4.octets()[0] == 0
+                || v4.octets()[0] >= 224
+        }
+        IpAddr::V6(v6) => {
+            v6.is_loopback()
+                || v6.is_unspecified()
+                || v6.is_multicast()
+                || v6.is_unicast_link_local()
+                || v6.is_unique_local()
+                || v6.segments()[0] == 0x2001 && v6.segments()[1] == 0x0db8
+                || v6 == Ipv6Addr::LOCALHOST
+                || v6 == Ipv6Addr::UNSPECIFIED
+                || v6.to_ipv4().is_some_and(|v4| is_private_or_local_ip(IpAddr::V4(v4)))
+        }
+    }
+}
+
 fn unique_target_path(path: &Path) -> PathBuf {
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
     let stem = path
@@ -3123,6 +3174,7 @@ fn prompt_asset_conflict_stdin(target: &Path) -> Result<AssetConflictChoice> {
 
 fn fetch_remote_asset(reference: &str) -> Result<(Vec<u8>, String)> {
     if reference.starts_with("https://") || is_test_local_http_reference(reference) {
+        validate_no_private_host_url(reference, "remote asset")?;
         let client = BlockingHttpClient::builder()
             .timeout(Duration::from_secs(30))
             .build()
@@ -4853,6 +4905,7 @@ fn load_frequent_components_catalog_from_location(
             fs::read_to_string(path)
                 .with_context(|| format!("read frequent component catalog {}", path.display()))?
         } else {
+            validate_no_private_host_url(trimmed, "frequent component catalog")?;
             let client = BlockingHttpClient::builder()
                 .timeout(Duration::from_secs(3))
                 .build()
@@ -11911,6 +11964,9 @@ fn report_empty_schema(
     manifest_path: &Path,
     source_desc: &str,
 ) -> Result<()> {
+    let component_id = sanitize_for_log(component_id);
+    let operation = sanitize_for_log(operation);
+    let source_desc = sanitize_for_log(source_desc);
     let base = format!(
         "component '{}', operation '{}', schema missing or empty at {} (source: {})",
         component_id,
@@ -12761,6 +12817,7 @@ fn resolve_component_id_reference(
     let base_url = distributor_url.ok_or_else(|| {
         anyhow::anyhow!("--distributor-url is required for component_id resolution")
     })?;
+    validate_no_private_host_url(base_url, "distributor")?;
     let tenant = tenant
         .ok_or_else(|| anyhow::anyhow!("--tenant is required for component_id resolution"))?;
     let env =
