@@ -3071,10 +3071,10 @@ fn validate_no_private_host_url(raw: &str, label: &str) -> Result<()> {
     if matches!(host_lc.as_str(), "localhost" | "localhost.localdomain") {
         anyhow::bail!("{label} URL host is not allowed: {host}");
     }
-    if let Ok(ip) = host.parse::<IpAddr>() {
-        if is_private_or_local_ip(ip) {
-            anyhow::bail!("{label} URL host is not allowed: {host}");
-        }
+    if let Ok(ip) = host.parse::<IpAddr>()
+        && is_private_or_local_ip(ip)
+    {
+        anyhow::bail!("{label} URL host is not allowed: {host}");
     }
     Ok(())
 }
