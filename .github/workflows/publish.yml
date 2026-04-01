@@ -28,8 +28,8 @@ jobs:
 
   publish:
     name: Publish crates
-    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
-    needs: build-test
+    if: needs.release.result == 'success'
+    needs: release
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -49,8 +49,8 @@ jobs:
 
   release:
     name: Build binaries + Release (binstall-friendly)
-    if: needs.publish.result == 'success'
-    needs: publish
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    needs: build-test
     runs-on: ${{ matrix.os }}
     defaults:
       run:

@@ -267,7 +267,7 @@ pub(crate) fn load_with_schema_text(
         )?;
     }
 
-    let mut flow: FlowDoc = match serde_yaml_bw::from_value(v_yaml.clone()) {
+    let mut flow: FlowDoc = match serde_yaml_bw::from_value(v_yaml) {
         Ok(doc) => doc,
         Err(e) => {
             validate_json(
@@ -402,18 +402,7 @@ fn validate_json(
     source_label: &str,
     source_path: Option<&Path>,
 ) -> Result<()> {
-    let schema: Value = serde_json::from_str(schema_text).map_err(|e| FlowError::Internal {
-        message: format!("schema parse for {schema_label}: {e}"),
-        location: FlowErrorLocation::at_path(schema_label.to_string())
-            .with_source_path(schema_path),
-    })?;
-    let validator = jsonschema_options_with_base(schema_path)
-        .build(&schema)
-        .map_err(|e| FlowError::Internal {
-            message: format!("schema compile for {schema_label}: {e}"),
-            location: FlowErrorLocation::at_path(schema_label.to_string())
-                .with_source_path(schema_path),
-        })?;
+    let validator = validator_for_schema(schema_text, schema_label, schema_path)?;
     let details: Vec<SchemaErrorDetail> = validator
         .iter_errors(doc)
         .map(|e| {
@@ -451,6 +440,46 @@ fn validate_json(
         });
     }
     Ok(())
+}
+
+fn validator_for_schema<'a>(
+    schema_text: &'a str,
+    schema_label: &str,
+    schema_path: Option<&Path>,
+) -> Result<&'a jsonschema::Validator> {
+    if schema_path.is_none() && schema_text == EMBEDDED_SCHEMA {
+        static EMBEDDED_VALIDATOR: OnceLock<std::result::Result<jsonschema::Validator, String>> =
+            OnceLock::new();
+        let validator = EMBEDDED_VALIDATOR
+            .get_or_init(|| {
+                let schema: Value = serde_json::from_str(EMBEDDED_SCHEMA)
+                    .map_err(|e| format!("schema parse for {DEFAULT_SCHEMA_LABEL}: {e}"))?;
+                jsonschema_options_with_base(None)
+                    .build(&schema)
+                    .map_err(|e| format!("schema compile for {DEFAULT_SCHEMA_LABEL}: {e}"))
+            })
+            .as_ref()
+            .map_err(|message| FlowError::Internal {
+                message: message.clone(),
+                location: FlowErrorLocation::at_path(schema_label.to_string())
+                    .with_source_path(schema_path),
+            })?;
+        return Ok(validator);
+    }
+
+    let schema: Value = serde_json::from_str(schema_text).map_err(|e| FlowError::Internal {
+        message: format!("schema parse for {schema_label}: {e}"),
+        location: FlowErrorLocation::at_path(schema_label.to_string())
+            .with_source_path(schema_path),
+    })?;
+    let validator = jsonschema_options_with_base(schema_path)
+        .build(&schema)
+        .map_err(|e| FlowError::Internal {
+            message: format!("schema compile for {schema_label}: {e}"),
+            location: FlowErrorLocation::at_path(schema_label.to_string())
+                .with_source_path(schema_path),
+        })?;
+    Ok(Box::leak(Box::new(validator)))
 }
 
 fn ensure_nodes_mapping(doc: &mut serde_yaml_bw::Value) {
