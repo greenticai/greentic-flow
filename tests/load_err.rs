@@ -45,3 +45,15 @@ fn schema_error_exposes_details() {
         other => panic!("expected schema error, got {other:?}"),
     }
 }
+
+#[cfg(unix)]
+#[test]
+fn absolute_schema_path_outside_allowlist_is_rejected() {
+    let yaml = "id: flow\nnodes: {}\n";
+    let err = load_ygtc_from_str_with_source(yaml, Path::new("/etc/hosts"), "inline")
+        .expect_err("schema path outside allowed roots should fail");
+    assert!(
+        format!("{err}").contains("outside allowed roots"),
+        "unexpected error: {err}"
+    );
+}

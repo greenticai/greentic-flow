@@ -18,6 +18,9 @@ const INLINE_SOURCE: &str = "<inline>";
 const DEFAULT_SCHEMA_LABEL: &str = "https://raw.githubusercontent.com/greenticai/greentic-flow/refs/heads/master/schemas/ygtc.flow.schema.json";
 const EMBEDDED_SCHEMA: &str = include_str!("../schemas/ygtc.flow.schema.json");
 fn schema_file_valid(path: &Path) -> bool {
+    if !is_allowed_absolute_path(path).unwrap_or(false) {
+        return false;
+    }
     let Ok(text) = fs::read_to_string(path) else {
         return false;
     };
@@ -63,14 +66,7 @@ pub fn ensure_config_schema_path() -> io::Result<PathBuf> {
         }
         return Ok(path.clone());
     }
-    let mut path = std::env::temp_dir();
-    path.push(format!(
-        "greentic-flow-config-schema-{}.json",
-        env!("CARGO_PKG_VERSION")
-    ));
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
+    let path = trusted_temp_schema_path()?;
     if !schema_file_valid(&path) {
         write_schema_atomically(&path)?;
     }
@@ -139,7 +135,50 @@ fn canonicalize_user_path(path: &Path) -> io::Result<PathBuf> {
             "path does not reference a regular file",
         ));
     }
+    if !is_allowed_absolute_path(&canonical)? {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!(
+                "path is outside allowed roots (cwd and temp): {}",
+                canonical.display()
+            ),
+        ));
+    }
     Ok(canonical)
+}
+
+fn trusted_temp_schema_path() -> io::Result<PathBuf> {
+    let temp_root = std::env::temp_dir().canonicalize()?;
+    if !temp_root.is_dir() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("temporary root is not a directory: {}", temp_root.display()),
+        ));
+    }
+    if !is_allowed_absolute_path(&temp_root)? {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!("temporary root is not trusted: {}", temp_root.display()),
+        ));
+    }
+    Ok(temp_root.join(format!(
+        "greentic-flow-config-schema-{}.json",
+        env!("CARGO_PKG_VERSION")
+    )))
+}
+
+fn is_allowed_absolute_path(path: &Path) -> io::Result<bool> {
+    let canonical = path.canonicalize()?;
+    let cwd = std::env::current_dir()?.canonicalize()?;
+    if canonical.starts_with(&cwd) {
+        return Ok(true);
+    }
+    if let Ok(temp_root) = std::env::temp_dir().canonicalize()
+        && canonical.starts_with(&temp_root)
+    {
+        return Ok(true);
+    }
+    Ok(false)
 }
 
 /// Load YGTC YAML from a string using a schema file on disk.
@@ -158,7 +197,11 @@ pub fn load_ygtc_from_str_with_source(
             .with_source_path(Some(schema_path)),
     })?;
     let safe_schema_path = if schema_path.is_absolute() {
-        schema_path.to_path_buf()
+        canonicalize_user_path(schema_path).map_err(|e| FlowError::Internal {
+            message: format!("schema path validation for {}: {e}", schema_path.display()),
+            location: FlowErrorLocation::at_path(schema_path.display().to_string())
+                .with_source_path(Some(schema_path)),
+        })?
     } else {
         normalize_under_root(&schema_root, schema_path).map_err(|e| FlowError::Internal {
             message: format!("schema path validation for {}: {e}", schema_path.display()),

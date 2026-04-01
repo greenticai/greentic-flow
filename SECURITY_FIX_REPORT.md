@@ -1,72 +1,53 @@
-# Security Fix Report
+# SECURITY_FIX_REPORT
 
 ## Scope
-- Reviewed all provided CodeQL alerts and PR dependency vulnerability input.
-- PR dependency vulnerabilities provided: `[]` (none).
-- New dependency-file vulnerabilities introduced in this change set: none detected.
+- Reviewed provided security input.
+- Dependabot alerts: none.
+- Code scanning alerts: 6 open `rust/path-injection` alerts in `src/loader.rs` (lines 22, 44, 45, 48, 73, 107 in the reported scan snapshot).
 
-## Fixes Applied
+## Root Cause
+Path-based file operations in `src/loader.rs` accepted user-influenced or environment-influenced paths without an explicit allowlist boundary. CodeQL flagged these as CWE-22/23/36/73/99 path injection risks.
 
-### 1) Code injection in GitHub Actions (`actions/code-injection/medium`, alert #73)
-- File: `.github/workflows/codex-security-fix.yml`
-- Fix:
-  - Removed direct expression interpolation inside shell conditionals and command construction.
-  - Introduced step environment variables:
-    - `EVENT_NAME: ${{ github.event_name }}`
-    - `PR_HEAD_REF: ${{ github.event.pull_request.head.ref }}`
-  - Updated shell usage to native variable expansion (`$EVENT_NAME`, `$PR_HEAD_REF`).
-- Security effect: prevents GitHub expression values from being interpreted directly in shell code contexts.
+## Remediations Applied
 
-### 2) Unpinned third-party action usage (`actions/unpinned-tag`)
-- File: `.github/workflows/nightly-wizard-e2e.yml` (alert #7)
-  - Replaced `taiki-e/install-action@cargo-binstall` with `run: cargo install cargo-binstall --locked`.
-- File: `.github/workflows/publish.yml` (alert #12)
-  - Replaced `softprops/action-gh-release@v2` with `gh release` CLI commands (`view/create/upload`).
-- File: `.github/workflows/dev-publish.yml` (alert #11)
-  - Replaced `gittools/actions/gitversion/setup@v1` and `gittools/actions/gitversion/execute@v1` with an in-workflow shell-based version computation.
+### 1) Added allowlist path guard for loader file access
+- File: `src/loader.rs`
+- Added `is_allowed_absolute_path(path: &Path) -> io::Result<bool>`.
+- Policy: resolved path must be under one of:
+  - canonical current working directory, or
+  - canonical system temp directory.
 
-### 3) Path injection hardening (`rust/path-injection`)
-- File: `build.rs` (alert #14)
-  - Canonicalized `OUT_DIR` and enforced that it resolves under the target root (`CARGO_TARGET_DIR` or `manifest_dir/target`) before write.
-- File: `src/loader.rs` (alert #23 related loader path handling)
-  - Replaced lightweight path-component checks with canonicalized file-path validation (`canonicalize_user_path`) before read.
-  - Reads now use canonicalized paths and validated file type.
-- File: `src/component_schema.rs` (alert #17 related manifest path handling)
-  - Same canonicalized file-path validation pattern before reading manifest.
-- File: `src/cache/disk.rs` (alert #16 related cache path construction)
-  - Hardened digest-to-filename conversion to strict safe filename characters (`[A-Za-z0-9_-]`), replacing unsafe characters and preventing path separator traversal.
+### 2) Hardened user path canonicalization
+- File: `src/loader.rs`
+- Updated `canonicalize_user_path` to:
+  - canonicalize input,
+  - require a regular file,
+  - reject paths outside allowlisted roots with `PermissionDenied`.
 
-### 4) SSRF/request-forgery hardening (`rust/request-forgery`, alert #68)
-- File: `src/bin/greentic-flow.rs`
-- Fix:
-  - Replaced `validate_no_private_host_url` with `parse_and_validate_outbound_url` returning a parsed `reqwest::Url`.
-  - Added URL hardening checks:
-    - scheme enforcement (`https`, with test-only localhost exception already present),
-    - disallow URL userinfo,
-    - disallow URL fragments,
-    - existing private/local host rejection retained.
-  - Updated outbound request call sites to use validated URL objects:
-    - remote asset download,
-    - frequent component catalog download,
-    - distributor base URL for client config.
+### 3) Hardened schema path resolution for absolute schema inputs
+- File: `src/loader.rs`
+- Updated `load_ygtc_from_str_with_source` absolute-path branch to reuse `canonicalize_user_path`.
+- Result: absolute schema paths now require allowlisted roots.
 
-## Alerts Not Fully Remediated In This Pass
-- `actions/unpinned-tag` on `.github/workflows/codex-security-fix.yml` (`openai/codex-action@v1`, alert #72):
-  - Remains as a tag reference because pinning to an exact commit SHA requires upstream tag resolution from GitHub, which is unavailable in this offline CI environment.
-  - Recommended follow-up: pin `openai/codex-action` to a verified full commit SHA.
+### 4) Hardened temp schema file path construction
+- File: `src/loader.rs`
+- Replaced direct `temp_dir` path assembly with `trusted_temp_schema_path()`:
+  - canonicalizes temp root,
+  - verifies trusted root policy,
+  - builds deterministic schema filename only after trust check.
+- `schema_file_valid` now rejects non-allowlisted paths before attempting reads.
 
-## Validation
-- Ran `cargo fmt --all`.
-- Ran `cargo check -q` successfully after changes.
+## Regression Test Added
+- File: `tests/load_err.rs`
+- Added unix-only test `absolute_schema_path_outside_allowlist_is_rejected`.
+- Verifies absolute schema paths outside allowed roots are rejected.
+
+## Validation Status
+- Could not run cargo tests in this CI sandbox due rustup filesystem restrictions:
+  - error: `could not create temp file /home/runner/.rustup/tmp/...: Read-only file system (os error 30)`
+- Static review confirms path guard is now enforced at all flagged loader path handling points.
 
 ## Files Changed
-- `.github/workflows/codex-security-fix.yml`
-- `.github/workflows/dev-publish.yml`
-- `.github/workflows/nightly-wizard-e2e.yml`
-- `.github/workflows/publish.yml`
-- `build.rs`
-- `src/bin/greentic-flow.rs`
-- `src/cache/disk.rs`
-- `src/component_schema.rs`
 - `src/loader.rs`
+- `tests/load_err.rs`
 - `SECURITY_FIX_REPORT.md`
