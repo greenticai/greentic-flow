@@ -144,20 +144,32 @@ pub fn load_and_validate_bundle_with_schema_text(
     })?;
     let hash_blake3 = blake3_hex(&json_bytes);
 
-    let flow = crate::compile_flow(flow_doc.clone())?;
-    let bundle = build_bundle_from_parts(&flow_doc, &flow, yaml, canonical_json, hash_blake3);
+    let bundle_id = flow_doc.id.clone();
+    let bundle_kind = flow_doc.flow_type.clone();
+    let bundle_entry = resolve_entry(&flow_doc);
+    let flow = crate::compile_flow(flow_doc)?;
+    let bundle = build_bundle_from_parts(
+        bundle_id,
+        bundle_kind,
+        bundle_entry,
+        &flow,
+        yaml,
+        canonical_json,
+        hash_blake3,
+    );
 
     Ok((bundle, flow))
 }
 
 fn build_bundle_from_parts(
-    doc: &crate::model::FlowDoc,
+    id: String,
+    kind: String,
+    entry: String,
     flow: &Flow,
     yaml: &str,
     canonical_json: Value,
     hash_blake3: String,
 ) -> FlowBundle {
-    let entry = resolve_entry(doc);
     let nodes = extract_component_pins(flow)
         .into_iter()
         .map(|(node_id, component)| NodeRef {
@@ -168,8 +180,8 @@ fn build_bundle_from_parts(
         .collect();
 
     FlowBundle {
-        id: doc.id.clone(),
-        kind: doc.flow_type.clone(),
+        id,
+        kind,
         entry,
         yaml: yaml.to_string(),
         json: canonical_json,

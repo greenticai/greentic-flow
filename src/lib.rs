@@ -52,7 +52,7 @@ use greentic_types::{
 };
 use indexmap::IndexMap;
 use serde_json::Value;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::Path;
 
 /// Map a YAML flow type string to [`FlowKind`].
@@ -72,16 +72,34 @@ pub fn map_flow_type(flow_type: &str) -> Result<FlowKind> {
 
 /// Compile a validated [`FlowDoc`] into the canonical [`Flow`] model.
 pub fn compile_flow(doc: FlowDoc) -> Result<Flow> {
-    let kind = map_flow_type(&doc.flow_type)?;
-    let mut entrypoints = doc.entrypoints.clone();
-    if let Some(entry) = resolve_entry(&doc) {
+    let FlowDoc {
+        id,
+        title,
+        description,
+        flow_type,
+        start,
+        parameters,
+        tags,
+        schema_version,
+        mut entrypoints,
+        meta: _,
+        nodes: node_docs,
+    } = doc;
+
+    let kind = map_flow_type(&flow_type)?;
+    let known_nodes: HashSet<String> = node_docs.keys().cloned().collect();
+    if let Some(entry) = start
+        .clone()
+        .or_else(|| known_nodes.contains("in").then(|| "in".to_string()))
+        .or_else(|| node_docs.keys().next().cloned())
+    {
         entrypoints
             .entry("default".to_string())
             .or_insert_with(|| Value::String(entry));
     }
 
     let mut nodes: IndexMap<NodeId, Node, FlowHasher> = IndexMap::default();
-    for (node_id_str, node_doc) in doc.nodes.iter() {
+    for (node_id_str, node_doc) in node_docs {
         let node_id = NodeId::new(node_id_str.as_str()).map_err(|e| {
             crate::error::FlowError::InvalidIdentifier {
                 kind: "node",
@@ -90,38 +108,36 @@ pub fn compile_flow(doc: FlowDoc) -> Result<Flow> {
                 location: crate::error::FlowErrorLocation::at_path(format!("nodes.{node_id_str}")),
             }
         })?;
-        let routing = compile_routing(&node_doc.routing, &doc.nodes, node_id_str)?;
+        let routing = compile_routing(&node_doc.routing, &known_nodes, node_id_str.as_str())?;
         let telemetry = node_doc
             .telemetry
-            .as_ref()
             .map(|t| TelemetryHints {
-                span_name: t.span_name.clone(),
-                attributes: t.attributes.clone(),
-                sampling: t.sampling.clone(),
+                span_name: t.span_name,
+                attributes: t.attributes,
+                sampling: t.sampling,
             })
             .unwrap_or_default();
-        // V2: single op key in raw.
         let mut op_key: Option<String> = None;
         let mut payload: Option<Value> = None;
-        for (k, v) in &node_doc.raw {
-            op_key = Some(k.clone());
-            payload = Some(v.clone());
+        let mut output_mapping = Value::Object(Default::default());
+        for (k, v) in node_doc.raw {
+            if k == "output" {
+                output_mapping = v;
+                continue;
+            }
+            op_key = Some(k);
+            payload = Some(v);
         }
-        let output_mapping = node_doc
-            .raw
-            .get("output")
-            .cloned()
-            .unwrap_or_else(|| Value::Object(Default::default()));
         let operation = op_key.ok_or_else(|| crate::error::FlowError::Internal {
             message: format!("node '{node_id_str}' missing operation key"),
             location: crate::error::FlowErrorLocation::at_path(format!("nodes.{node_id_str}")),
         })?;
         let is_builtin = matches!(operation.as_str(), "questions" | "template");
-        let is_legacy = doc.schema_version.unwrap_or(1) < 2;
+        let is_legacy = schema_version.unwrap_or(1) < 2;
         let (component_id, op_field) = if is_builtin || is_legacy {
-            (operation.clone(), None)
+            (operation, None)
         } else {
-            ("component.exec".to_string(), Some(operation.clone()))
+            ("component.exec".to_string(), Some(operation))
         };
         let node = Node {
             id: node_id.clone(),
@@ -143,9 +159,9 @@ pub fn compile_flow(doc: FlowDoc) -> Result<Flow> {
     }
 
     let flow_id =
-        FlowId::new(doc.id.as_str()).map_err(|e| crate::error::FlowError::InvalidIdentifier {
+        FlowId::new(id.as_str()).map_err(|e| crate::error::FlowError::InvalidIdentifier {
             kind: "flow",
-            value: doc.id.clone(),
+            value: id.clone(),
             detail: e.to_string(),
             location: crate::error::FlowErrorLocation::at_path("id"),
         })?;
@@ -159,10 +175,10 @@ pub fn compile_flow(doc: FlowDoc) -> Result<Flow> {
         entrypoints: entrypoints_map,
         nodes,
         metadata: FlowMetadata {
-            title: doc.title,
-            description: doc.description,
-            tags: doc.tags.into_iter().collect::<BTreeSet<_>>(),
-            extra: doc.parameters,
+            title,
+            description,
+            tags: tags.into_iter().collect::<BTreeSet<_>>(),
+            extra: parameters,
         },
     })
 }
@@ -179,11 +195,7 @@ pub fn compile_ygtc_file(path: &Path) -> Result<Flow> {
     compile_flow(doc)
 }
 
-fn compile_routing(
-    raw: &Value,
-    nodes: &IndexMap<String, crate::model::NodeDoc>,
-    node_id: &str,
-) -> Result<Routing> {
+fn compile_routing(raw: &Value, nodes: &HashSet<String>, node_id: &str) -> Result<Routing> {
     #[derive(serde::Deserialize)]
     struct RouteDoc {
         #[serde(default)]
@@ -245,7 +257,7 @@ fn compile_routing(
             if to == "out" || is_out {
                 return Ok(Routing::End);
             }
-            if !nodes.contains_key(to) {
+            if !nodes.contains(to) {
                 return Err(crate::error::FlowError::MissingNode {
                     target: to.clone(),
                     node_id: node_id.to_string(),
@@ -290,7 +302,7 @@ fn compile_routing(
                 Some(t) => t,
                 None => return Ok(Routing::Custom(raw.clone())),
             };
-            if !nodes.contains_key(to) {
+            if !nodes.contains(to) {
                 return Err(crate::error::FlowError::MissingNode {
                     target: to.clone(),
                     node_id: node_id.to_string(),
@@ -328,16 +340,6 @@ fn compile_routing(
     }
 
     Ok(Routing::Custom(raw.clone()))
-}
-
-fn resolve_entry(doc: &FlowDoc) -> Option<String> {
-    if let Some(start) = &doc.start {
-        return Some(start.clone());
-    }
-    if doc.nodes.contains_key("in") {
-        return Some("in".to_string());
-    }
-    doc.nodes.keys().next().cloned()
 }
 
 #[cfg(test)]

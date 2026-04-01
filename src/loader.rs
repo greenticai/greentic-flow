@@ -17,7 +17,6 @@ use std::{
 const INLINE_SOURCE: &str = "<inline>";
 const DEFAULT_SCHEMA_LABEL: &str = "https://raw.githubusercontent.com/greenticai/greentic-flow/refs/heads/master/schemas/ygtc.flow.schema.json";
 const EMBEDDED_SCHEMA: &str = include_str!("../schemas/ygtc.flow.schema.json");
-
 fn schema_file_valid(path: &Path) -> bool {
     let Ok(text) = fs::read_to_string(path) else {
         return false;
