@@ -172,7 +172,9 @@ impl DiskCache {
                 Ok(path) if path.starts_with(&canonical_artifacts_dir) => path,
                 _ => continue,
             };
-            let size = fs::metadata(&canonical_artifact).map(|m| m.len()).unwrap_or(0);
+            let size = fs::metadata(&canonical_artifact)
+                .map(|m| m.len())
+                .unwrap_or(0);
             total_bytes = total_bytes.saturating_add(size);
             entries.push((access, meta, canonical_artifact, path, size));
         }

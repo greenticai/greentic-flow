@@ -3100,7 +3100,9 @@ fn is_private_or_local_ip(ip: IpAddr) -> bool {
                 || v6.segments()[0] == 0x2001 && v6.segments()[1] == 0x0db8
                 || v6 == Ipv6Addr::LOCALHOST
                 || v6 == Ipv6Addr::UNSPECIFIED
-                || v6.to_ipv4().is_some_and(|v4| is_private_or_local_ip(IpAddr::V4(v4)))
+                || v6
+                    .to_ipv4()
+                    .is_some_and(|v4| is_private_or_local_ip(IpAddr::V4(v4)))
         }
     }
 }
