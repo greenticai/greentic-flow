@@ -30,6 +30,7 @@ fn main() {
     {
         panic!("invalid OUT_DIR: {}", out_dir.display());
     }
+
     let out_path = out_dir.join("frequent-components.embedded.json");
     fs::write(&out_path, format!("{rendered}\n"))
         .unwrap_or_else(|err| panic!("write {}: {err}", out_path.display()));
