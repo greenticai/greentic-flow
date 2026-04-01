@@ -1,0 +1,28 @@
+name: Nightly Coverage
+
+permissions:
+  contents: read
+
+on:
+  schedule:
+    - cron: "0 3 * * *"
+  workflow_dispatch:
+
+jobs:
+  coverage:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/rust-setup
+        with:
+          components: rustfmt, clippy
+      - name: Install coverage toolchain
+        uses: taiki-e/install-action@v2
+        with:
+          tool: |
+            greentic-dev
+            cargo-nextest
+            cargo-llvm-cov
+      - name: Run nightly coverage policy check
+        run: bash ci/nightly_coverage.sh

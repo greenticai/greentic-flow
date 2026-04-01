@@ -1,6 +1,6 @@
 use std::env;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Component, PathBuf};
 
 fn main() {
     println!("cargo:rerun-if-changed=frequent-components.json");
@@ -19,6 +19,13 @@ fn main() {
     let rendered =
         serde_json::to_string_pretty(&json).expect("serialize embedded frequent-components.json");
     let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR"));
+    if out_dir.as_os_str().is_empty()
+        || out_dir
+            .components()
+            .any(|component| matches!(component, Component::ParentDir))
+    {
+        panic!("invalid OUT_DIR: {}", out_dir.display());
+    }
     let out_path = out_dir.join("frequent-components.embedded.json");
     fs::write(&out_path, format!("{rendered}\n"))
         .unwrap_or_else(|err| panic!("write {}: {err}", out_path.display()));

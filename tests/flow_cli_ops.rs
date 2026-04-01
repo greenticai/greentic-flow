@@ -38,7 +38,7 @@ fn wizard_help_renders_with_pack_entrypoint() {
         .arg("--help")
         .assert()
         .success()
-        .stdout(contains("<PACK>"));
+        .stdout(contains("[PACK]"));
 }
 
 #[test]
@@ -51,7 +51,31 @@ fn wizard_help_accepts_double_dash_before_pack() {
         .arg("--help")
         .assert()
         .success()
-        .stdout(contains("<PACK>"));
+        .stdout(contains("[PACK]"));
+}
+
+#[test]
+fn wizard_help_explains_schema_for_agentic_workflows() {
+    cargo_bin_cmd!("greentic-flow")
+        .arg("wizard")
+        .arg("--help")
+        .assert()
+        .success()
+        .stdout(contains("Write a strict wizard action-plan schema"))
+        .stdout(contains("Codex and Claude"));
+}
+
+#[test]
+fn component_schema_help_explains_agentic_schema_usage() {
+    cargo_bin_cmd!("greentic-flow")
+        .arg("component-schema")
+        .arg("--help")
+        .assert()
+        .success()
+        .stdout(contains(
+            "Emit strict JSON schema for a component wizard answer contract",
+        ))
+        .stdout(contains("embed those answers into a flow wizard plan"));
 }
 
 #[test]
@@ -63,7 +87,7 @@ fn wizard_double_dash_pack_allows_flags_after_pack() {
         .arg("--")
         .arg(dir.path())
         .arg("--dry-run")
-        .arg("--emit-answers")
+        .arg("--answers")
         .arg(&answers_path)
         .arg("--locale")
         .arg("nl")
@@ -72,7 +96,7 @@ fn wizard_double_dash_pack_allows_flags_after_pack() {
         .success();
     assert!(
         answers_path.exists(),
-        "wizard should honor --emit-answers when using `wizard -- <pack> ...`"
+        "wizard should honor --answers when using `wizard -- <pack> ...`"
     );
 }
 
@@ -88,75 +112,143 @@ fn wizard_menu_allows_exit_from_main_menu() {
 }
 
 #[test]
-fn wizard_can_emit_answers_and_schema_for_replay() {
+fn wizard_can_emit_plan_schema_from_answers_file() {
     let dir = tempdir().unwrap();
     let answers_path = dir.path().join("wizard.answers.json");
-    let schema_path = dir.path().join("wizard.answers.schema.json");
+    fs::write(
+        &answers_path,
+        serde_json::to_string_pretty(&json!({
+            "schema_id": "greentic-flow.wizard.plan",
+            "schema_version": "2.0.0",
+            "actions": [{
+                "action": "add-flow",
+                "flow": "flows/global/messaging/main.ygtc",
+                "flow_id": "main",
+                "flow_type": "messaging"
+            }]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
 
-    cargo_bin_cmd!("greentic-flow")
+    let output = cargo_bin_cmd!("greentic-flow")
         .arg("wizard")
         .arg(dir.path())
-        .arg("--emit-answers")
+        .arg("--answers")
         .arg(&answers_path)
-        .arg("--emit-schema")
-        .arg(&schema_path)
-        .write_stdin("0\n")
-        .assert()
-        .success();
-
-    assert!(answers_path.exists(), "answers should be emitted");
-    assert!(schema_path.exists(), "schema should be emitted");
-
-    let answers: JsonValue =
-        serde_json::from_str(&fs::read_to_string(&answers_path).unwrap()).unwrap();
-    let replay_answers = answers
-        .get("answers")
-        .and_then(JsonValue::as_object)
-        .expect("replay answers object");
-    let replay_events = answers
-        .get("events")
-        .and_then(JsonValue::as_array)
-        .expect("replay events array");
-    assert_eq!(
-        replay_answers.get("main.menu").and_then(JsonValue::as_str),
-        Some("0"),
-        "replay file should include selected menu action"
-    );
+        .arg("--schema")
+        .output()
+        .expect("wizard should run");
     assert!(
-        !replay_events.is_empty(),
-        "replay file should include events"
+        output.status.success(),
+        "wizard should succeed: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
     );
 
     let schema: JsonValue =
-        serde_json::from_str(&fs::read_to_string(&schema_path).unwrap()).unwrap();
+        serde_json::from_slice(&output.stdout).expect("schema JSON should be printed to stdout");
     assert_eq!(
         schema.get("schema_id").and_then(JsonValue::as_str),
-        Some("greentic-flow.wizard.menu.replay")
+        Some("greentic-flow.wizard.plan")
+    );
+    assert_eq!(
+        schema
+            .get("properties")
+            .and_then(|v| v.get("actions"))
+            .and_then(|v| v.get("type"))
+            .and_then(JsonValue::as_str),
+        Some("array")
     );
 }
 
 #[test]
-fn wizard_can_replay_from_emitted_answers_without_stdin() {
+fn wizard_schema_without_answers_prints_generic_schema_and_exits() {
+    let dir = tempdir().unwrap();
+
+    let output = cargo_bin_cmd!("greentic-flow")
+        .arg("wizard")
+        .arg("--schema")
+        .arg(dir.path())
+        .output()
+        .expect("wizard should run");
+    assert!(
+        output.status.success(),
+        "wizard should succeed: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let schema: JsonValue =
+        serde_json::from_slice(&output.stdout).expect("schema JSON should be printed to stdout");
+    assert_eq!(
+        schema.get("schema_id").and_then(JsonValue::as_str),
+        Some("greentic-flow.wizard.plan")
+    );
+    assert_eq!(
+        schema
+            .get("properties")
+            .and_then(|v| v.get("actions"))
+            .and_then(|v| v.get("items"))
+            .and_then(|v| v.get("oneOf"))
+            .and_then(JsonValue::as_array)
+            .map(Vec::len),
+        Some(7)
+    );
+}
+
+#[test]
+fn wizard_schema_without_pack_prints_generic_schema_and_exits() {
+    let output = cargo_bin_cmd!("greentic-flow")
+        .arg("wizard")
+        .arg("--schema")
+        .output()
+        .expect("wizard should run");
+    assert!(
+        output.status.success(),
+        "wizard should succeed: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let schema: JsonValue =
+        serde_json::from_slice(&output.stdout).expect("schema JSON should be printed to stdout");
+    assert_eq!(
+        schema.get("schema_id").and_then(JsonValue::as_str),
+        Some("greentic-flow.wizard.plan")
+    );
+}
+
+#[test]
+fn wizard_can_apply_declarative_answers_plan() {
     let dir = tempdir().unwrap();
     let answers_path = dir.path().join("wizard.answers.json");
+    fs::write(
+        &answers_path,
+        serde_json::to_string_pretty(&json!({
+            "schema_id": "greentic-flow.wizard.plan",
+            "schema_version": "2.0.0",
+            "actions": [{
+                "action": "add-flow",
+                "flow": "flows/global/messaging/main.ygtc",
+                "flow_id": "main",
+                "flow_type": "messaging"
+            }]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
 
     cargo_bin_cmd!("greentic-flow")
         .arg("wizard")
         .arg(dir.path())
-        .arg("--emit-answers")
+        .arg("--answers")
         .arg(&answers_path)
-        .write_stdin("0\n")
         .assert()
         .success();
 
-    cargo_bin_cmd!("greentic-flow")
-        .arg("wizard")
-        .arg(dir.path())
-        .arg("--answers-file")
-        .arg(&answers_path)
-        .write_stdin("")
-        .assert()
-        .success();
+    let flow_path = dir.path().join("flows/global/messaging/main.ygtc");
+    assert!(flow_path.exists(), "plan should create the flow");
 }
 
 #[test]

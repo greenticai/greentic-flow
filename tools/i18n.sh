@@ -26,6 +26,39 @@ default_global_cache_dir() {
 GLOBAL_CACHE_DIR="${GLOBAL_CACHE_DIR:-$(default_global_cache_dir)}"
 CACHE_DIR="${CACHE_DIR:-$GLOBAL_CACHE_DIR}"
 
+scrub_cache_dir() {
+  local dir="$1"
+  if [[ ! -d "$dir" ]]; then
+    return 0
+  fi
+
+  if command -v python3 >/dev/null 2>&1; then
+    python3 - "$dir" <<'PY'
+import json
+import pathlib
+import sys
+
+root = pathlib.Path(sys.argv[1])
+for path in root.rglob("*.json"):
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            json.load(handle)
+    except Exception as exc:
+        print(f"removing invalid cache entry {path}: {exc}", file=sys.stderr)
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass
+PY
+    return 0
+  fi
+
+  find "$dir" -type f -name '*.json' -size 0 -print0 | while IFS= read -r -d '' file; do
+    echo "removing empty cache entry $file" >&2
+    rm -f "$file"
+  done
+}
+
 ensure_translator() {
   if command -v "$TRANSLATOR_BIN" >/dev/null 2>&1; then
     return 0
@@ -123,7 +156,12 @@ run_for_path() {
 }
 
 ensure_translator
+scrub_cache_dir "$LOCAL_CACHE_DIR"
+scrub_cache_dir "$GLOBAL_CACHE_DIR"
 merge_local_cache_into_global
+if [[ "$CACHE_DIR" != "$GLOBAL_CACHE_DIR" && "$CACHE_DIR" != "$LOCAL_CACHE_DIR" ]]; then
+  scrub_cache_dir "$CACHE_DIR"
+fi
 
 while IFS= read -r path; do
   if [[ ! -f "$path" ]]; then

@@ -145,6 +145,9 @@ impl DiskCache {
                 removed_bytes: 0,
             });
         }
+        let canonical_artifacts_dir = artifacts_dir
+            .canonicalize()
+            .with_context(|| format!("failed to canonicalize {}", artifacts_dir.display()))?;
         let mut entries = Vec::new();
         let mut total_bytes = 0u64;
         for entry in fs::read_dir(&artifacts_dir)
@@ -165,9 +168,13 @@ impl DiskCache {
             };
             let access = meta.last_access_time();
             let artifact_path = path.with_extension("cwasm");
-            let size = fs::metadata(&artifact_path).map(|m| m.len()).unwrap_or(0);
+            let canonical_artifact = match artifact_path.canonicalize() {
+                Ok(path) if path.starts_with(&canonical_artifacts_dir) => path,
+                _ => continue,
+            };
+            let size = fs::metadata(&canonical_artifact).map(|m| m.len()).unwrap_or(0);
             total_bytes = total_bytes.saturating_add(size);
-            entries.push((access, meta, artifact_path, path, size));
+            entries.push((access, meta, canonical_artifact, path, size));
         }
         entries.sort_by_key(|(access, _, _, _, _)| {
             access.map(|ts| ts.timestamp()).unwrap_or(i64::MIN)

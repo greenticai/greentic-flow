@@ -6,7 +6,7 @@ use jsonschema::Draft;
 use serde_json::{Map, Value};
 use std::{
     fs,
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
 };
 use url::Url;
 
@@ -37,6 +37,10 @@ impl SchemaResolution {
 }
 
 pub fn resolve_input_schema(manifest_path: &Path, operation: &str) -> Result<SchemaResolution> {
+    validate_user_path(manifest_path).map_err(|err| FlowError::Internal {
+        message: format!("invalid manifest path {}: {err}", manifest_path.display()),
+        location: FlowErrorLocation::at_path(manifest_path.display().to_string()),
+    })?;
     let text = fs::read_to_string(manifest_path).map_err(|err| FlowError::Internal {
         message: format!("read manifest {}: {err}", manifest_path.display()),
         location: FlowErrorLocation::at_path(manifest_path.display().to_string()),
@@ -68,6 +72,18 @@ pub fn resolve_input_schema(manifest_path: &Path, operation: &str) -> Result<Sch
         manifest_path.to_path_buf(),
         schema,
     ))
+}
+
+fn validate_user_path(path: &Path) -> std::result::Result<(), &'static str> {
+    if path.as_os_str().is_empty() {
+        return Err("path is empty");
+    }
+    for component in path.components() {
+        if matches!(component, Component::ParentDir) {
+            return Err("path traversal is not allowed");
+        }
+    }
+    Ok(())
 }
 
 fn matches_operation(entry: &Value, operation: &str) -> bool {
