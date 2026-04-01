@@ -1476,7 +1476,7 @@ dependencies = [
 
 [[package]]
 name = "greentic-flow"
-version = "0.4.66"
+version = "0.4.67"
 dependencies = [
  "anyhow",
  "assert_cmd",
