@@ -13,22 +13,8 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  build-test:
-    name: CI (lint/test/build)
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-    steps:
-      - uses: actions/checkout@v4
-      - uses: ./.github/actions/rust-setup
-        with:
-          components: rustfmt, clippy
-      - name: Lint & Test
-        run: |
-          cargo fmt --all -- --check
-          cargo clippy --locked --workspace --all-targets -- -D warnings
-          cargo build --locked --workspace --all-features
-          cargo test --locked --workspace --all-features -- --nocapture
+  ci:
+    uses: ./.github/workflows/ci.yml
 
   publish:
     name: Publish crates
@@ -49,7 +35,7 @@ jobs:
   release:
     name: Build binaries + Release (binstall-friendly)
     if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
-    needs: build-test
+    needs: ci
     runs-on: ${{ matrix.os }}
     defaults:
       run:
