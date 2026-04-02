@@ -1,1 +1,5 @@
-.github/workflows/publish.yml
+Cargo.lock
+Cargo.toml
+src/bin/greentic-flow.rs
+tests/.wizard_scaffold.rs.pending-snap
+tests/flow_cli_ops.rs

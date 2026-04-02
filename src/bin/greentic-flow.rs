@@ -7,7 +7,7 @@ use std::{
     ffi::{OsStr, OsString},
     fs,
     io::{self, Read, Write},
-    net::{IpAddr, Ipv6Addr},
+    net::{IpAddr, Ipv6Addr, ToSocketAddrs},
     path::{Path, PathBuf},
     sync::{Mutex, OnceLock},
 };
@@ -1947,7 +1947,11 @@ fn schema_for_wizard_plan_action(
                     action.component.as_deref(),
                     action.mode.as_deref(),
                 ) {
-                    let flow_path = pack_dir.join(flow);
+                    let flow_path = safe_pack_join_from_plan(
+                        pack_dir,
+                        flow,
+                        "wizard plan action flow path",
+                    )?;
                     let questions = questions_for_component_schema_at_flow(
                         component,
                         wizard_mode_arg_from_record(mode)?,
@@ -3026,6 +3030,17 @@ fn ensure_safe_pack_relative_path(path: &Path, label: &str) -> Result<()> {
     Ok(())
 }
 
+fn safe_plan_flow_rel_path(flow: &str, label: &str) -> Result<PathBuf> {
+    let flow_rel = parse_user_supplied_path(flow);
+    ensure_safe_pack_relative_path(&flow_rel, label)?;
+    Ok(flow_rel)
+}
+
+fn safe_pack_join_from_plan(pack_dir: &Path, flow: &str, label: &str) -> Result<PathBuf> {
+    let flow_rel = safe_plan_flow_rel_path(flow, label)?;
+    Ok(pack_dir.join(flow_rel))
+}
+
 fn validate_asset_extension(file_name: &str, file_types: &[String]) -> Result<()> {
     if file_types.is_empty() {
         return Ok(());
@@ -3086,7 +3101,29 @@ fn parse_and_validate_outbound_url(raw: &str, label: &str) -> Result<reqwest::Ur
     {
         anyhow::bail!("{label} URL host is not allowed: {host}");
     }
+    validate_public_dns_targets(&parsed, label)?;
     Ok(parsed)
+}
+
+fn validate_public_dns_targets(url: &reqwest::Url, label: &str) -> Result<()> {
+    let Some(host) = url.host_str() else {
+        anyhow::bail!("{label} URL missing host");
+    };
+    let port = url.port_or_known_default().unwrap_or(443);
+    let addrs = format!("{host}:{port}")
+        .to_socket_addrs()
+        .with_context(|| format!("resolve {label} host '{host}'"))?;
+    let mut has_any = false;
+    for addr in addrs {
+        has_any = true;
+        if is_private_or_local_ip(addr.ip()) {
+            anyhow::bail!("{label} URL resolves to disallowed address {}", addr.ip());
+        }
+    }
+    if !has_any {
+        anyhow::bail!("{label} URL host '{host}' did not resolve to any address");
+    }
+    Ok(())
 }
 
 fn is_private_or_local_ip(ip: IpAddr) -> bool {
@@ -4146,7 +4183,7 @@ fn upsert_pack_asset_entries(
 }
 
 fn sync_pack_assets_for_flow(pack_dir: &Path, flow_rel: &str) -> Result<()> {
-    let flow_path = pack_dir.join(flow_rel);
+    let flow_path = safe_pack_join_from_plan(pack_dir, flow_rel, "flow path for asset sync")?;
     if !flow_path.exists() {
         return Ok(());
     }
@@ -4164,12 +4201,13 @@ fn execute_add_flow_plan_action(pack_dir: &Path, action: &WizardPlanAction) -> R
         .flow
         .as_deref()
         .ok_or_else(|| anyhow!("add-flow action missing flow"))?;
+    let flow_path = safe_pack_join_from_plan(pack_dir, flow_rel, "add-flow action flow path")?;
     let flow_id = action
         .flow_id
         .clone()
         .ok_or_else(|| anyhow!("add-flow action missing flow_id"))?;
     write_new_flow_file(NewFlowFileSpec {
-        flow_path: pack_dir.join(flow_rel),
+        flow_path,
         flow_id: action
             .flow_id
             .clone()
@@ -4333,8 +4371,9 @@ fn execute_edit_flow_summary_plan_action(pack_dir: &Path, action: &WizardPlanAct
         .flow
         .as_deref()
         .ok_or_else(|| anyhow!("edit-flow-summary action missing flow"))?;
+    let flow_path = safe_pack_join_from_plan(pack_dir, flow, "edit-flow-summary action flow path")?;
     apply_flow_summary_update(
-        &pack_dir.join(flow),
+        &flow_path,
         action.name.clone(),
         action.description.clone(),
     )?;
@@ -5514,7 +5553,7 @@ fn execute_delete_flow_plan_action(pack_dir: &Path, action: &WizardPlanAction) -
         .flow
         .as_deref()
         .ok_or_else(|| anyhow!("delete-flow action missing flow"))?;
-    let flow_path = pack_dir.join(flow);
+    let flow_path = safe_pack_join_from_plan(pack_dir, flow, "delete-flow action flow path")?;
     if flow_path.exists() {
         fs::remove_file(&flow_path)
             .with_context(|| format!("delete flow {}", flow_path.display()))?;
@@ -6669,23 +6708,23 @@ fn split_component_schema_source(component: &str) -> (Option<PathBuf>, Option<St
     }
 }
 
-fn resolve_plan_local_wasm(pack_dir: &Path, path: PathBuf) -> PathBuf {
-    let candidate = if path.is_absolute() {
-        path
-    } else {
-        pack_dir.join(&path)
-    };
+fn resolve_plan_local_wasm(pack_dir: &Path, path: PathBuf) -> Result<PathBuf> {
+    if path.is_absolute() {
+        anyhow::bail!("wizard plan local-wasm path must be relative to the pack root");
+    }
+    ensure_safe_pack_relative_path(&path, "wizard plan local-wasm path")?;
+    let candidate = pack_dir.join(&path);
     if candidate.exists() {
-        return candidate;
+        return Ok(candidate);
     }
     let Some(parent) = candidate.parent() else {
-        return candidate;
+        return Ok(candidate);
     };
     let Some(stem) = candidate.file_stem().and_then(|value| value.to_str()) else {
-        return candidate;
+        return Ok(candidate);
     };
     let Some((base, _)) = stem.split_once("-sha256:") else {
-        return candidate;
+        return Ok(candidate);
     };
     let ext = candidate
         .extension()
@@ -6693,9 +6732,9 @@ fn resolve_plan_local_wasm(pack_dir: &Path, path: PathBuf) -> PathBuf {
         .unwrap_or("wasm");
     let fallback = parent.join(format!("{base}.{ext}"));
     if fallback.exists() {
-        fallback
+        Ok(fallback)
     } else {
-        candidate
+        Ok(candidate)
     }
 }
 
@@ -6704,6 +6743,7 @@ fn execute_add_step_plan_action(pack_dir: &Path, action: &WizardPlanAction) -> R
         .flow
         .as_deref()
         .ok_or_else(|| anyhow!("add-step action missing flow"))?;
+    let flow_path = safe_pack_join_from_plan(pack_dir, flow, "add-step action flow path")?;
     let component = action
         .component
         .as_deref()
@@ -6713,11 +6753,13 @@ fn execute_add_step_plan_action(pack_dir: &Path, action: &WizardPlanAction) -> R
         .as_deref()
         .ok_or_else(|| anyhow!("add-step action missing mode"))?;
     let (local_wasm, component_ref) = split_component_schema_source(component);
-    let local_wasm = local_wasm.map(|path| resolve_plan_local_wasm(pack_dir, path));
+    let local_wasm = local_wasm
+        .map(|path| resolve_plan_local_wasm(pack_dir, path))
+        .transpose()?;
     handle_add_step(
         AddStepArgs {
             component_id: None,
-            flow_path: pack_dir.join(flow),
+            flow_path,
             after: action.after.clone(),
             mode: AddStepMode::Default,
             pack_alias: None,
@@ -6769,6 +6811,7 @@ fn execute_update_step_plan_action(pack_dir: &Path, action: &WizardPlanAction) -
         .flow
         .as_deref()
         .ok_or_else(|| anyhow!("update-step action missing flow"))?;
+    let flow_path = safe_pack_join_from_plan(pack_dir, flow, "update-step action flow path")?;
     let component = action
         .component
         .as_deref()
@@ -6782,11 +6825,13 @@ fn execute_update_step_plan_action(pack_dir: &Path, action: &WizardPlanAction) -
         .clone()
         .ok_or_else(|| anyhow!("update-step action missing step_id"))?;
     let (local_wasm, component_ref) = split_component_schema_source(component);
-    let local_wasm = local_wasm.map(|path| resolve_plan_local_wasm(pack_dir, path));
+    let local_wasm = local_wasm
+        .map(|path| resolve_plan_local_wasm(pack_dir, path))
+        .transpose()?;
     handle_update_step(
         UpdateStepArgs {
             component_id: None,
-            flow_path: pack_dir.join(flow),
+            flow_path,
             step: Some(step_id),
             mode: "default".to_string(),
             wizard_mode: Some(wizard_mode_arg_from_record(mode)?),
@@ -6830,15 +6875,19 @@ fn execute_delete_step_plan_action(pack_dir: &Path, action: &WizardPlanAction) -
         .flow
         .as_deref()
         .ok_or_else(|| anyhow!("delete-step action missing flow"))?;
+    let flow_path = safe_pack_join_from_plan(pack_dir, flow, "delete-step action flow path")?;
     let (local_wasm, component_ref) = action
         .component
         .as_deref()
         .map(split_component_schema_source)
         .unwrap_or((None, None));
+    let local_wasm = local_wasm
+        .map(|path| resolve_plan_local_wasm(pack_dir, path))
+        .transpose()?;
     handle_delete_step(
         DeleteStepArgs {
             component_id: None,
-            flow_path: pack_dir.join(flow),
+            flow_path,
             step: action.step_id.clone(),
             wizard_mode: action
                 .mode

@@ -1,28 +1,56 @@
 # Security Fix Report
 
-Date: 2026-04-02 (UTC)
-
 ## Scope
-Reviewed provided security alerts:
-- Code scanning alert #12 (`actions/unpinned-tag`) for `softprops/action-gh-release@v2` in `.github/workflows/publish.yml`
-- Code scanning alert #8 (`actions/unpinned-tag`) for `katyo/publish-crates@v2` in `.github/workflows/publish.yml`
+Reviewed the CodeQL alerts provided for `src/bin/greentic-flow.rs` and applied minimal, targeted hardening changes for the flagged classes:
+- `rust/path-injection`
+- `rust/request-forgery`
+- `rust/log-injection` (no direct vulnerable sink remained at the currently referenced offsets; existing log sanitization was already present)
 
-## Findings and Remediation
-1. Alert #12 (`softprops/action-gh-release`): **Remediated in current workflow**.
-- Current file uses a full commit SHA pin:
-  - `.github/workflows/publish.yml`: `softprops/action-gh-release@153bb8e04406b158c6c84fc1615b65b24149a1fe # v2`
-- This satisfies the CodeQL recommendation to pin third-party actions to immutable commit SHAs.
+## Remediations Applied
 
-2. Alert #8 (`katyo/publish-crates`): **No vulnerable reference present in current workflow**.
-- `katyo/publish-crates` is not present in `.github/workflows/publish.yml`.
-- The currently committed workflow no longer contains the unpinned tag usage referenced by the alert metadata.
+### 1) Path traversal / path injection hardening for wizard plan execution
+Added strict validation for plan-provided flow paths before any filesystem join/use:
+- New helpers:
+  - `safe_plan_flow_rel_path(flow, label)`
+  - `safe_pack_join_from_plan(pack_dir, flow, label)`
+- These enforce relative, non-escaping paths via existing `ensure_safe_pack_relative_path`.
+
+Updated call sites to use validated paths:
+- `schema_for_wizard_plan_action` (flow schema/question resolution path)
+- `sync_pack_assets_for_flow`
+- `execute_add_flow_plan_action`
+- `execute_edit_flow_summary_plan_action`
+- `execute_delete_flow_plan_action`
+- `execute_add_step_plan_action`
+- `execute_update_step_plan_action`
+- `execute_delete_step_plan_action`
+
+### 2) Plan local-wasm path restriction
+Hardened `resolve_plan_local_wasm`:
+- Signature changed to return `Result<PathBuf>`.
+- Rejects absolute paths.
+- Validates relative path with `ensure_safe_pack_relative_path`.
+- All plan action callers now handle validation errors via `.transpose()?`.
+
+This prevents plan-driven arbitrary filesystem access for local wasm references.
+
+### 3) SSRF hardening for outbound URL fetches
+Strengthened outbound URL validation in `parse_and_validate_outbound_url`:
+- Added DNS resolution check `validate_public_dns_targets(url, label)`.
+- Rejects hosts resolving to private/local/link-local/loopback/etc. IPs.
+- Ensures host resolves to at least one address.
+
+This complements existing checks (scheme, userinfo, fragment, direct host/IP checks) and mitigates DNS-based SSRF bypasses.
 
 ## Files Changed
-- Added `SECURITY_FIX_REPORT.md` (this report).
+- `src/bin/greentic-flow.rs`
 
-## Verification Performed
-- Searched workflows for relevant action references and unpinned `@vN` patterns.
-- Confirmed `.github/workflows/publish.yml` contains a pinned SHA for `softprops/action-gh-release` and no `katyo/publish-crates` usage.
+## Verification
+Attempted to run:
+- `cargo check --bin greentic-flow`
 
-## Residual Risk
-- Other workflows/composite actions may still contain unpinned third-party actions not covered by the two specified alerts (e.g., `Swatinem/rust-cache@v2`, `taiki-e/install-action@v2`). These were not part of the provided alert scope.
+CI sandbox prevented rustup temp writes (`/home/runner/.rustup/...` read-only), so a full compile check could not be completed in this environment.
+
+## Notes
+- Existing log sanitization helper (`sanitize_for_log`) remains in place and is used for schema-warning/error emission paths.
+- Changes were kept minimal and focused on tainted path/URL handling at execution boundaries.
