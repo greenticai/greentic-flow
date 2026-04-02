@@ -1,31 +1,42 @@
-# Security Fix Report
+# SECURITY_FIX_REPORT
 
-## Scope
-- Reviewed provided alerts:
-  - Dependabot: `0`
-  - Code scanning: `2` (`actions/code-injection/medium`, `actions/unpinned-tag`)
-- Target file from alerts: `.github/workflows/codex-security-fix.yml`.
+## Summary
+- Reviewed all provided alerts (`dependabot: 0`, `code_scanning: 9` in scope).
+- Applied minimal workflow hardening and supply-chain fixes in the referenced workflow files.
+- Replaced or pinned third-party actions to immutable commit SHAs where applicable.
 
-## Findings and Remediation
+## Remediations Applied
 
-### 1) `actions/code-injection/medium` (Alert #73)
-- Alert context points to historical inline workflow content that interpolated PR branch refs in shell commands.
-- Current branch already uses a thin caller workflow (delegates to a reusable workflow), so the originally flagged inline injection site is no longer present in this file.
-- Additional hardening applied:
-  - Added a job-level guard to skip fork-origin pull requests:
-    - `if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository`
-  - This prevents untrusted fork refs from being passed into the privileged remediation flow.
+### 1) `actions/unpinned-tag` in `.github/workflows/dev-publish.yml`
+- Pinned `aws-actions/configure-aws-credentials@v4` to:
+  - `aws-actions/configure-aws-credentials@d0834ad3a60a024346910e522a81b0002bd37fea`
+- Pinned `gittools/actions/gitversion/setup@v1` to:
+  - `gittools/actions/gitversion/setup@dcb17efb49ec7f20efdebce79cc397a3952c63db`
+- Pinned `gittools/actions/gitversion/execute@v1` to:
+  - `gittools/actions/gitversion/execute@dcb17efb49ec7f20efdebce79cc397a3952c63db`
 
-### 2) `actions/unpinned-tag` (Alert #72)
-- Alert context points to `openai/codex-action@v1` in historical inline workflow content.
-- In this branch, `.github/workflows/codex-security-fix.yml` no longer directly uses `openai/codex-action`; it calls a centralized reusable workflow in `greenticai/.github`.
-- Residual follow-up required upstream:
-  - Pin third-party actions inside the reusable workflow to full commit SHAs.
-  - This must be done in the source reusable workflow repository (`greenticai/.github`) rather than this caller repo.
+### 2) `actions/unpinned-tag` in `.github/workflows/publish.yml`
+- Replaced third-party `katyo/publish-crates@v2` with native command execution:
+  - `cargo publish --allow-dirty --token "$CARGO_REGISTRY_TOKEN"`
+- Pinned `softprops/action-gh-release@v2` to:
+  - `softprops/action-gh-release@153bb8e04406b158c6c84fc1615b65b24149a1fe`
 
-## Files Changed
-- `.github/workflows/codex-security-fix.yml`
+### 3) `actions/unpinned-tag` in `.github/workflows/nightly-wizard-e2e.yml`
+- Replaced third-party `taiki-e/install-action@cargo-binstall` with native command execution:
+  - `cargo install cargo-binstall --locked`
+
+## Alert Reconciliation Notes
+
+### `actions/code-injection/medium` in `.github/workflows/codex-security-fix.yml`
+- The currently checked-in workflow no longer contains the flagged inline interpolation pattern (`${{ github.event.pull_request.head.ref }}` in a `run:` context).
+- Current file is a thin caller to a reusable workflow with a fork-PR guard already present.
+
+### `actions/unpinned-tag` for `openai/codex-action@v1` in `.github/workflows/codex-security-fix.yml`
+- The currently checked-in file does not directly invoke `openai/codex-action`.
+- This alert appears to target historical workflow content rather than the current file body in this branch.
+
+## Files Updated
+- `.github/workflows/dev-publish.yml`
+- `.github/workflows/publish.yml`
+- `.github/workflows/nightly-wizard-e2e.yml`
 - `SECURITY_FIX_REPORT.md`
-
-## Notes
-- No dependency vulnerabilities were provided in input (`dependabot: []`).

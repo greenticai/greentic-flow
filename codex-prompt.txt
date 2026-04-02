@@ -118,6 +118,384 @@ Security alerts JSON:
       "instances_url": "https://api.github.com/repos/greenticai/greentic-flow/code-scanning/alerts/72/instances",
       "dismissal_approved_by": null,
       "assignees": []
+    },
+    {
+      "number": 12,
+      "created_at": "2026-03-30T22:01:07Z",
+      "updated_at": "2026-03-30T22:01:07Z",
+      "url": "https://api.github.com/repos/greenticai/greentic-flow/code-scanning/alerts/12",
+      "html_url": "https://github.com/greenticai/greentic-flow/security/code-scanning/12",
+      "state": "open",
+      "fixed_at": null,
+      "dismissed_by": null,
+      "dismissed_at": null,
+      "dismissed_reason": null,
+      "dismissed_comment": null,
+      "rule": {
+        "id": "actions/unpinned-tag",
+        "severity": "warning",
+        "description": "Unpinned tag for a non-immutable Action in workflow",
+        "name": "actions/unpinned-tag",
+        "tags": [
+          "actions",
+          "external/cwe/cwe-829",
+          "security"
+        ],
+        "full_description": "Using a tag for a non-immutable Action that is not pinned to a commit can lead to executing an untrusted Action through a supply chain attack.",
+        "help": "## Overview\n\nUsing a tag for a 3rd party Action that is not pinned to a commit can lead to executing an untrusted Action through a supply chain attack.\n\n## Recommendation\n\nPinning an action to a full length commit SHA is currently the only way to use a non-immutable action as an immutable release. Pinning to a particular SHA helps mitigate the risk of a bad actor adding a backdoor to the action's repository, as they would need to generate a SHA-1 collision for a valid Git object payload. When selecting a SHA, you should verify it is from the action's repository and not a repository fork.\n\n## Example\n\n### Incorrect Usage\n\n```yaml\n- uses: tj-actions/changed-files@v44\n```\n\n### Correct Usage\n\n```yaml\n- uses: tj-actions/changed-files@c65cd883420fd2eb864698a825fc4162dd94482c # v44\n```\n\n## References\n\n- GitHub Docs: [Using third-party actions](https://docs.github.com/en/actions/security-for-github-actions/security-guides/security-hardening-for-github-actions#using-third-party-actions).\n",
+        "security_severity_level": "medium"
+      },
+      "tool": {
+        "name": "CodeQL",
+        "guid": null,
+        "version": "2.25.1"
+      },
+      "most_recent_instance": {
+        "ref": "refs/heads/main",
+        "analysis_key": "dynamic/github-code-scanning/codeql:analyze",
+        "environment": "{\"build-mode\":\"none\",\"category\":\"/language:actions\",\"language\":\"actions\",\"runner\":\"[\\\"ubuntu-latest\\\"]\"}",
+        "category": "/language:actions",
+        "state": "open",
+        "commit_sha": "135de791cac8ab66084838d7cdfa0dcc9ac2ae6b",
+        "message": {
+          "text": "Unpinned 3rd party Action 'Publish crates (single or workspace)' step Uses Step uses 'softprops/action-gh-release' with ref 'v2', not a pinned commit hash"
+        },
+        "location": {
+          "path": ".github/workflows/publish.yml",
+          "start_line": 132,
+          "end_line": 132,
+          "start_column": 15,
+          "end_column": 45
+        },
+        "classifications": []
+      },
+      "instances_url": "https://api.github.com/repos/greenticai/greentic-flow/code-scanning/alerts/12/instances",
+      "dismissal_approved_by": null,
+      "assignees": []
+    },
+    {
+      "number": 11,
+      "created_at": "2026-03-30T22:01:07Z",
+      "updated_at": "2026-03-30T22:01:07Z",
+      "url": "https://api.github.com/repos/greenticai/greentic-flow/code-scanning/alerts/11",
+      "html_url": "https://github.com/greenticai/greentic-flow/security/code-scanning/11",
+      "state": "open",
+      "fixed_at": null,
+      "dismissed_by": null,
+      "dismissed_at": null,
+      "dismissed_reason": null,
+      "dismissed_comment": null,
+      "rule": {
+        "id": "actions/unpinned-tag",
+        "severity": "warning",
+        "description": "Unpinned tag for a non-immutable Action in workflow",
+        "name": "actions/unpinned-tag",
+        "tags": [
+          "actions",
+          "external/cwe/cwe-829",
+          "security"
+        ],
+        "full_description": "Using a tag for a non-immutable Action that is not pinned to a commit can lead to executing an untrusted Action through a supply chain attack.",
+        "help": "## Overview\n\nUsing a tag for a 3rd party Action that is not pinned to a commit can lead to executing an untrusted Action through a supply chain attack.\n\n## Recommendation\n\nPinning an action to a full length commit SHA is currently the only way to use a non-immutable action as an immutable release. Pinning to a particular SHA helps mitigate the risk of a bad actor adding a backdoor to the action's repository, as they would need to generate a SHA-1 collision for a valid Git object payload. When selecting a SHA, you should verify it is from the action's repository and not a repository fork.\n\n## Example\n\n### Incorrect Usage\n\n```yaml\n- uses: tj-actions/changed-files@v44\n```\n\n### Correct Usage\n\n```yaml\n- uses: tj-actions/changed-files@c65cd883420fd2eb864698a825fc4162dd94482c # v44\n```\n\n## References\n\n- GitHub Docs: [Using third-party actions](https://docs.github.com/en/actions/security-for-github-actions/security-guides/security-hardening-for-github-actions#using-third-party-actions).\n",
+        "security_severity_level": "medium"
+      },
+      "tool": {
+        "name": "CodeQL",
+        "guid": null,
+        "version": "2.25.1"
+      },
+      "most_recent_instance": {
+        "ref": "refs/heads/main",
+        "analysis_key": "dynamic/github-code-scanning/codeql:analyze",
+        "environment": "{\"build-mode\":\"none\",\"category\":\"/language:actions\",\"language\":\"actions\",\"runner\":\"[\\\"ubuntu-latest\\\"]\"}",
+        "category": "/language:actions",
+        "state": "open",
+        "commit_sha": "135de791cac8ab66084838d7cdfa0dcc9ac2ae6b",
+        "message": {
+          "text": "Unpinned 3rd party Action 'Dev Publish crates' step Uses Step: gitversion uses 'gittools/actions/gitversion/execute' with ref 'v1', not a pinned commit hash"
+        },
+        "location": {
+          "path": ".github/workflows/dev-publish.yml",
+          "start_line": 109,
+          "end_line": 109,
+          "start_column": 15,
+          "end_column": 53
+        },
+        "classifications": []
+      },
+      "instances_url": "https://api.github.com/repos/greenticai/greentic-flow/code-scanning/alerts/11/instances",
+      "dismissal_approved_by": null,
+      "assignees": []
+    },
+    {
+      "number": 10,
+      "created_at": "2026-03-30T22:01:07Z",
+      "updated_at": "2026-03-30T22:01:07Z",
+      "url": "https://api.github.com/repos/greenticai/greentic-flow/code-scanning/alerts/10",
+      "html_url": "https://github.com/greenticai/greentic-flow/security/code-scanning/10",
+      "state": "open",
+      "fixed_at": null,
+      "dismissed_by": null,
+      "dismissed_at": null,
+      "dismissed_reason": null,
+      "dismissed_comment": null,
+      "rule": {
+        "id": "actions/unpinned-tag",
+        "severity": "warning",
+        "description": "Unpinned tag for a non-immutable Action in workflow",
+        "name": "actions/unpinned-tag",
+        "tags": [
+          "actions",
+          "external/cwe/cwe-829",
+          "security"
+        ],
+        "full_description": "Using a tag for a non-immutable Action that is not pinned to a commit can lead to executing an untrusted Action through a supply chain attack.",
+        "help": "## Overview\n\nUsing a tag for a 3rd party Action that is not pinned to a commit can lead to executing an untrusted Action through a supply chain attack.\n\n## Recommendation\n\nPinning an action to a full length commit SHA is currently the only way to use a non-immutable action as an immutable release. Pinning to a particular SHA helps mitigate the risk of a bad actor adding a backdoor to the action's repository, as they would need to generate a SHA-1 collision for a valid Git object payload. When selecting a SHA, you should verify it is from the action's repository and not a repository fork.\n\n## Example\n\n### Incorrect Usage\n\n```yaml\n- uses: tj-actions/changed-files@v44\n```\n\n### Correct Usage\n\n```yaml\n- uses: tj-actions/changed-files@c65cd883420fd2eb864698a825fc4162dd94482c # v44\n```\n\n## References\n\n- GitHub Docs: [Using third-party actions](https://docs.github.com/en/actions/security-for-github-actions/security-guides/security-hardening-for-github-actions#using-third-party-actions).\n",
+        "security_severity_level": "medium"
+      },
+      "tool": {
+        "name": "CodeQL",
+        "guid": null,
+        "version": "2.25.1"
+      },
+      "most_recent_instance": {
+        "ref": "refs/heads/main",
+        "analysis_key": "dynamic/github-code-scanning/codeql:analyze",
+        "environment": "{\"build-mode\":\"none\",\"category\":\"/language:actions\",\"language\":\"actions\",\"runner\":\"[\\\"ubuntu-latest\\\"]\"}",
+        "category": "/language:actions",
+        "state": "open",
+        "commit_sha": "135de791cac8ab66084838d7cdfa0dcc9ac2ae6b",
+        "message": {
+          "text": "Unpinned 3rd party Action 'Dev Publish crates' step Uses Step uses 'gittools/actions/gitversion/setup' with ref 'v1', not a pinned commit hash"
+        },
+        "location": {
+          "path": ".github/workflows/dev-publish.yml",
+          "start_line": 104,
+          "end_line": 104,
+          "start_column": 15,
+          "end_column": 51
+        },
+        "classifications": []
+      },
+      "instances_url": "https://api.github.com/repos/greenticai/greentic-flow/code-scanning/alerts/10/instances",
+      "dismissal_approved_by": null,
+      "assignees": []
+    },
+    {
+      "number": 9,
+      "created_at": "2026-03-30T22:01:07Z",
+      "updated_at": "2026-03-30T22:01:07Z",
+      "url": "https://api.github.com/repos/greenticai/greentic-flow/code-scanning/alerts/9",
+      "html_url": "https://github.com/greenticai/greentic-flow/security/code-scanning/9",
+      "state": "open",
+      "fixed_at": null,
+      "dismissed_by": null,
+      "dismissed_at": null,
+      "dismissed_reason": null,
+      "dismissed_comment": null,
+      "rule": {
+        "id": "actions/unpinned-tag",
+        "severity": "warning",
+        "description": "Unpinned tag for a non-immutable Action in workflow",
+        "name": "actions/unpinned-tag",
+        "tags": [
+          "actions",
+          "external/cwe/cwe-829",
+          "security"
+        ],
+        "full_description": "Using a tag for a non-immutable Action that is not pinned to a commit can lead to executing an untrusted Action through a supply chain attack.",
+        "help": "## Overview\n\nUsing a tag for a 3rd party Action that is not pinned to a commit can lead to executing an untrusted Action through a supply chain attack.\n\n## Recommendation\n\nPinning an action to a full length commit SHA is currently the only way to use a non-immutable action as an immutable release. Pinning to a particular SHA helps mitigate the risk of a bad actor adding a backdoor to the action's repository, as they would need to generate a SHA-1 collision for a valid Git object payload. When selecting a SHA, you should verify it is from the action's repository and not a repository fork.\n\n## Example\n\n### Incorrect Usage\n\n```yaml\n- uses: tj-actions/changed-files@v44\n```\n\n### Correct Usage\n\n```yaml\n- uses: tj-actions/changed-files@c65cd883420fd2eb864698a825fc4162dd94482c # v44\n```\n\n## References\n\n- GitHub Docs: [Using third-party actions](https://docs.github.com/en/actions/security-for-github-actions/security-guides/security-hardening-for-github-actions#using-third-party-actions).\n",
+        "security_severity_level": "medium"
+      },
+      "tool": {
+        "name": "CodeQL",
+        "guid": null,
+        "version": "2.25.1"
+      },
+      "most_recent_instance": {
+        "ref": "refs/heads/main",
+        "analysis_key": "dynamic/github-code-scanning/codeql:analyze",
+        "environment": "{\"build-mode\":\"none\",\"category\":\"/language:actions\",\"language\":\"actions\",\"runner\":\"[\\\"ubuntu-latest\\\"]\"}",
+        "category": "/language:actions",
+        "state": "open",
+        "commit_sha": "135de791cac8ab66084838d7cdfa0dcc9ac2ae6b",
+        "message": {
+          "text": "Unpinned 3rd party Action 'Dev Publish crates' step Uses Step uses 'aws-actions/configure-aws-credentials' with ref 'v4', not a pinned commit hash"
+        },
+        "location": {
+          "path": ".github/workflows/dev-publish.yml",
+          "start_line": 75,
+          "end_line": 75,
+          "start_column": 15,
+          "end_column": 55
+        },
+        "classifications": []
+      },
+      "instances_url": "https://api.github.com/repos/greenticai/greentic-flow/code-scanning/alerts/9/instances",
+      "dismissal_approved_by": null,
+      "assignees": []
+    },
+    {
+      "number": 8,
+      "created_at": "2026-03-30T22:01:07Z",
+      "updated_at": "2026-03-30T22:01:07Z",
+      "url": "https://api.github.com/repos/greenticai/greentic-flow/code-scanning/alerts/8",
+      "html_url": "https://github.com/greenticai/greentic-flow/security/code-scanning/8",
+      "state": "open",
+      "fixed_at": null,
+      "dismissed_by": null,
+      "dismissed_at": null,
+      "dismissed_reason": null,
+      "dismissed_comment": null,
+      "rule": {
+        "id": "actions/unpinned-tag",
+        "severity": "warning",
+        "description": "Unpinned tag for a non-immutable Action in workflow",
+        "name": "actions/unpinned-tag",
+        "tags": [
+          "actions",
+          "external/cwe/cwe-829",
+          "security"
+        ],
+        "full_description": "Using a tag for a non-immutable Action that is not pinned to a commit can lead to executing an untrusted Action through a supply chain attack.",
+        "help": "## Overview\n\nUsing a tag for a 3rd party Action that is not pinned to a commit can lead to executing an untrusted Action through a supply chain attack.\n\n## Recommendation\n\nPinning an action to a full length commit SHA is currently the only way to use a non-immutable action as an immutable release. Pinning to a particular SHA helps mitigate the risk of a bad actor adding a backdoor to the action's repository, as they would need to generate a SHA-1 collision for a valid Git object payload. When selecting a SHA, you should verify it is from the action's repository and not a repository fork.\n\n## Example\n\n### Incorrect Usage\n\n```yaml\n- uses: tj-actions/changed-files@v44\n```\n\n### Correct Usage\n\n```yaml\n- uses: tj-actions/changed-files@c65cd883420fd2eb864698a825fc4162dd94482c # v44\n```\n\n## References\n\n- GitHub Docs: [Using third-party actions](https://docs.github.com/en/actions/security-for-github-actions/security-guides/security-hardening-for-github-actions#using-third-party-actions).\n",
+        "security_severity_level": "medium"
+      },
+      "tool": {
+        "name": "CodeQL",
+        "guid": null,
+        "version": "2.25.1"
+      },
+      "most_recent_instance": {
+        "ref": "refs/heads/main",
+        "analysis_key": "dynamic/github-code-scanning/codeql:analyze",
+        "environment": "{\"build-mode\":\"none\",\"category\":\"/language:actions\",\"language\":\"actions\",\"runner\":\"[\\\"ubuntu-latest\\\"]\"}",
+        "category": "/language:actions",
+        "state": "open",
+        "commit_sha": "135de791cac8ab66084838d7cdfa0dcc9ac2ae6b",
+        "message": {
+          "text": "Unpinned 3rd party Action 'Publish crates (single or workspace)' step Uses Step uses 'katyo/publish-crates' with ref 'v2', not a pinned commit hash"
+        },
+        "location": {
+          "path": ".github/workflows/publish.yml",
+          "start_line": 41,
+          "end_line": 41,
+          "start_column": 15,
+          "end_column": 38
+        },
+        "classifications": []
+      },
+      "instances_url": "https://api.github.com/repos/greenticai/greentic-flow/code-scanning/alerts/8/instances",
+      "dismissal_approved_by": null,
+      "assignees": []
+    },
+    {
+      "number": 7,
+      "created_at": "2026-03-30T22:01:07Z",
+      "updated_at": "2026-03-30T22:01:07Z",
+      "url": "https://api.github.com/repos/greenticai/greentic-flow/code-scanning/alerts/7",
+      "html_url": "https://github.com/greenticai/greentic-flow/security/code-scanning/7",
+      "state": "open",
+      "fixed_at": null,
+      "dismissed_by": null,
+      "dismissed_at": null,
+      "dismissed_reason": null,
+      "dismissed_comment": null,
+      "rule": {
+        "id": "actions/unpinned-tag",
+        "severity": "warning",
+        "description": "Unpinned tag for a non-immutable Action in workflow",
+        "name": "actions/unpinned-tag",
+        "tags": [
+          "actions",
+          "external/cwe/cwe-829",
+          "security"
+        ],
+        "full_description": "Using a tag for a non-immutable Action that is not pinned to a commit can lead to executing an untrusted Action through a supply chain attack.",
+        "help": "## Overview\n\nUsing a tag for a 3rd party Action that is not pinned to a commit can lead to executing an untrusted Action through a supply chain attack.\n\n## Recommendation\n\nPinning an action to a full length commit SHA is currently the only way to use a non-immutable action as an immutable release. Pinning to a particular SHA helps mitigate the risk of a bad actor adding a backdoor to the action's repository, as they would need to generate a SHA-1 collision for a valid Git object payload. When selecting a SHA, you should verify it is from the action's repository and not a repository fork.\n\n## Example\n\n### Incorrect Usage\n\n```yaml\n- uses: tj-actions/changed-files@v44\n```\n\n### Correct Usage\n\n```yaml\n- uses: tj-actions/changed-files@c65cd883420fd2eb864698a825fc4162dd94482c # v44\n```\n\n## References\n\n- GitHub Docs: [Using third-party actions](https://docs.github.com/en/actions/security-for-github-actions/security-guides/security-hardening-for-github-actions#using-third-party-actions).\n",
+        "security_severity_level": "medium"
+      },
+      "tool": {
+        "name": "CodeQL",
+        "guid": null,
+        "version": "2.25.1"
+      },
+      "most_recent_instance": {
+        "ref": "refs/heads/main",
+        "analysis_key": "dynamic/github-code-scanning/codeql:analyze",
+        "environment": "{\"build-mode\":\"none\",\"category\":\"/language:actions\",\"language\":\"actions\",\"runner\":\"[\\\"ubuntu-latest\\\"]\"}",
+        "category": "/language:actions",
+        "state": "open",
+        "commit_sha": "135de791cac8ab66084838d7cdfa0dcc9ac2ae6b",
+        "message": {
+          "text": "Unpinned 3rd party Action 'Nightly Wizard E2E' step Uses Step uses 'taiki-e/install-action' with ref 'cargo-binstall', not a pinned commit hash"
+        },
+        "location": {
+          "path": ".github/workflows/nightly-wizard-e2e.yml",
+          "start_line": 20,
+          "end_line": 20,
+          "start_column": 15,
+          "end_column": 52
+        },
+        "classifications": []
+      },
+      "instances_url": "https://api.github.com/repos/greenticai/greentic-flow/code-scanning/alerts/7/instances",
+      "dismissal_approved_by": null,
+      "assignees": []
+    },
+    {
+      "number": 6,
+      "created_at": "2026-03-30T22:01:07Z",
+      "updated_at": "2026-03-30T22:01:07Z",
+      "url": "https://api.github.com/repos/greenticai/greentic-flow/code-scanning/alerts/6",
+      "html_url": "https://github.com/greenticai/greentic-flow/security/code-scanning/6",
+      "state": "open",
+      "fixed_at": null,
+      "dismissed_by": null,
+      "dismissed_at": null,
+      "dismissed_reason": null,
+      "dismissed_comment": null,
+      "rule": {
+        "id": "actions/unpinned-tag",
+        "severity": "warning",
+        "description": "Unpinned tag for a non-immutable Action in workflow",
+        "name": "actions/unpinned-tag",
+        "tags": [
+          "actions",
+          "external/cwe/cwe-829",
+          "security"
+        ],
+        "full_description": "Using a tag for a non-immutable Action that is not pinned to a commit can lead to executing an untrusted Action through a supply chain attack.",
+        "help": "## Overview\n\nUsing a tag for a 3rd party Action that is not pinned to a commit can lead to executing an untrusted Action through a supply chain attack.\n\n## Recommendation\n\nPinning an action to a full length commit SHA is currently the only way to use a non-immutable action as an immutable release. Pinning to a particular SHA helps mitigate the risk of a bad actor adding a backdoor to the action's repository, as they would need to generate a SHA-1 collision for a valid Git object payload. When selecting a SHA, you should verify it is from the action's repository and not a repository fork.\n\n## Example\n\n### Incorrect Usage\n\n```yaml\n- uses: tj-actions/changed-files@v44\n```\n\n### Correct Usage\n\n```yaml\n- uses: tj-actions/changed-files@c65cd883420fd2eb864698a825fc4162dd94482c # v44\n```\n\n## References\n\n- GitHub Docs: [Using third-party actions](https://docs.github.com/en/actions/security-for-github-actions/security-guides/security-hardening-for-github-actions#using-third-party-actions).\n",
+        "security_severity_level": "medium"
+      },
+      "tool": {
+        "name": "CodeQL",
+        "guid": null,
+        "version": "2.25.1"
+      },
+      "most_recent_instance": {
+        "ref": "refs/heads/main",
+        "analysis_key": "dynamic/github-code-scanning/codeql:analyze",
+        "environment": "{\"build-mode\":\"none\",\"category\":\"/language:actions\",\"language\":\"actions\",\"runner\":\"[\\\"ubuntu-latest\\\"]\"}",
+        "category": "/language:actions",
+        "state": "open",
+        "commit_sha": "135de791cac8ab66084838d7cdfa0dcc9ac2ae6b",
+        "message": {
+          "text": "Unpinned 3rd party Action 'Dev Publish crates' step Uses Step uses 'aws-actions/configure-aws-credentials' with ref 'v4', not a pinned commit hash"
+        },
+        "location": {
+          "path": ".github/workflows/dev-publish.yml",
+          "start_line": 24,
+          "end_line": 24,
+          "start_column": 15,
+          "end_column": 55
+        },
+        "classifications": []
+      },
+      "instances_url": "https://api.github.com/repos/greenticai/greentic-flow/code-scanning/alerts/6/instances",
+      "dismissal_approved_by": null,
+      "assignees": []
     }
   ]
 }
@@ -144,5 +522,68 @@ Please review and fix these issues in the relevant files.
     "start_line": 157,
     "end_line": 157,
     "message": "Unpinned 3rd party Action 'Codex Security Fix' step Uses Step uses 'openai/codex-action' with ref 'v1', not a pinned commit hash"
+  },
+  {
+    "rule": "actions/unpinned-tag",
+    "severity": "medium",
+    "description": "Unpinned tag for a non-immutable Action in workflow",
+    "file": ".github/workflows/publish.yml",
+    "start_line": 132,
+    "end_line": 132,
+    "message": "Unpinned 3rd party Action 'Publish crates (single or workspace)' step Uses Step uses 'softprops/action-gh-release' with ref 'v2', not a pinned commit hash"
+  },
+  {
+    "rule": "actions/unpinned-tag",
+    "severity": "medium",
+    "description": "Unpinned tag for a non-immutable Action in workflow",
+    "file": ".github/workflows/dev-publish.yml",
+    "start_line": 109,
+    "end_line": 109,
+    "message": "Unpinned 3rd party Action 'Dev Publish crates' step Uses Step: gitversion uses 'gittools/actions/gitversion/execute' with ref 'v1', not a pinned commit hash"
+  },
+  {
+    "rule": "actions/unpinned-tag",
+    "severity": "medium",
+    "description": "Unpinned tag for a non-immutable Action in workflow",
+    "file": ".github/workflows/dev-publish.yml",
+    "start_line": 104,
+    "end_line": 104,
+    "message": "Unpinned 3rd party Action 'Dev Publish crates' step Uses Step uses 'gittools/actions/gitversion/setup' with ref 'v1', not a pinned commit hash"
+  },
+  {
+    "rule": "actions/unpinned-tag",
+    "severity": "medium",
+    "description": "Unpinned tag for a non-immutable Action in workflow",
+    "file": ".github/workflows/dev-publish.yml",
+    "start_line": 75,
+    "end_line": 75,
+    "message": "Unpinned 3rd party Action 'Dev Publish crates' step Uses Step uses 'aws-actions/configure-aws-credentials' with ref 'v4', not a pinned commit hash"
+  },
+  {
+    "rule": "actions/unpinned-tag",
+    "severity": "medium",
+    "description": "Unpinned tag for a non-immutable Action in workflow",
+    "file": ".github/workflows/publish.yml",
+    "start_line": 41,
+    "end_line": 41,
+    "message": "Unpinned 3rd party Action 'Publish crates (single or workspace)' step Uses Step uses 'katyo/publish-crates' with ref 'v2', not a pinned commit hash"
+  },
+  {
+    "rule": "actions/unpinned-tag",
+    "severity": "medium",
+    "description": "Unpinned tag for a non-immutable Action in workflow",
+    "file": ".github/workflows/nightly-wizard-e2e.yml",
+    "start_line": 20,
+    "end_line": 20,
+    "message": "Unpinned 3rd party Action 'Nightly Wizard E2E' step Uses Step uses 'taiki-e/install-action' with ref 'cargo-binstall', not a pinned commit hash"
+  },
+  {
+    "rule": "actions/unpinned-tag",
+    "severity": "medium",
+    "description": "Unpinned tag for a non-immutable Action in workflow",
+    "file": ".github/workflows/dev-publish.yml",
+    "start_line": 24,
+    "end_line": 24,
+    "message": "Unpinned 3rd party Action 'Dev Publish crates' step Uses Step uses 'aws-actions/configure-aws-credentials' with ref 'v4', not a pinned commit hash"
   }
 ]
