@@ -3301,6 +3301,108 @@ fn materialize_remote_asset_answer(
     Ok(target_rel.to_string_lossy().replace('\\', "/"))
 }
 
+fn resolve_local_asset_source_path(reference: &str, pack_root: &Path) -> Option<PathBuf> {
+    let candidate = PathBuf::from(reference);
+    if candidate.is_absolute() {
+        return candidate.is_file().then_some(candidate);
+    }
+
+    let pack_candidate = pack_root.join(&candidate);
+    if pack_candidate.is_file() {
+        return Some(pack_candidate);
+    }
+
+    let cwd_candidate = env::current_dir().ok()?.join(candidate);
+    cwd_candidate.is_file().then_some(cwd_candidate)
+}
+
+fn materialize_local_asset_answer(
+    reference: &str,
+    asset_spec: &AssetRefQuestionSpec,
+    flow_path: &Path,
+    interactive: bool,
+    qa_io: Option<&mut QaInteractiveIo<'_>>,
+) -> Result<Option<String>> {
+    let pack_root = infer_pack_root_from_flow_path(flow_path)?;
+    let Some(source_abs) = resolve_local_asset_source_path(reference, &pack_root) else {
+        return Ok(None);
+    };
+
+    if source_abs.starts_with(&pack_root) {
+        return Ok(None);
+    }
+
+    let base_path = asset_spec.base_path.as_deref().ok_or_else(|| {
+        anyhow!(
+            "local asset '{}' requires asset_ref.base_path so greentic-flow knows where to place it in the pack",
+            reference
+        )
+    })?;
+    let base_rel = PathBuf::from(base_path);
+    ensure_safe_pack_relative_path(&base_rel, "asset_ref.base_path")?;
+
+    let file_name = source_abs
+        .file_name()
+        .and_then(|value| value.to_str())
+        .ok_or_else(|| {
+            anyhow!(
+                "local asset '{}' is missing a file name",
+                source_abs.display()
+            )
+        })?
+        .to_string();
+    validate_asset_extension(&file_name, &asset_spec.file_types)?;
+
+    let mut target_rel = base_rel.join(&file_name);
+    ensure_safe_pack_relative_path(&target_rel, "resolved asset target path")?;
+    let mut target_abs = pack_root.join(&target_rel);
+
+    if target_abs.exists() {
+        let choice = if interactive {
+            if let Some(io) = qa_io {
+                prompt_asset_conflict_with_io(io.reader, io.writer, &target_rel)?
+            } else {
+                prompt_asset_conflict_stdin(&target_rel)?
+            }
+        } else {
+            anyhow::bail!(
+                "local asset target {} already exists; rerun interactively to choose overwrite or rename",
+                target_rel.display()
+            );
+        };
+        match choice {
+            AssetConflictChoice::Overwrite => {}
+            AssetConflictChoice::Rename => {
+                target_abs = unique_target_path(&target_abs);
+                target_rel = target_abs
+                    .strip_prefix(&pack_root)
+                    .map(PathBuf::from)
+                    .map_err(|err| anyhow!("compute renamed asset path: {err}"))?;
+            }
+            AssetConflictChoice::Cancel => {
+                anyhow::bail!(
+                    "local asset import cancelled for target {}",
+                    target_rel.display()
+                );
+            }
+        }
+    }
+
+    if let Some(parent) = target_abs.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("create asset directory {}", parent.display()))?;
+    }
+    fs::copy(&source_abs, &target_abs).with_context(|| {
+        format!(
+            "copy local asset from {} to {}",
+            source_abs.display(),
+            target_abs.display()
+        )
+    })?;
+
+    Ok(Some(target_rel.to_string_lossy().replace('\\', "/")))
+}
+
 fn materialize_remote_asset_answers(
     qa_spec_cbor: &[u8],
     answers: &mut HashMap<String, serde_json::Value>,
@@ -3310,26 +3412,37 @@ fn materialize_remote_asset_answers(
 ) -> Result<()> {
     let asset_specs = asset_ref_specs_from_qa_spec_cbor(qa_spec_cbor);
     for (question_id, asset_spec) in asset_specs {
-        if !asset_spec.allow_remote {
-            continue;
-        }
         let Some(answer) = answers.get_mut(&question_id) else {
             continue;
         };
         let Some(reference) = answer.as_str() else {
             continue;
         };
-        if !is_remote_asset_reference(reference) {
+        if is_remote_asset_reference(reference) {
+            if !asset_spec.allow_remote {
+                continue;
+            }
+            let local_path = materialize_remote_asset_answer(
+                reference,
+                &asset_spec,
+                flow_path,
+                interactive,
+                qa_io.as_deref_mut(),
+            )?;
+            *answer = serde_json::Value::String(local_path);
             continue;
         }
-        let local_path = materialize_remote_asset_answer(
+
+        let local_path = materialize_local_asset_answer(
             reference,
             &asset_spec,
             flow_path,
             interactive,
             qa_io.as_deref_mut(),
         )?;
-        *answer = serde_json::Value::String(local_path);
+        if let Some(local_path) = local_path {
+            *answer = serde_json::Value::String(local_path);
+        }
     }
     Ok(())
 }
@@ -3808,14 +3921,255 @@ fn write_new_flow_file(spec: NewFlowFileSpec) -> Result<()> {
     write_flow_file(&spec.flow_path, &yaml, spec.force, spec.backup)
 }
 
+fn upsert_pack_flow_entry(
+    pack_dir: &Path,
+    flow_rel: &str,
+    flow_id_hint: Option<&str>,
+) -> Result<()> {
+    fn ystr(value: &str) -> serde_yaml_bw::Value {
+        serde_yaml_bw::Value::String(value.to_string(), None)
+    }
+    fn yseq() -> serde_yaml_bw::Value {
+        serde_yaml_bw::Value::Sequence(serde_yaml_bw::Sequence::new())
+    }
+
+    let pack_yaml_path = pack_dir.join("pack.yaml");
+    if !pack_yaml_path.exists() {
+        return Ok(());
+    }
+    let raw = fs::read_to_string(&pack_yaml_path)
+        .with_context(|| format!("read {}", pack_yaml_path.display()))?;
+    let mut root: serde_yaml_bw::Value = serde_yaml_bw::from_str(&raw)
+        .with_context(|| format!("parse {}", pack_yaml_path.display()))?;
+    let root_map = root
+        .as_mapping_mut()
+        .ok_or_else(|| anyhow!("{} must contain a YAML mapping", pack_yaml_path.display()))?;
+
+    let flow_id = if let Some(id) = flow_id_hint {
+        id.to_string()
+    } else {
+        let doc = load_ygtc_from_path(&pack_dir.join(flow_rel))
+            .with_context(|| format!("load flow {}", pack_dir.join(flow_rel).display()))?;
+        doc.id
+    };
+    let flow_rel_value = ystr(flow_rel);
+
+    let flows_key = ystr("flows");
+    let flows_value = root_map.entry(flows_key).or_insert_with(yseq);
+    if !flows_value.is_sequence() {
+        *flows_value = yseq();
+    }
+    let flows = flows_value
+        .as_sequence_mut()
+        .ok_or_else(|| anyhow!("pack flows field must be a sequence"))?;
+
+    let mut found = false;
+    for entry in flows.iter_mut() {
+        let Some(flow_map) = entry.as_mapping_mut() else {
+            continue;
+        };
+        let file_key = ystr("file");
+        let id_key = ystr("id");
+        let matches = flow_map.get(&file_key) == Some(&flow_rel_value)
+            || flow_map.get(&id_key) == Some(&ystr(&flow_id));
+        if !matches {
+            continue;
+        }
+        flow_map.insert(id_key.clone(), ystr(&flow_id));
+        flow_map.insert(file_key.clone(), flow_rel_value.clone());
+        let tags_key = ystr("tags");
+        if !matches!(
+            flow_map.get(&tags_key),
+            Some(serde_yaml_bw::Value::Sequence(_))
+        ) {
+            flow_map.insert(tags_key, yseq());
+        }
+        let entrypoints_key = ystr("entrypoints");
+        if !matches!(
+            flow_map.get(&entrypoints_key),
+            Some(serde_yaml_bw::Value::Sequence(_))
+        ) {
+            flow_map.insert(entrypoints_key, yseq());
+        }
+        found = true;
+        break;
+    }
+
+    if !found {
+        let mut flow_map = serde_yaml_bw::Mapping::new();
+        flow_map.insert(ystr("id"), ystr(&flow_id));
+        flow_map.insert(ystr("file"), flow_rel_value);
+        flow_map.insert(ystr("tags"), yseq());
+        flow_map.insert(ystr("entrypoints"), yseq());
+        flows.push(serde_yaml_bw::Value::Mapping(flow_map));
+    }
+
+    let mut rendered = serde_yaml_bw::to_string(&root)
+        .with_context(|| format!("serialize {}", pack_yaml_path.display()))?;
+    if !rendered.ends_with('\n') {
+        rendered.push('\n');
+    }
+    fs::write(&pack_yaml_path, rendered)
+        .with_context(|| format!("write {}", pack_yaml_path.display()))?;
+    Ok(())
+}
+
+fn remove_pack_flow_entry(pack_dir: &Path, flow_rel: &str) -> Result<()> {
+    fn ystr(value: &str) -> serde_yaml_bw::Value {
+        serde_yaml_bw::Value::String(value.to_string(), None)
+    }
+
+    let pack_yaml_path = pack_dir.join("pack.yaml");
+    if !pack_yaml_path.exists() {
+        return Ok(());
+    }
+    let raw = fs::read_to_string(&pack_yaml_path)
+        .with_context(|| format!("read {}", pack_yaml_path.display()))?;
+    let mut root: serde_yaml_bw::Value = serde_yaml_bw::from_str(&raw)
+        .with_context(|| format!("parse {}", pack_yaml_path.display()))?;
+    let Some(root_map) = root.as_mapping_mut() else {
+        return Ok(());
+    };
+    let flows_key = ystr("flows");
+    let Some(flows_value) = root_map.get_mut(&flows_key) else {
+        return Ok(());
+    };
+    let Some(flows) = flows_value.as_sequence_mut() else {
+        return Ok(());
+    };
+
+    let file_key = ystr("file");
+    let flow_rel_value = ystr(flow_rel);
+    flows.retain(|entry| {
+        let Some(flow_map) = entry.as_mapping() else {
+            return true;
+        };
+        flow_map.get(&file_key) != Some(&flow_rel_value)
+    });
+
+    let mut rendered = serde_yaml_bw::to_string(&root)
+        .with_context(|| format!("serialize {}", pack_yaml_path.display()))?;
+    if !rendered.ends_with('\n') {
+        rendered.push('\n');
+    }
+    fs::write(&pack_yaml_path, rendered)
+        .with_context(|| format!("write {}", pack_yaml_path.display()))?;
+    Ok(())
+}
+
+fn collect_pack_asset_paths_from_json(
+    value: &serde_json::Value,
+    out: &mut std::collections::BTreeSet<String>,
+) {
+    match value {
+        serde_json::Value::String(text) => {
+            if text.starts_with("assets/") {
+                out.insert(text.to_string());
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                collect_pack_asset_paths_from_json(item, out);
+            }
+        }
+        serde_json::Value::Object(map) => {
+            for item in map.values() {
+                collect_pack_asset_paths_from_json(item, out);
+            }
+        }
+        serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::Number(_) => {}
+    }
+}
+
+fn upsert_pack_asset_entries(
+    pack_dir: &Path,
+    asset_paths: &std::collections::BTreeSet<String>,
+) -> Result<()> {
+    fn ystr(value: &str) -> serde_yaml_bw::Value {
+        serde_yaml_bw::Value::String(value.to_string(), None)
+    }
+    fn yseq() -> serde_yaml_bw::Value {
+        serde_yaml_bw::Value::Sequence(serde_yaml_bw::Sequence::new())
+    }
+
+    if asset_paths.is_empty() {
+        return Ok(());
+    }
+
+    let pack_yaml_path = pack_dir.join("pack.yaml");
+    if !pack_yaml_path.exists() {
+        return Ok(());
+    }
+    let raw = fs::read_to_string(&pack_yaml_path)
+        .with_context(|| format!("read {}", pack_yaml_path.display()))?;
+    let mut root: serde_yaml_bw::Value = serde_yaml_bw::from_str(&raw)
+        .with_context(|| format!("parse {}", pack_yaml_path.display()))?;
+    let Some(root_map) = root.as_mapping_mut() else {
+        return Ok(());
+    };
+
+    let assets_key = ystr("assets");
+    let assets_value = root_map.entry(assets_key).or_insert_with(yseq);
+    if !assets_value.is_sequence() {
+        *assets_value = yseq();
+    }
+    let assets = assets_value
+        .as_sequence_mut()
+        .ok_or_else(|| anyhow!("pack assets field must be a sequence"))?;
+    let path_key = ystr("path");
+
+    for asset_path in asset_paths {
+        let asset_rel = PathBuf::from(asset_path);
+        if ensure_safe_pack_relative_path(&asset_rel, "asset path").is_err() {
+            continue;
+        }
+        let target_value = ystr(asset_path);
+        let exists = assets.iter().any(|entry| {
+            entry.as_mapping().and_then(|map| map.get(&path_key)) == Some(&target_value)
+        });
+        if exists {
+            continue;
+        }
+        let mut entry = serde_yaml_bw::Mapping::new();
+        entry.insert(path_key.clone(), target_value);
+        assets.push(serde_yaml_bw::Value::Mapping(entry));
+    }
+
+    let mut rendered = serde_yaml_bw::to_string(&root)
+        .with_context(|| format!("serialize {}", pack_yaml_path.display()))?;
+    if !rendered.ends_with('\n') {
+        rendered.push('\n');
+    }
+    fs::write(&pack_yaml_path, rendered)
+        .with_context(|| format!("write {}", pack_yaml_path.display()))?;
+    Ok(())
+}
+
+fn sync_pack_assets_for_flow(pack_dir: &Path, flow_rel: &str) -> Result<()> {
+    let flow_path = pack_dir.join(flow_rel);
+    if !flow_path.exists() {
+        return Ok(());
+    }
+    let doc = load_ygtc_from_path(&flow_path)?;
+    let flow_ir = FlowIr::from_doc(doc)?;
+    let mut asset_paths = std::collections::BTreeSet::new();
+    for node in flow_ir.nodes.values() {
+        collect_pack_asset_paths_from_json(&node.payload, &mut asset_paths);
+    }
+    upsert_pack_asset_entries(pack_dir, &asset_paths)
+}
+
 fn execute_add_flow_plan_action(pack_dir: &Path, action: &WizardPlanAction) -> Result<()> {
+    let flow_rel = action
+        .flow
+        .as_deref()
+        .ok_or_else(|| anyhow!("add-flow action missing flow"))?;
+    let flow_id = action
+        .flow_id
+        .clone()
+        .ok_or_else(|| anyhow!("add-flow action missing flow_id"))?;
     write_new_flow_file(NewFlowFileSpec {
-        flow_path: pack_dir.join(
-            action
-                .flow
-                .as_deref()
-                .ok_or_else(|| anyhow!("add-flow action missing flow"))?,
-        ),
+        flow_path: pack_dir.join(flow_rel),
         flow_id: action
             .flow_id
             .clone()
@@ -3829,7 +4183,8 @@ fn execute_add_flow_plan_action(pack_dir: &Path, action: &WizardPlanAction) -> R
         description: None,
         force: false,
         backup: false,
-    })
+    })?;
+    upsert_pack_flow_entry(pack_dir, flow_rel, Some(&flow_id))
 }
 
 fn wizard_edit_flow_summary_with_io<R: Read, W: Write>(
@@ -3982,7 +4337,8 @@ fn execute_edit_flow_summary_plan_action(pack_dir: &Path, action: &WizardPlanAct
         &pack_dir.join(flow),
         action.name.clone(),
         action.description.clone(),
-    )
+    )?;
+    upsert_pack_flow_entry(pack_dir, flow, None)
 }
 
 fn apply_flow_summary_update(
@@ -5174,6 +5530,7 @@ fn execute_delete_flow_plan_action(pack_dir: &Path, action: &WizardPlanAction) -
     if wizard_state_path.exists() {
         let _ = fs::remove_dir_all(&wizard_state_path);
     }
+    remove_pack_flow_entry(pack_dir, flow)?;
     Ok(())
 }
 
@@ -6403,7 +6760,8 @@ fn execute_add_step_plan_action(pack_dir: &Path, action: &WizardPlanAction) -> R
         SchemaMode::Strict,
         OutputFormat::Human,
         false,
-    )
+    )?;
+    sync_pack_assets_for_flow(pack_dir, flow)
 }
 
 fn execute_update_step_plan_action(pack_dir: &Path, action: &WizardPlanAction) -> Result<()> {
@@ -6463,7 +6821,8 @@ fn execute_update_step_plan_action(pack_dir: &Path, action: &WizardPlanAction) -
         SchemaMode::Strict,
         OutputFormat::Human,
         false,
-    )
+    )?;
+    sync_pack_assets_for_flow(pack_dir, flow)
 }
 
 fn execute_delete_step_plan_action(pack_dir: &Path, action: &WizardPlanAction) -> Result<()> {
@@ -8260,6 +8619,131 @@ nodes: {}
     }
 
     #[test]
+    fn wizard_answers_flow_actions_keep_pack_yaml_in_sync() {
+        let dir = tempdir().expect("temp dir");
+        let pack_dir = dir.path();
+        let main_flow_rel = "flows/main.ygtc";
+        let secondary_flow_rel = "flows/secondary.ygtc";
+        let main_flow_path = pack_dir.join(main_flow_rel);
+        let secondary_flow_path = pack_dir.join(secondary_flow_rel);
+        let answers_path = pack_dir.join("answers.json");
+
+        fs::create_dir_all(pack_dir.join("flows")).expect("create flows dir");
+        fs::write(
+            pack_dir.join("pack.yaml"),
+            r#"pack_id: ai.greentic.test
+version: 0.1.0
+kind: application
+publisher: Greentic
+components: []
+flows:
+  - id: main
+    file: flows/main.ygtc
+    tags: [default]
+    entrypoints: [default]
+dependencies: []
+assets: []
+"#,
+        )
+        .expect("write pack yaml");
+        fs::write(
+            &main_flow_path,
+            "id: main\ntype: messaging\nschema_version: 2\nnodes: {}\n",
+        )
+        .expect("write main flow");
+        fs::write(
+            &answers_path,
+            serde_json::to_string_pretty(&json!({
+                "schema_id": "greentic-flow.wizard.plan",
+                "schema_version": "2.0.0",
+                "actions": [
+                    {
+                        "action": "add-flow",
+                        "flow": secondary_flow_rel,
+                        "flow_id": "secondary",
+                        "flow_type": "messaging"
+                    },
+                    {
+                        "action": "edit-flow-summary",
+                        "flow": secondary_flow_rel,
+                        "name": "Secondary Flow",
+                        "description": "Created from plan"
+                    },
+                    {
+                        "action": "delete-flow",
+                        "flow": main_flow_rel
+                    }
+                ]
+            }))
+            .expect("serialize wizard plan"),
+        )
+        .expect("write answers file");
+
+        let mut output = Vec::new();
+        super::run_wizard_menu_with_config(
+            pack_dir,
+            Cursor::new(""),
+            &mut output,
+            super::WizardRunConfig {
+                answers_path: Some(PathBuf::from("answers.json")),
+                emit_schema: false,
+                dry_run: false,
+            },
+        )
+        .expect("apply wizard plan");
+
+        assert!(
+            !main_flow_path.exists(),
+            "delete-flow should remove the original flow"
+        );
+        assert!(
+            secondary_flow_path.exists(),
+            "add-flow should create the new flow"
+        );
+
+        let secondary_doc = load_ygtc_from_path(&secondary_flow_path).expect("load secondary");
+        assert_eq!(secondary_doc.id, "secondary");
+        assert_eq!(
+            secondary_doc.title.as_deref(),
+            Some("i18n:flow.secondary.title")
+        );
+        assert_eq!(
+            secondary_doc.description.as_deref(),
+            Some("i18n:flow.secondary.description")
+        );
+
+        let pack_yaml: serde_yaml_bw::Value = serde_yaml_bw::from_str(
+            &fs::read_to_string(pack_dir.join("pack.yaml")).expect("read pack yaml"),
+        )
+        .expect("parse pack yaml");
+        let flows = pack_yaml
+            .as_mapping()
+            .and_then(|map| map.get(serde_yaml_bw::Value::String("flows".to_string(), None)))
+            .and_then(serde_yaml_bw::Value::as_sequence)
+            .expect("pack flows should be a sequence");
+        assert_eq!(
+            flows.len(),
+            1,
+            "pack should list only one flow after delete-flow"
+        );
+        let flow_entry = flows[0].as_mapping().expect("flow entry mapping");
+        let flow_file = flow_entry
+            .get(serde_yaml_bw::Value::String("file".to_string(), None))
+            .and_then(serde_yaml_bw::Value::as_str)
+            .expect("flow file");
+        let flow_id = flow_entry
+            .get(serde_yaml_bw::Value::String("id".to_string(), None))
+            .and_then(serde_yaml_bw::Value::as_str)
+            .expect("flow id");
+        assert_eq!(flow_file, secondary_flow_rel);
+        assert_eq!(flow_id, "secondary");
+        assert!(
+            pack_dir.join(flow_file).exists(),
+            "pack.yaml should not reference missing flow files"
+        );
+    }
+
+    #[test]
     fn wizard_dry_run_does_not_persist_flow_but_writes_answers_file() {
         let dir = tempdir().expect("temp dir");
         let flow_path = dir.path().join("flows/global/messaging/welcome.ygtc");
@@ -9224,6 +9708,75 @@ nodes:
         assert_eq!(
             answers.get("card_asset"),
             Some(&Value::String("assets/cards/existing.json".to_string()))
+        );
+    }
+
+    #[test]
+    fn materialize_remote_asset_answers_copies_external_local_asset_into_pack() {
+        let qa_spec = json!({
+            "mode": "default",
+            "title": { "key": "qa.asset.title", "fallback": "Asset" },
+            "description": null,
+            "defaults": {},
+            "questions": [
+                {
+                    "id": "card_asset",
+                    "label": { "key": "qa.card_asset", "fallback": "Card asset" },
+                    "help": null,
+                    "error": null,
+                    "required": true,
+                    "default": null,
+                    "skip_if": null,
+                    "kind": {
+                        "type": "asset_ref",
+                        "file_types": ["json"],
+                        "base_path": "assets/cards",
+                        "check_exists": false,
+                        "allow_remote": false
+                    }
+                }
+            ]
+        });
+        let bytes = greentic_types::cbor::canonical::to_canonical_cbor_allow_floats(&qa_spec)
+            .expect("encode qa spec");
+        let source_dir = tempdir().expect("source temp dir");
+        let source_asset = source_dir.path().join("adaptive-card-local.json");
+        fs::write(
+            &source_asset,
+            r#"{"type":"AdaptiveCard","version":"1.6","body":[{"type":"TextBlock","text":"Local"}]}"#,
+        )
+        .expect("write source asset");
+
+        let pack_dir = tempdir().expect("pack temp dir");
+        let flow_path = pack_dir.path().join("flows/global/messaging/main.ygtc");
+        fs::create_dir_all(
+            flow_path
+                .parent()
+                .expect("flow parent directory should be present"),
+        )
+        .expect("create flow parent");
+        fs::write(&flow_path, "id: main\ntype: messaging\nnodes: {}\n").expect("write flow");
+
+        let mut answers = HashMap::from([(
+            "card_asset".to_string(),
+            Value::String(source_asset.display().to_string()),
+        )]);
+        super::materialize_remote_asset_answers(&bytes, &mut answers, &flow_path, false, None)
+            .expect("external local path should be copied into pack assets");
+
+        assert_eq!(
+            answers.get("card_asset"),
+            Some(&Value::String(
+                "assets/cards/adaptive-card-local.json".to_string()
+            ))
+        );
+        let copied_asset = pack_dir
+            .path()
+            .join("assets/cards/adaptive-card-local.json");
+        assert!(copied_asset.exists(), "copied asset should exist in pack");
+        assert_eq!(
+            fs::read_to_string(copied_asset).expect("read copied asset"),
+            fs::read_to_string(source_asset).expect("read source asset")
         );
     }
 
