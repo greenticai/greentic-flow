@@ -21,6 +21,41 @@ fn read_yaml(path: &Path) -> Value {
     serde_yaml_bw::from_str(&fs::read_to_string(path).unwrap()).unwrap()
 }
 
+fn seed_wizard_pack(pack_dir: &Path, adaptive_card_wasm: &Path) {
+    fs::create_dir_all(pack_dir.join("flows")).unwrap();
+    fs::create_dir_all(pack_dir.join("components")).unwrap();
+    fs::write(
+        pack_dir.join("flows/main.ygtc"),
+        "id: main\ntype: messaging\nschema_version: 2\nnodes: {}\n",
+    )
+    .unwrap();
+    fs::copy(
+        adaptive_card_wasm,
+        pack_dir.join("components/component_adaptive_card__0_6_0.wasm"),
+    )
+    .unwrap();
+}
+
+fn write_minimal_pack_yaml(pack_dir: &Path) {
+    fs::write(
+        pack_dir.join("pack.yaml"),
+        r#"pack_id: ai.greentic.test
+version: 0.1.0
+kind: application
+publisher: Greentic
+components: []
+flows:
+  - id: main
+    file: flows/main.ygtc
+    tags: [default]
+    entrypoints: [default]
+dependencies: []
+assets: []
+"#,
+    )
+    .unwrap();
+}
+
 #[test]
 fn version_flag_prints_version() {
     let expected = format!("greentic-flow {}", env!("CARGO_PKG_VERSION"));
@@ -2212,6 +2247,210 @@ nodes:
         .stderr(predicates::str::contains("missing required answers"))
         .stderr(predicates::str::contains("--answers"))
         .stderr(predicates::str::contains("asset_path"));
+}
+
+#[test]
+fn wizard_answers_plan_copies_adaptive_card_asset_from_local_file_and_remote_url() {
+    let wasm_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("workspace parent")
+        .join("component-adaptive-card")
+        .join("dist")
+        .join("component_adaptive_card__0_6_0.wasm");
+    if !wasm_path.exists() {
+        return;
+    }
+
+    let dir = tempdir().unwrap();
+    let local_source = dir.path().join("adaptive-card-local.json");
+    fs::write(
+        &local_source,
+        r#"{"type":"AdaptiveCard","version":"1.6","body":[{"type":"TextBlock","text":"Local"}]}"#,
+    )
+    .unwrap();
+
+    let remote_url = "https://github.com/greenticai/component-adaptive-card/releases/latest/download/adaptive-card.json";
+
+    let local_pack = dir.path().join("pack-local");
+    seed_wizard_pack(&local_pack, &wasm_path);
+    let local_answers = local_pack.join("answers.json");
+    fs::write(
+        &local_answers,
+        serde_json::to_string_pretty(&json!({
+            "schema_id": "greentic-flow.wizard.plan",
+            "schema_version": "2.0.0",
+            "actions": [{
+                "action": "add-step",
+                "flow": "flows/main.ygtc",
+                "step_id": "adaptive_local",
+                "component": "components/component_adaptive_card__0_6_0.wasm",
+                "mode": "default",
+                "answers": {
+                    "card_source": "remote",
+                    "default_card_remote": local_source.display().to_string(),
+                    "multilingual": false
+                }
+            }]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    cargo_bin_cmd!("greentic-flow")
+        .arg("wizard")
+        .arg(&local_pack)
+        .arg("--answers")
+        .arg(&local_answers)
+        .assert()
+        .success();
+
+    let copied_local_asset = local_pack.join("assets/cards/adaptive-card-local.json");
+    assert!(copied_local_asset.exists());
+    assert_eq!(
+        fs::read_to_string(&copied_local_asset).unwrap(),
+        fs::read_to_string(&local_source).unwrap()
+    );
+
+    let remote_pack = dir.path().join("pack-remote");
+    seed_wizard_pack(&remote_pack, &wasm_path);
+    let remote_answers = remote_pack.join("answers.json");
+    fs::write(
+        &remote_answers,
+        serde_json::to_string_pretty(&json!({
+            "schema_id": "greentic-flow.wizard.plan",
+            "schema_version": "2.0.0",
+            "actions": [{
+                "action": "add-step",
+                "flow": "flows/main.ygtc",
+                "step_id": "adaptive_remote",
+                "component": "components/component_adaptive_card__0_6_0.wasm",
+                "mode": "default",
+                "answers": {
+                    "card_source": "remote",
+                    "default_card_remote": remote_url,
+                    "multilingual": false
+                }
+            }]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    cargo_bin_cmd!("greentic-flow")
+        .arg("wizard")
+        .arg(&remote_pack)
+        .arg("--answers")
+        .arg(&remote_answers)
+        .assert()
+        .success();
+
+    let copied_remote_asset = remote_pack.join("assets/cards/adaptive-card.json");
+    assert!(copied_remote_asset.exists());
+    let copied_remote_asset_text = fs::read_to_string(&copied_remote_asset).unwrap();
+    assert!(
+        copied_remote_asset_text.contains("\"AdaptiveCard\""),
+        "remote URL should be materialized into pack assets"
+    );
+}
+
+#[test]
+fn wizard_answers_plan_registers_referenced_asset_in_pack_yaml() {
+    let wasm_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("workspace parent")
+        .join("component-adaptive-card")
+        .join("dist")
+        .join("component_adaptive_card__0_6_0.wasm");
+    if !wasm_path.exists() {
+        return;
+    }
+
+    let dir = tempdir().unwrap();
+    let pack_dir = dir.path().join("pack");
+    seed_wizard_pack(&pack_dir, &wasm_path);
+    write_minimal_pack_yaml(&pack_dir);
+
+    let asset_path = pack_dir.join("assets/cards/welcome_card.json");
+    fs::create_dir_all(asset_path.parent().unwrap()).unwrap();
+    fs::write(
+        &asset_path,
+        r#"{"type":"AdaptiveCard","version":"1.6","body":[{"type":"TextBlock","text":"asset repro"}]}"#,
+    )
+    .unwrap();
+
+    let answers_path = pack_dir.join("answers.json");
+    fs::write(
+        &answers_path,
+        serde_json::to_string_pretty(&json!({
+            "schema_id": "greentic-flow.wizard.plan",
+            "schema_version": "2.0.0",
+            "actions": [
+                {
+                    "action": "add-flow",
+                    "flow": "flows/on_message.ygtc",
+                    "flow_id": "on_message",
+                    "flow_type": "messaging"
+                },
+                {
+                    "action": "add-step",
+                    "flow": "flows/on_message.ygtc",
+                    "component": "components/component_adaptive_card__0_6_0.wasm",
+                    "mode": "default",
+                    "answers": {
+                        "card_source": "asset",
+                        "default_card_inline": {
+                            "type": "AdaptiveCard",
+                            "version": "1.6",
+                            "body": [{"type":"TextBlock","text":"inline fallback"}]
+                        },
+                        "default_card_asset": "assets/cards/welcome_card.json",
+                        "default_card_remote": "",
+                        "multilingual": true,
+                        "language_mode": "custom",
+                        "supported_locales": "en"
+                    }
+                }
+            ]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    cargo_bin_cmd!("greentic-flow")
+        .arg("wizard")
+        .arg(&pack_dir)
+        .arg("--answers")
+        .arg(&answers_path)
+        .arg("--format")
+        .arg("json")
+        .assert()
+        .success();
+
+    let flow_path = pack_dir.join("flows/on_message.ygtc");
+    assert!(flow_path.exists(), "plan should create on_message flow");
+    assert!(
+        fs::read_to_string(&flow_path)
+            .unwrap()
+            .contains("default_card_asset: assets/cards/welcome_card.json"),
+        "flow should reference the asset path"
+    );
+
+    let pack_yaml = read_yaml(&pack_dir.join("pack.yaml"));
+    let assets = pack_yaml
+        .get(Value::from("assets"))
+        .and_then(Value::as_sequence)
+        .expect("pack.yaml assets sequence");
+    let has_asset_entry = assets.iter().any(|entry| {
+        entry
+            .as_mapping()
+            .and_then(|m| m.get(Value::from("path")))
+            .and_then(Value::as_str)
+            == Some("assets/cards/welcome_card.json")
+    });
+    assert!(
+        has_asset_entry,
+        "pack.yaml assets should include assets/cards/welcome_card.json"
+    );
 }
 
 #[test]
