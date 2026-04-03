@@ -14,11 +14,6 @@ on:
         type: boolean
         required: false
         default: false
-      include_main_branch_codeql_alerts:
-        description: "Also include open CodeQL alerts from main branch"
-        type: boolean
-        required: false
-        default: false
 
 permissions:
   contents: write
@@ -75,7 +70,6 @@ jobs:
           EVENT_NAME: ${{ github.event_name }}
           MAX_ALERTS_RAW: ${{ github.event.inputs.max_alerts || 20 }}
           INCLUDE_ALL: ${{ github.event.inputs.include_all_alerts }}
-          INCLUDE_MAIN_CODEQL: ${{ github.event.inputs.include_main_branch_codeql_alerts || vars.INCLUDE_MAIN_BRANCH_CODEQL_ALERTS || 'false' }}
           PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           PR_VULN_CHANGES: ${{ steps.dependency_review.outputs.vulnerable-changes }}
           PR_COMMENT_CONTENT: ${{ steps.dependency_review.outputs.comment-content }}
@@ -89,17 +83,17 @@ jobs:
           if [ "${INCLUDE_ALL}" = "true" ]; then
             INCLUDE_ALL_SAFE="true"
           fi
-          INCLUDE_MAIN_CODEQL_SAFE="false"
-          if [ "${INCLUDE_MAIN_CODEQL}" = "true" ]; then
-            INCLUDE_MAIN_CODEQL_SAFE="true"
-          fi
 
           if [ "${EVENT_NAME}" == "pull_request" ] && [ "${INCLUDE_ALL_SAFE}" != "true" ]; then
             echo "$PR_VULN_CHANGES" > pr-vulnerable-changes.json
             echo "$PR_COMMENT_CONTENT" > pr-comment.md
             
-            echo "[]" > all-dependabot-alerts.json
-            echo "[]" > dependabot-alerts.json
+            # Always include repository open Dependabot alerts for backlog remediation.
+            gh api \
+              -H "Accept: application/vnd.github+json" \
+              "/repos/${OWNER}/${REPO}/dependabot/alerts?state=open&per_page=100" > all-dependabot-alerts.json || echo "[]" > all-dependabot-alerts.json
+            jq --argjson max "${MAX_ALERTS}" '.[0:$max]' all-dependabot-alerts.json > dependabot-alerts.json
+
             if ! [[ "${PR_HEAD_SHA}" =~ ^[0-9a-fA-F]{40}$ ]]; then
               echo "Invalid pull request head sha format" >&2
               exit 1
@@ -115,29 +109,25 @@ jobs:
             [ -f all-code-scanning-alerts.json ] || echo "[]" > all-code-scanning-alerts.json
 
             jq --argjson max "${MAX_ALERTS}" '.[0:$max]' all-code-scanning-alerts.json > pr-code-scanning-alerts.json
-
-            if [ "${INCLUDE_MAIN_CODEQL_SAFE}" = "true" ]; then
-              MAIN_REF="refs/heads/main"
-              gh api \
-                -H "Accept: application/vnd.github+json" \
-                "/repos/${OWNER}/${REPO}/code-scanning/alerts?state=open&ref=${MAIN_REF}&tool_name=CodeQL&per_page=100" > main-code-scanning-alerts.json || echo "[]" > main-code-scanning-alerts.json
-              jq -s '
-                add
-                | unique_by((.rule.id // "unknown") + "|" + (.most_recent_instance.location.path // ""))
-                | .[0:$max]
-              ' --argjson max "${MAX_ALERTS}" pr-code-scanning-alerts.json main-code-scanning-alerts.json > code-scanning-alerts.json
-            else
-              cp pr-code-scanning-alerts.json code-scanning-alerts.json
-            fi
+            MAIN_REF="refs/heads/main"
+            gh api \
+              -H "Accept: application/vnd.github+json" \
+              "/repos/${OWNER}/${REPO}/code-scanning/alerts?state=open&ref=${MAIN_REF}&tool_name=CodeQL&per_page=100" > main-code-scanning-alerts.json || echo "[]" > main-code-scanning-alerts.json
+            jq -s '
+              add
+              | unique_by((.rule.id // "unknown") + "|" + (.most_recent_instance.location.path // ""))
+              | .[0:$max]
+            ' --argjson max "${MAX_ALERTS}" pr-code-scanning-alerts.json main-code-scanning-alerts.json > code-scanning-alerts.json
             cp code-scanning-alerts.json all-code-scanning-alerts.json
+            DEP_COUNT=$(jq 'length' dependabot-alerts.json)
             CODE_COUNT=$(jq 'length' code-scanning-alerts.json)
             echo '{"dependabot": [], "code_scanning": []}' > security-alerts.json
             jq -n \
               --slurpfile dependabot dependabot-alerts.json \
               --slurpfile code_scanning code-scanning-alerts.json \
               '{dependabot: $dependabot[0], code_scanning: $code_scanning[0]}' > security-alerts.json
-            echo "count=${CODE_COUNT}" >> "$GITHUB_OUTPUT"
-            echo "Skipping global alerts fetch for pull request. Found ${CODE_COUNT} CodeQL alerts (PR + optional main branch)."
+            echo "count=$((DEP_COUNT + CODE_COUNT))" >> "$GITHUB_OUTPUT"
+            echo "PR mode: Found ${DEP_COUNT} Dependabot + ${CODE_COUNT} CodeQL alerts (PR + main branch)."
             exit 0
           fi
           
