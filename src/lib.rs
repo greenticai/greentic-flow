@@ -250,16 +250,16 @@ fn compile_routing(raw: &Value, nodes: &HashSet<String>, node_id: &str) -> Resul
     if routes.iter().any(|r| r.condition.is_some()) {
         // Validate all target nodes exist
         for route in &routes {
-            if let Some(to) = &route.to {
-                if !nodes.contains(to) {
-                    return Err(crate::error::FlowError::MissingNode {
-                        target: to.clone(),
-                        node_id: node_id.to_string(),
-                        location: crate::error::FlowErrorLocation::at_path(format!(
-                            "nodes.{node_id}.routing"
-                        )),
-                    });
-                }
+            if let Some(to) = &route.to
+                && !nodes.contains(to)
+            {
+                return Err(crate::error::FlowError::MissingNode {
+                    target: to.clone(),
+                    node_id: node_id.to_string(),
+                    location: crate::error::FlowErrorLocation::at_path(format!(
+                        "nodes.{node_id}.routing"
+                    )),
+                });
             }
         }
         return Ok(Routing::Custom(raw.clone()));

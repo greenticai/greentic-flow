@@ -1,2 +1,0 @@
-schemas/ygtc.flow.schema.json
-src/lib.rs

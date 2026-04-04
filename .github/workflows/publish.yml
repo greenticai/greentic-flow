@@ -8,23 +8,13 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
-  build-test:
-    name: CI (lint/test/build)
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-    steps:
-      - uses: actions/checkout@v4
-      - uses: ./.github/actions/rust-setup
-        with:
-          components: rustfmt, clippy
-      - name: Lint & Test
-        run: |
-          cargo fmt --all -- --check
-          cargo clippy --locked --workspace --all-targets -- -D warnings
-          cargo build --locked --workspace --all-features
-          cargo test --locked --workspace --all-features -- --nocapture
+  ci:
+    uses: ./.github/workflows/ci.yml
 
   publish:
     name: Publish crates
@@ -37,20 +27,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/rust-setup
-      - name: Publish changed crates
-        uses: katyo/publish-crates@v2
-        with:
-          path: .
-          args: --allow-dirty
-          registry-token: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-          ignore-unpublished-changes: true
-          check-repo: true
-          dry-run: false
+      - name: Publish crate
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: cargo publish --allow-dirty --token "$CARGO_REGISTRY_TOKEN"
 
   release:
     name: Build binaries + Release (binstall-friendly)
     if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
-    needs: build-test
+    needs: ci
     runs-on: ${{ matrix.os }}
     defaults:
       run:
@@ -129,7 +114,7 @@ jobs:
           echo "archive=${archive}" >> "$GITHUB_OUTPUT"
           echo "checksum=${checksum}" >> "$GITHUB_OUTPUT"
       - name: Upload release artifacts
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@153bb8e04406b158c6c84fc1615b65b24149a1fe # v2
         with:
           files: |
             ${{ steps.package.outputs.archive }}
