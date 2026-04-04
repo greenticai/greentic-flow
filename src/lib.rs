@@ -206,6 +206,8 @@ fn compile_routing(raw: &Value, nodes: &HashSet<String>, node_id: &str) -> Resul
         status: Option<String>,
         #[serde(default)]
         reply: Option<bool>,
+        #[serde(default)]
+        condition: Option<String>,
     }
 
     let routes: Vec<RouteDoc> = if raw.is_null() {
@@ -217,12 +219,14 @@ fn compile_routing(raw: &Value, nodes: &HashSet<String>, node_id: &str) -> Resul
                 out: Some(true),
                 status: None,
                 reply: None,
+                condition: None,
             }],
             "reply" => vec![RouteDoc {
                 to: None,
                 out: None,
                 status: None,
                 reply: Some(true),
+                condition: None,
             }],
             other => {
                 return Err(crate::error::FlowError::Routing {
@@ -241,6 +245,25 @@ fn compile_routing(raw: &Value, nodes: &HashSet<String>, node_id: &str) -> Resul
             location: crate::error::FlowErrorLocation::at_path(format!("nodes.{node_id}.routing")),
         })?
     };
+
+    // Any route with a condition expression → preserve as Custom routing
+    if routes.iter().any(|r| r.condition.is_some()) {
+        // Validate all target nodes exist
+        for route in &routes {
+            if let Some(to) = &route.to
+                && !nodes.contains(to)
+            {
+                return Err(crate::error::FlowError::MissingNode {
+                    target: to.clone(),
+                    node_id: node_id.to_string(),
+                    location: crate::error::FlowErrorLocation::at_path(format!(
+                        "nodes.{node_id}.routing"
+                    )),
+                });
+            }
+        }
+        return Ok(Routing::Custom(raw.clone()));
+    }
 
     if routes.len() == 1 {
         let route = &routes[0];
