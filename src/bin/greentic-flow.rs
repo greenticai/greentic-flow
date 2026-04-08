@@ -12673,6 +12673,26 @@ struct SidecarValidation {
     invalid: Vec<String>,
 }
 
+/// Returns `true` when the node is a runtime-resolved builtin that does not
+/// require a local WASM component and therefore does not need a sidecar
+/// resolve entry.  These nodes are handled directly by the flow engine at
+/// runtime (e.g. `provider.invoke`, `session.wait`, `flow.call`, `emit.*`).
+fn is_runtime_resolved_node(node: &greentic_types::Node) -> bool {
+    // For schema-v2 flows the component id is "component.exec" and the
+    // original operation key (e.g. "provider.invoke") is stored in
+    // `component.operation`.  For legacy/schema-v1 flows the component id
+    // itself carries the operation key.
+    let effective_op = if node.component.id.as_str() == "component.exec" {
+        node.component.operation.as_deref().unwrap_or("")
+    } else {
+        node.component.id.as_str()
+    };
+    matches!(
+        effective_op,
+        "session.wait" | "flow.call" | "provider.invoke"
+    ) || effective_op.starts_with("emit.")
+}
+
 fn validate_sidecar_for_flow(
     flow_path: &Path,
     flow: &greentic_types::Flow,
@@ -12684,7 +12704,12 @@ fn validate_sidecar_for_flow(
         .file_name()
         .map(|s| s.to_string_lossy().to_string())
         .unwrap_or_else(|| "flow.ygtc".to_string());
-    let node_ids: BTreeSet<String> = flow.nodes.keys().map(|id| id.to_string()).collect();
+    let node_ids: BTreeSet<String> = flow
+        .nodes
+        .iter()
+        .filter(|(_, node)| !is_runtime_resolved_node(node))
+        .map(|(id, _)| id.to_string())
+        .collect();
 
     if !sidecar_path.exists() {
         if node_ids.is_empty() {
