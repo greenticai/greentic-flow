@@ -98,7 +98,7 @@ fn summarize_node(
             let (component_id, manifest) =
                 read_manifest_metadata(&manifest_path).with_context(|| {
                     format!(
-                        "failed to read component.manifest.json for node '{}' ({})",
+                        "failed to read component manifest for node '{}' ({})",
                         node_id,
                         manifest_path.display()
                     )
@@ -115,7 +115,7 @@ fn summarize_node(
                 .or_else(|| ComponentId::from_str(node_id).ok())
                 .unwrap_or_else(|| ComponentId::from_str("unknown").expect("valid component id"));
             eprintln!(
-                "warning: component manifest metadata missing for node '{}'; summary will omit manifest",
+                "warning: component manifest (cbor/json) missing for node '{}'; summary will omit manifest",
                 node_id
             );
             Ok(NodeResolveSummaryV1 {
@@ -127,7 +127,7 @@ fn summarize_node(
         }
         Err(e) => Err(e).with_context(|| {
             format!(
-                "component.manifest.json not found for node '{}' ({})",
+                "component manifest (cbor/json) not found for node '{}' ({})",
                 node_id,
                 wasm_path.display()
             )
@@ -267,14 +267,10 @@ fn resolve_remote(
 }
 
 fn manifest_wasm_from_dir(cache_dir: &Path) -> Result<Option<PathBuf>> {
-    let manifest_path = cache_dir.join("component.manifest.json");
-    if !manifest_path.exists() {
+    let json = read_manifest_value_from_dir(cache_dir)?;
+    let Some(json) = json else {
         return Ok(None);
-    }
-    let raw = fs::read_to_string(&manifest_path)
-        .with_context(|| format!("read {}", manifest_path.display()))?;
-    let json: serde_json::Value =
-        serde_json::from_str(&raw).context("parse component.manifest.json")?;
+    };
     let rel = json
         .get("artifacts")
         .and_then(|v| v.get("component_wasm"))
@@ -290,36 +286,61 @@ fn manifest_wasm_from_dir(cache_dir: &Path) -> Result<Option<PathBuf>> {
     }
 }
 
+/// Read a manifest from a directory, trying CBOR first then JSON.
+/// Returns the parsed manifest as a `serde_json::Value`, or `None` if neither exists.
+fn read_manifest_value_from_dir(dir: &Path) -> Result<Option<serde_json::Value>> {
+    let cbor_path = dir.join("component.manifest.cbor");
+    if cbor_path.exists() {
+        return read_manifest_value(&cbor_path).map(Some);
+    }
+    let json_path = dir.join("component.manifest.json");
+    if json_path.exists() {
+        return read_manifest_value(&json_path).map(Some);
+    }
+    Ok(None)
+}
+
 fn find_manifest_for_wasm(wasm_path: &Path) -> Result<PathBuf> {
     let wasm_abs = fs::canonicalize(wasm_path)
         .with_context(|| format!("resolve wasm path {}", wasm_path.display()))?;
     let mut current = wasm_abs.parent();
     while let Some(dir) = current {
-        let candidate = dir.join("component.manifest.json");
-        if candidate.exists() && manifest_matches_wasm(&candidate, &wasm_abs)? {
-            return Ok(candidate);
+        // Prefer CBOR manifest (auto-generated from describe()) over JSON.
+        let cbor_candidate = dir.join("component.manifest.cbor");
+        if cbor_candidate.exists() && manifest_matches_wasm(&cbor_candidate, &wasm_abs)? {
+            return Ok(cbor_candidate);
+        }
+        let json_candidate = dir.join("component.manifest.json");
+        if json_candidate.exists() && manifest_matches_wasm(&json_candidate, &wasm_abs)? {
+            return Ok(json_candidate);
         }
         current = dir.parent();
     }
     anyhow::bail!(
-        "component.manifest.json not found for wasm {}",
+        "component manifest (cbor/json) not found for wasm {}",
         wasm_abs.display()
     );
 }
 
 fn manifest_matches_wasm(manifest_path: &Path, wasm_abs: &Path) -> Result<bool> {
-    let raw = fs::read_to_string(manifest_path)
-        .with_context(|| format!("read {}", manifest_path.display()))?;
-    let json: serde_json::Value =
-        serde_json::from_str(&raw).context("parse component.manifest.json")?;
+    let json = read_manifest_value(manifest_path)?;
     let artifacts = json.get("artifacts").and_then(|v| v.as_object());
     let Some(artifacts) = artifacts else {
-        return Ok(false);
+        // CBOR manifests from describe() may lack artifacts.
+        // Only trust if manifest is in the same directory as the wasm.
+        let manifest_dir = manifest_path.parent();
+        let wasm_dir = wasm_abs.parent();
+        return Ok(manifest_dir == wasm_dir);
     };
-    let rel = artifacts
-        .get("component_wasm")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| anyhow!("manifest missing artifacts.component_wasm"))?;
+    let rel = match artifacts.get("component_wasm").and_then(|v| v.as_str()) {
+        Some(rel) => rel,
+        None => {
+            // Missing component_wasm field — trust only if same directory
+            let manifest_dir = manifest_path.parent();
+            let wasm_dir = wasm_abs.parent();
+            return Ok(manifest_dir == wasm_dir);
+        }
+    };
     let manifest_dir = manifest_path
         .parent()
         .ok_or_else(|| anyhow!("manifest path {} has no parent", manifest_path.display()))?;
@@ -328,13 +349,44 @@ fn manifest_matches_wasm(manifest_path: &Path, wasm_abs: &Path) -> Result<bool> 
     Ok(abs == *wasm_abs)
 }
 
+/// Read a manifest file into a `serde_json::Value`, detecting format by extension.
+///
+/// Supports both `.cbor` (binary CBOR) and `.json` (text JSON) manifest formats.
+/// The format is determined by the file extension; any extension other than "cbor"
+/// is treated as JSON.
+pub(crate) fn read_manifest_value(manifest_path: &Path) -> Result<serde_json::Value> {
+    let extension = manifest_path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("");
+    const MAX_CBOR_MANIFEST_SIZE: u64 = 64 * 1024; // 64 KiB
+    match extension {
+        "cbor" => {
+            let meta = fs::metadata(manifest_path)
+                .with_context(|| format!("stat {}", manifest_path.display()))?;
+            anyhow::ensure!(
+                meta.len() <= MAX_CBOR_MANIFEST_SIZE,
+                "manifest {} exceeds size limit ({} bytes, max {})",
+                manifest_path.display(),
+                meta.len(),
+                MAX_CBOR_MANIFEST_SIZE,
+            );
+            let bytes = fs::read(manifest_path)
+                .with_context(|| format!("read {}", manifest_path.display()))?;
+            ciborium::from_reader(&bytes[..]).context("parse component.manifest.cbor")
+        }
+        _ => {
+            let raw = fs::read_to_string(manifest_path)
+                .with_context(|| format!("read {}", manifest_path.display()))?;
+            serde_json::from_str(&raw).context("parse component.manifest.json")
+        }
+    }
+}
+
 fn read_manifest_metadata(
     manifest_path: &Path,
 ) -> Result<(ComponentId, Option<FlowResolveSummaryManifestV1>)> {
-    let raw = fs::read_to_string(manifest_path)
-        .with_context(|| format!("read {}", manifest_path.display()))?;
-    let json: serde_json::Value =
-        serde_json::from_str(&raw).context("parse component.manifest.json")?;
+    let json = read_manifest_value(manifest_path)?;
     let id = json
         .get("id")
         .and_then(|v| v.as_str())
@@ -430,11 +482,13 @@ mod tests {
     #[test]
     fn manifest_helpers_require_matching_component_wasm() {
         let dir = tempdir().unwrap();
-        let nested = dir.path().join("component/dist");
+        // Canonicalize the base directory to handle platform symlinks (e.g. macOS /var -> /private/var).
+        let canonical_base = fs::canonicalize(dir.path()).unwrap();
+        let nested = canonical_base.join("component/dist");
         fs::create_dir_all(&nested).unwrap();
         let wasm_path = nested.join("widget.wasm");
         fs::write(&wasm_path, b"wasm").unwrap();
-        let manifest_path = dir.path().join("component/component.manifest.json");
+        let manifest_path = canonical_base.join("component/component.manifest.json");
         fs::write(
             &manifest_path,
             serde_json::json!({
@@ -490,5 +544,150 @@ mod tests {
         )
         .unwrap();
         assert_eq!(manifest_wasm_from_dir(dir.path()).unwrap(), None);
+    }
+
+    /// Helper to serialize a `serde_json::Value` into CBOR bytes.
+    fn write_cbor_manifest(path: &Path, value: &serde_json::Value) {
+        let mut cbor_bytes = Vec::new();
+        ciborium::into_writer(value, &mut cbor_bytes).unwrap();
+        fs::write(path, &cbor_bytes).unwrap();
+    }
+
+    #[test]
+    fn find_manifest_prefers_cbor_over_json() {
+        let dir = tempdir().unwrap();
+        let wasm_path = dir.path().join("component.wasm");
+        fs::write(&wasm_path, b"wasm").unwrap();
+
+        // Write a JSON manifest with id "from-json"
+        let json_manifest = serde_json::json!({
+            "id": "from-json",
+            "version": "1.0.0",
+            "world": "component"
+        });
+        fs::write(
+            dir.path().join("component.manifest.json"),
+            json_manifest.to_string(),
+        )
+        .unwrap();
+
+        // Write a CBOR manifest with id "from-cbor"
+        let cbor_manifest = serde_json::json!({
+            "id": "from-cbor",
+            "version": "1.0.0",
+            "world": "component"
+        });
+        write_cbor_manifest(&dir.path().join("component.manifest.cbor"), &cbor_manifest);
+
+        // read_manifest_value_from_dir should prefer CBOR
+        let value = read_manifest_value_from_dir(dir.path())
+            .unwrap()
+            .expect("manifest should be found");
+        assert_eq!(value.get("id").unwrap().as_str().unwrap(), "from-cbor");
+
+        // find_manifest_for_wasm should also pick the CBOR manifest
+        let found = find_manifest_for_wasm(&wasm_path).unwrap();
+        assert!(
+            found.extension().unwrap() == "cbor",
+            "expected cbor manifest to be preferred, got {}",
+            found.display()
+        );
+    }
+
+    #[test]
+    fn find_manifest_reads_cbor_only() {
+        let dir = tempdir().unwrap();
+        let canonical_dir = fs::canonicalize(dir.path()).unwrap();
+        let wasm_path = canonical_dir.join("component.wasm");
+        fs::write(&wasm_path, b"wasm").unwrap();
+
+        // Write only a CBOR manifest
+        let cbor_manifest = serde_json::json!({
+            "id": "cbor-only",
+            "version": "2.0.0",
+            "world": "component"
+        });
+        write_cbor_manifest(
+            &canonical_dir.join("component.manifest.cbor"),
+            &cbor_manifest,
+        );
+
+        // read_manifest_value should parse it correctly
+        let value = read_manifest_value(&canonical_dir.join("component.manifest.cbor")).unwrap();
+        assert_eq!(value.get("id").unwrap().as_str().unwrap(), "cbor-only");
+        assert_eq!(value.get("version").unwrap().as_str().unwrap(), "2.0.0");
+
+        // read_manifest_value_from_dir should find it
+        let dir_value = read_manifest_value_from_dir(&canonical_dir)
+            .unwrap()
+            .expect("cbor-only manifest should be found");
+        assert_eq!(dir_value.get("id").unwrap().as_str().unwrap(), "cbor-only");
+
+        // find_manifest_for_wasm should locate the CBOR manifest
+        let found = find_manifest_for_wasm(&wasm_path).unwrap();
+        assert_eq!(found, canonical_dir.join("component.manifest.cbor"));
+    }
+
+    #[test]
+    fn malformed_cbor_returns_error() {
+        let dir = tempdir().unwrap();
+        let cbor_path = dir.path().join("component.manifest.cbor");
+
+        // Write garbage bytes that are not valid CBOR
+        fs::write(&cbor_path, b"\xff\xfe\xfd\x00\x01\x02").unwrap();
+
+        // read_manifest_value should return an error, not panic
+        let result = read_manifest_value(&cbor_path);
+        assert!(
+            result.is_err(),
+            "expected error for malformed CBOR, got Ok({:?})",
+            result.unwrap()
+        );
+
+        // read_manifest_value_from_dir should also propagate the error
+        let dir_result = read_manifest_value_from_dir(dir.path());
+        assert!(
+            dir_result.is_err(),
+            "expected error from dir read of malformed CBOR"
+        );
+    }
+
+    #[test]
+    fn cbor_manifest_without_artifacts_matches_only_same_dir() {
+        let dir = tempdir().unwrap();
+        let canonical_dir = fs::canonicalize(dir.path()).unwrap();
+        let sub = canonical_dir.join("nested");
+        fs::create_dir_all(&sub).unwrap();
+
+        // Create wasm files in both directories
+        let wasm_same_dir = canonical_dir.join("component.wasm");
+        fs::write(&wasm_same_dir, b"wasm-root").unwrap();
+        let wasm_nested = sub.join("other.wasm");
+        fs::write(&wasm_nested, b"wasm-nested").unwrap();
+
+        // Write a CBOR manifest WITHOUT "artifacts" in the root dir
+        let cbor_manifest = serde_json::json!({
+            "id": "no-artifacts",
+            "version": "1.0.0",
+            "world": "component"
+        });
+        let manifest_path = canonical_dir.join("component.manifest.cbor");
+        write_cbor_manifest(&manifest_path, &cbor_manifest);
+
+        // Same-directory wasm should match (both paths are canonical)
+        let same_dir_match =
+            manifest_matches_wasm(&manifest_path, &wasm_same_dir.canonicalize().unwrap()).unwrap();
+        assert!(
+            same_dir_match,
+            "CBOR manifest without artifacts should match wasm in the same directory"
+        );
+
+        // Nested wasm should NOT match
+        let nested_match =
+            manifest_matches_wasm(&manifest_path, &wasm_nested.canonicalize().unwrap()).unwrap();
+        assert!(
+            !nested_match,
+            "CBOR manifest without artifacts should not match wasm in a subdirectory"
+        );
     }
 }

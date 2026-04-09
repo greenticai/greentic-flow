@@ -1,7 +1,9 @@
-use std::{collections::HashMap, fs, path::Path};
+use std::{collections::HashMap, path::Path};
 
 use serde::Deserialize;
 use serde_json::{Value, json};
+
+use crate::resolve_summary::read_manifest_value;
 /// Minimal metadata needed to validate that a component exists and which config keys
 /// are required.
 #[derive(Debug, Clone)]
@@ -14,7 +16,7 @@ pub trait ComponentCatalog: Send + Sync {
     fn resolve(&self, component_id: &str) -> Option<ComponentMetadata>;
 }
 
-/// Catalog backed by component.manifest.json files on disk.
+/// Catalog backed by component manifest files on disk (CBOR or JSON).
 #[derive(Debug, Default, Clone)]
 pub struct ManifestCatalog {
     entries: HashMap<String, ComponentMetadata>,
@@ -38,9 +40,8 @@ impl ManifestCatalog {
         let mut entries = HashMap::new();
         for path in paths {
             let path = path.as_ref();
-            if let Ok(text) = fs::read_to_string(path)
-                && let Ok(mut value) = serde_json::from_str::<Value>(&text)
-            {
+            let parsed_value = Self::read_manifest_file(path);
+            if let Some(mut value) = parsed_value {
                 normalize_manifest_value(&mut value);
                 if let Ok(manifest) = serde_json::from_value::<Manifest>(value) {
                     entries.insert(
@@ -66,6 +67,11 @@ impl ManifestCatalog {
             // Continue without crashing on unreadable manifests to keep the catalog usable.
         }
         ManifestCatalog { entries }
+    }
+
+    /// Read a manifest file, detecting CBOR vs JSON by file extension.
+    fn read_manifest_file(path: &Path) -> Option<Value> {
+        read_manifest_value(path).ok()
     }
 }
 
