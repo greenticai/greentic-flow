@@ -1,0 +1,15 @@
+{
+  "id": "support-form",
+  "title": "Support form",
+  "version": "1.0.0",
+  "questions": [
+    {
+      "id": "name",
+      "kind": "string",
+      "title": "Name",
+      "required": true,
+      "secret": false,
+      "computed_overridable": false
+    }
+  ]
+}

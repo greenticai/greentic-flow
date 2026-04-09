@@ -3,15 +3,104 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 MODE="${1:-all}"
-I18N_REPO="${I18N_REPO:-$ROOT_DIR/../greentic-i18n}"
 AUTH_MODE="${AUTH_MODE:-auto}"
 LOCALE="${LOCALE:-en}"
+TRANSLATOR_BIN="${TRANSLATOR_BIN:-greentic-i18n-translator}"
+BINSTALL_BIN="${BINSTALL_BIN:-cargo-binstall}"
+BATCH_SIZE="${BATCH_SIZE:-500}"
+LOCAL_CACHE_DIR="${LOCAL_CACHE_DIR:-$ROOT_DIR/.i18n/cache}"
+default_global_cache_dir() {
+  case "$(uname -s)" in
+    Darwin)
+      printf '%s\n' "$HOME/Library/Caches/greentic/i18n-translator"
+      ;;
+    Linux)
+      printf '%s\n' "${XDG_CACHE_HOME:-$HOME/.cache}/greentic/i18n-translator"
+      ;;
+    *)
+      printf '%s\n' "${XDG_CACHE_HOME:-$HOME/.cache}/greentic/i18n-translator"
+      ;;
+  esac
+}
 
-if [[ ! -d "$I18N_REPO" ]]; then
-  echo "missing i18n repo: $I18N_REPO" >&2
-  echo "set I18N_REPO=/path/to/greentic-i18n if needed" >&2
-  exit 2
-fi
+GLOBAL_CACHE_DIR="${GLOBAL_CACHE_DIR:-$(default_global_cache_dir)}"
+CACHE_DIR="${CACHE_DIR:-$GLOBAL_CACHE_DIR}"
+
+scrub_cache_dir() {
+  local dir="$1"
+  if [[ ! -d "$dir" ]]; then
+    return 0
+  fi
+
+  if command -v python3 >/dev/null 2>&1; then
+    python3 - "$dir" <<'PY'
+import json
+import pathlib
+import sys
+
+root = pathlib.Path(sys.argv[1])
+for path in root.rglob("*.json"):
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            json.load(handle)
+    except Exception as exc:
+        print(f"removing invalid cache entry {path}: {exc}", file=sys.stderr)
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass
+PY
+    return 0
+  fi
+
+  find "$dir" -type f -name '*.json' -size 0 -print0 | while IFS= read -r -d '' file; do
+    echo "removing empty cache entry $file" >&2
+    rm -f "$file"
+  done
+}
+
+ensure_translator() {
+  if command -v "$TRANSLATOR_BIN" >/dev/null 2>&1; then
+    return 0
+  fi
+
+  if ! command -v "$BINSTALL_BIN" >/dev/null 2>&1; then
+    echo "missing translator binary: $TRANSLATOR_BIN" >&2
+    echo "missing installer binary: $BINSTALL_BIN" >&2
+    echo "install cargo-binstall or set TRANSLATOR_BIN=/path/to/greentic-i18n-translator" >&2
+    exit 2
+  fi
+
+  echo "installing $TRANSLATOR_BIN via $BINSTALL_BIN" >&2
+  "$BINSTALL_BIN" -y greentic-i18n-translator
+
+  if ! command -v "$TRANSLATOR_BIN" >/dev/null 2>&1; then
+    echo "failed to install translator binary: $TRANSLATOR_BIN" >&2
+    exit 2
+  fi
+}
+
+merge_local_cache_into_global() {
+  if [[ "$CACHE_DIR" != "$GLOBAL_CACHE_DIR" ]]; then
+    return 0
+  fi
+
+  if [[ ! -d "$LOCAL_CACHE_DIR" ]]; then
+    return 0
+  fi
+
+  mkdir -p "$GLOBAL_CACHE_DIR"
+
+  find "$LOCAL_CACHE_DIR" -type f -name '*.json' -print0 | while IFS= read -r -d '' file; do
+    local rel
+    rel="${file#$LOCAL_CACHE_DIR/}"
+    local dest="$GLOBAL_CACHE_DIR/$rel"
+    mkdir -p "$(dirname "$dest")"
+    if [[ ! -f "$dest" ]]; then
+      cp "$file" "$dest"
+    fi
+  done
+}
 
 DEFAULT_EN_PATHS=(
   "$ROOT_DIR/i18n/en.json"
@@ -59,12 +148,20 @@ run_for_path() {
   local mode="$1"
   local en_path="$2"
   local langs="$3"
-  local cmd=(cargo run -p greentic-i18n-translator -- --locale "$LOCALE" "$mode" --langs "$langs" --en "$en_path")
+  local cmd=("$TRANSLATOR_BIN" --locale "$LOCALE" "$mode" --langs "$langs" --en "$en_path")
   if [[ "$mode" == "translate" ]]; then
-    cmd+=(--auth-mode "$AUTH_MODE")
+    cmd+=(--auth-mode "$AUTH_MODE" --cache-dir "$CACHE_DIR" --batch-size "$BATCH_SIZE")
   fi
-  (cd "$I18N_REPO" && "${cmd[@]}")
+  (cd "$ROOT_DIR" && "${cmd[@]}")
 }
+
+ensure_translator
+scrub_cache_dir "$LOCAL_CACHE_DIR"
+scrub_cache_dir "$GLOBAL_CACHE_DIR"
+merge_local_cache_into_global
+if [[ "$CACHE_DIR" != "$GLOBAL_CACHE_DIR" && "$CACHE_DIR" != "$LOCAL_CACHE_DIR" ]]; then
+  scrub_cache_dir "$CACHE_DIR"
+fi
 
 while IFS= read -r path; do
   if [[ ! -f "$path" ]]; then

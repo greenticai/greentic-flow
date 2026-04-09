@@ -17,7 +17,6 @@ use std::{
 const INLINE_SOURCE: &str = "<inline>";
 const DEFAULT_SCHEMA_LABEL: &str = "https://raw.githubusercontent.com/greenticai/greentic-flow/refs/heads/master/schemas/ygtc.flow.schema.json";
 const EMBEDDED_SCHEMA: &str = include_str!("../schemas/ygtc.flow.schema.json");
-
 fn schema_file_valid(path: &Path) -> bool {
     let Ok(text) = fs::read_to_string(path) else {
         return false;
@@ -104,19 +103,43 @@ pub fn load_ygtc_from_str(yaml: &str) -> Result<FlowDoc> {
 
 /// Load YGTC YAML from a file path using the embedded schema.
 pub fn load_ygtc_from_path(path: &Path) -> Result<FlowDoc> {
-    let content = fs::read_to_string(path).map_err(|e| FlowError::Internal {
-        message: format!("failed to read {}: {e}", path.display()),
+    let safe_path = canonicalize_user_path(path).map_err(|err| FlowError::Internal {
+        message: format!("invalid flow path {}: {err}", path.display()),
         location: FlowErrorLocation::at_path(path.display().to_string())
             .with_source_path(Some(path)),
+    })?;
+    let content = fs::read_to_string(&safe_path).map_err(|e| FlowError::Internal {
+        message: format!("failed to read {}: {e}", safe_path.display()),
+        location: FlowErrorLocation::at_path(safe_path.display().to_string())
+            .with_source_path(Some(&safe_path)),
     })?;
     load_with_schema_text(
         &content,
         EMBEDDED_SCHEMA,
         DEFAULT_SCHEMA_LABEL.to_string(),
         None,
-        path.display().to_string(),
-        Some(path),
+        safe_path.display().to_string(),
+        Some(&safe_path),
     )
+}
+
+fn canonicalize_user_path(path: &Path) -> io::Result<PathBuf> {
+    if path.as_os_str().is_empty() {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "path is empty"));
+    }
+    let candidate = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()?.join(path)
+    };
+    let canonical = candidate.canonicalize()?;
+    if !canonical.is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "path does not reference a regular file",
+        ));
+    }
+    Ok(canonical)
 }
 
 /// Load YGTC YAML from a string using a schema file on disk.
@@ -267,7 +290,7 @@ pub(crate) fn load_with_schema_text(
         )?;
     }
 
-    let mut flow: FlowDoc = match serde_yaml_bw::from_value(v_yaml.clone()) {
+    let mut flow: FlowDoc = match serde_yaml_bw::from_value(v_yaml) {
         Ok(doc) => doc,
         Err(e) => {
             validate_json(
@@ -402,18 +425,7 @@ fn validate_json(
     source_label: &str,
     source_path: Option<&Path>,
 ) -> Result<()> {
-    let schema: Value = serde_json::from_str(schema_text).map_err(|e| FlowError::Internal {
-        message: format!("schema parse for {schema_label}: {e}"),
-        location: FlowErrorLocation::at_path(schema_label.to_string())
-            .with_source_path(schema_path),
-    })?;
-    let validator = jsonschema_options_with_base(schema_path)
-        .build(&schema)
-        .map_err(|e| FlowError::Internal {
-            message: format!("schema compile for {schema_label}: {e}"),
-            location: FlowErrorLocation::at_path(schema_label.to_string())
-                .with_source_path(schema_path),
-        })?;
+    let validator = validator_for_schema(schema_text, schema_label, schema_path)?;
     let details: Vec<SchemaErrorDetail> = validator
         .iter_errors(doc)
         .map(|e| {
@@ -451,6 +463,46 @@ fn validate_json(
         });
     }
     Ok(())
+}
+
+fn validator_for_schema<'a>(
+    schema_text: &'a str,
+    schema_label: &str,
+    schema_path: Option<&Path>,
+) -> Result<&'a jsonschema::Validator> {
+    if schema_path.is_none() && schema_text == EMBEDDED_SCHEMA {
+        static EMBEDDED_VALIDATOR: OnceLock<std::result::Result<jsonschema::Validator, String>> =
+            OnceLock::new();
+        let validator = EMBEDDED_VALIDATOR
+            .get_or_init(|| {
+                let schema: Value = serde_json::from_str(EMBEDDED_SCHEMA)
+                    .map_err(|e| format!("schema parse for {DEFAULT_SCHEMA_LABEL}: {e}"))?;
+                jsonschema_options_with_base(None)
+                    .build(&schema)
+                    .map_err(|e| format!("schema compile for {DEFAULT_SCHEMA_LABEL}: {e}"))
+            })
+            .as_ref()
+            .map_err(|message| FlowError::Internal {
+                message: message.clone(),
+                location: FlowErrorLocation::at_path(schema_label.to_string())
+                    .with_source_path(schema_path),
+            })?;
+        return Ok(validator);
+    }
+
+    let schema: Value = serde_json::from_str(schema_text).map_err(|e| FlowError::Internal {
+        message: format!("schema parse for {schema_label}: {e}"),
+        location: FlowErrorLocation::at_path(schema_label.to_string())
+            .with_source_path(schema_path),
+    })?;
+    let validator = jsonschema_options_with_base(schema_path)
+        .build(&schema)
+        .map_err(|e| FlowError::Internal {
+            message: format!("schema compile for {schema_label}: {e}"),
+            location: FlowErrorLocation::at_path(schema_label.to_string())
+                .with_source_path(schema_path),
+        })?;
+    Ok(Box::leak(Box::new(validator)))
 }
 
 fn ensure_nodes_mapping(doc: &mut serde_yaml_bw::Value) {

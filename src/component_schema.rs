@@ -5,7 +5,7 @@ use crate::{
 use jsonschema::Draft;
 use serde_json::{Map, Value};
 use std::{
-    fs,
+    fs, io,
     path::{Path, PathBuf},
 };
 use url::Url;
@@ -37,13 +37,18 @@ impl SchemaResolution {
 }
 
 pub fn resolve_input_schema(manifest_path: &Path, operation: &str) -> Result<SchemaResolution> {
-    let text = fs::read_to_string(manifest_path).map_err(|err| FlowError::Internal {
-        message: format!("read manifest {}: {err}", manifest_path.display()),
-        location: FlowErrorLocation::at_path(manifest_path.display().to_string()),
+    let safe_manifest_path =
+        canonicalize_user_path(manifest_path).map_err(|err| FlowError::Internal {
+            message: format!("invalid manifest path {}: {err}", manifest_path.display()),
+            location: FlowErrorLocation::at_path(manifest_path.display().to_string()),
+        })?;
+    let text = fs::read_to_string(&safe_manifest_path).map_err(|err| FlowError::Internal {
+        message: format!("read manifest {}: {err}", safe_manifest_path.display()),
+        location: FlowErrorLocation::at_path(safe_manifest_path.display().to_string()),
     })?;
     let mut json: Value = serde_json::from_str(&text).map_err(|err| FlowError::Internal {
-        message: format!("parse manifest {}: {err}", manifest_path.display()),
-        location: FlowErrorLocation::at_path(manifest_path.display().to_string()),
+        message: format!("parse manifest {}: {err}", safe_manifest_path.display()),
+        location: FlowErrorLocation::at_path(safe_manifest_path.display().to_string()),
     })?;
     normalize_manifest_value(&mut json);
     let component_id = json
@@ -65,9 +70,28 @@ pub fn resolve_input_schema(manifest_path: &Path, operation: &str) -> Result<Sch
     Ok(SchemaResolution::new(
         component_id,
         operation.to_string(),
-        manifest_path.to_path_buf(),
+        safe_manifest_path,
         schema,
     ))
+}
+
+fn canonicalize_user_path(path: &Path) -> io::Result<PathBuf> {
+    if path.as_os_str().is_empty() {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "path is empty"));
+    }
+    let candidate = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()?.join(path)
+    };
+    let canonical = candidate.canonicalize()?;
+    if !canonical.is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "path does not reference a regular file",
+        ));
+    }
+    Ok(canonical)
 }
 
 fn matches_operation(entry: &Value, operation: &str) -> bool {
