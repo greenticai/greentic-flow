@@ -9,5 +9,5 @@ These rules prevent reintroduction of parallel setup contracts in
    - `invoke("setup.apply_answers")` for setup application
 2. Use WIT-derived types from `greentic_interfaces::canonical::*`.
 3. Do not add local bindgen/runtime integrations for `component-wizard` worlds.
-4. Keep legacy WIT references in `wit/legacy/**` only, with explicit LEGACY banner.
+4. Do not keep legacy WIT definitions in this repository.
 5. Keep guard checks enabled so `component[-_]?wizard` does not appear in runtime/tests.

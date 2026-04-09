@@ -1,0 +1,26 @@
+name: Perf (lightweight)
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  perf:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/rust-setup
+        with:
+          components: rustfmt, clippy
+      - name: Run perf guards
+        run: cargo test --locked --all-features --test perf_scaling --test perf_timeout -- --nocapture
+      - name: Run benchmarks (smoke)
+        run: cargo bench --locked --bench perf -- --sample-size 10

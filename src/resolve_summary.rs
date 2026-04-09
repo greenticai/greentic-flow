@@ -1,5 +1,5 @@
 use anyhow::{Context, Result, anyhow};
-use greentic_distributor_client::DistClient;
+use greentic_distributor_client::{CachePolicy, DistClient, ResolvePolicy};
 use greentic_types::ComponentId;
 use greentic_types::flow_resolve::{ComponentSourceRefV1, FlowResolveV1};
 use greentic_types::flow_resolve_summary::{
@@ -93,26 +93,60 @@ fn summarize_node(
     source: &ComponentSourceRefV1,
 ) -> Result<NodeResolveSummaryV1> {
     let (source_ref, wasm_path, digest) = resolve_source(flow_path, source)?;
-    let manifest_path = find_manifest_for_wasm(&wasm_path).with_context(|| {
-        format!(
-            "component.manifest.json not found for node '{}' ({})",
-            node_id,
-            wasm_path.display()
-        )
-    })?;
-    let (component_id, manifest) = read_manifest_metadata(&manifest_path).with_context(|| {
-        format!(
-            "failed to read component.manifest.json for node '{}' ({})",
-            node_id,
-            manifest_path.display()
-        )
-    })?;
-    Ok(NodeResolveSummaryV1 {
-        component_id,
-        source: source_ref,
-        digest,
-        manifest,
-    })
+    match find_manifest_for_wasm(&wasm_path) {
+        Ok(manifest_path) => {
+            let (component_id, manifest) =
+                read_manifest_metadata(&manifest_path).with_context(|| {
+                    format!(
+                        "failed to read component.manifest.json for node '{}' ({})",
+                        node_id,
+                        manifest_path.display()
+                    )
+                })?;
+            Ok(NodeResolveSummaryV1 {
+                component_id,
+                source: source_ref,
+                digest,
+                manifest,
+            })
+        }
+        Err(_) if !matches!(source, ComponentSourceRefV1::Local { .. }) => {
+            let component_id = component_id_from_source(source)
+                .or_else(|| ComponentId::from_str(node_id).ok())
+                .unwrap_or_else(|| ComponentId::from_str("unknown").expect("valid component id"));
+            eprintln!(
+                "warning: component manifest metadata missing for node '{}'; summary will omit manifest",
+                node_id
+            );
+            Ok(NodeResolveSummaryV1 {
+                component_id,
+                source: source_ref,
+                digest,
+                manifest: None,
+            })
+        }
+        Err(e) => Err(e).with_context(|| {
+            format!(
+                "component.manifest.json not found for node '{}' ({})",
+                node_id,
+                wasm_path.display()
+            )
+        }),
+    }
+}
+
+fn component_id_from_source(source: &ComponentSourceRefV1) -> Option<ComponentId> {
+    let raw_ref = match source {
+        ComponentSourceRefV1::Oci { r#ref, .. } => r#ref,
+        ComponentSourceRefV1::Repo { r#ref, .. } => r#ref,
+        ComponentSourceRefV1::Store { r#ref, .. } => r#ref,
+        ComponentSourceRefV1::Local { .. } => return None,
+    };
+    // Extract component name from ref like "oci://ghcr.io/greenticai/components/templates:latest"
+    let path_part = raw_ref.split("://").last().unwrap_or(raw_ref);
+    let without_tag = path_part.split([':', '@']).next().unwrap_or(path_part);
+    let name = without_tag.rsplit('/').next().unwrap_or(without_tag);
+    ComponentId::from_str(name).ok()
 }
 
 fn resolve_source(
@@ -160,6 +194,16 @@ fn summary_source_ref(source: &ComponentSourceRefV1) -> FlowResolveSummarySource
     }
 }
 
+fn block_on_auto<F: std::future::Future>(fut: F) -> F::Output {
+    if let Ok(handle) = tokio::runtime::Handle::try_current() {
+        tokio::task::block_in_place(|| handle.block_on(fut))
+    } else {
+        tokio::runtime::Runtime::new()
+            .expect("create tokio runtime")
+            .block_on(fut)
+    }
+}
+
 fn resolve_remote(
     _flow_path: &Path,
     reference: &str,
@@ -167,19 +211,33 @@ fn resolve_remote(
     kind: RemoteKind,
 ) -> Result<(FlowResolveSummarySourceRefV1, PathBuf, String)> {
     let client = DistClient::new(Default::default());
-    let rt = tokio::runtime::Runtime::new().context("create tokio runtime")?;
     let digest = match digest_hint {
         Some(d) => d.to_string(),
         None => {
-            rt.block_on(client.resolve_ref(reference))
+            let source = client
+                .parse_source(reference)
+                .map_err(|e| anyhow!("failed to resolve reference {reference}: {e}"))?;
+            block_on_auto(client.resolve(source, ResolvePolicy))
                 .map_err(|e| anyhow!("failed to resolve reference {reference}: {e}"))?
                 .digest
         }
     };
-    let mut wasm_path = if let Ok(path) = rt.block_on(client.fetch_digest(&digest)) {
-        path
+    let mut wasm_path = if let Ok(artifact) = client.open_cached(&digest) {
+        artifact.local_path
     } else {
-        let resolved = rt.block_on(client.ensure_cached(reference)).map_err(|e| {
+        let source = client.parse_source(reference).map_err(|e| {
+            anyhow!(
+                "component reference {} not available locally: {e}",
+                reference
+            )
+        })?;
+        let descriptor = block_on_auto(client.resolve(source, ResolvePolicy)).map_err(|e| {
+            anyhow!(
+                "component reference {} not available locally: {e}",
+                reference
+            )
+        })?;
+        let resolved = block_on_auto(client.fetch(&descriptor, CachePolicy)).map_err(|e| {
             anyhow!(
                 "component reference {} not available locally: {e}",
                 reference
@@ -327,4 +385,110 @@ fn compute_sha256(path: &Path) -> Result<String> {
     let mut sha = Sha256::new();
     sha.update(bytes);
     Ok(format!("sha256:{:x}", sha.finalize()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use greentic_types::flow_resolve::ComponentSourceRefV1;
+    use semver::Version;
+    use tempfile::tempdir;
+
+    #[test]
+    fn helper_functions_normalize_local_paths_and_refs() {
+        let flow_path = Path::new("/tmp/flows/demo.ygtc");
+        assert_eq!(strip_file_prefix("file://component.wasm"), "component.wasm");
+        assert_eq!(
+            local_path_from_sidecar("relative/component.wasm", flow_path),
+            Path::new("/tmp/flows/relative/component.wasm")
+        );
+        assert_eq!(
+            local_path_from_sidecar("/abs/component.wasm", flow_path),
+            PathBuf::from("/abs/component.wasm")
+        );
+        assert_eq!(flow_name_from_path(flow_path), "demo.ygtc");
+    }
+
+    #[test]
+    fn helper_functions_extract_component_ids_from_remote_refs() {
+        let source = ComponentSourceRefV1::Oci {
+            r#ref: "oci://ghcr.io/greenticai/components/templates:latest".to_string(),
+            digest: None,
+        };
+        assert_eq!(
+            component_id_from_source(&source).unwrap().as_str(),
+            "templates"
+        );
+        match summary_source_ref(&source) {
+            FlowResolveSummarySourceRefV1::Oci { r#ref } => {
+                assert!(r#ref.contains("ghcr.io"));
+            }
+            other => panic!("expected oci summary ref, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn manifest_helpers_require_matching_component_wasm() {
+        let dir = tempdir().unwrap();
+        let nested = dir.path().join("component/dist");
+        fs::create_dir_all(&nested).unwrap();
+        let wasm_path = nested.join("widget.wasm");
+        fs::write(&wasm_path, b"wasm").unwrap();
+        let manifest_path = dir.path().join("component/component.manifest.json");
+        fs::write(
+            &manifest_path,
+            serde_json::json!({
+                "id": "acme.widget",
+                "version": "1.2.3",
+                "world": "component",
+                "artifacts": { "component_wasm": "dist/widget.wasm" }
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        assert!(manifest_matches_wasm(&manifest_path, &wasm_path.canonicalize().unwrap()).unwrap());
+        assert_eq!(find_manifest_for_wasm(&wasm_path).unwrap(), manifest_path);
+
+        let (component_id, manifest) = read_manifest_metadata(&manifest_path).unwrap();
+        assert_eq!(component_id.as_str(), "acme.widget");
+        assert_eq!(
+            manifest,
+            Some(FlowResolveSummaryManifestV1 {
+                world: "component".to_string(),
+                version: Version::parse("1.2.3").unwrap(),
+            })
+        );
+    }
+
+    #[test]
+    fn manifest_wasm_from_dir_and_sha_cover_missing_and_present_cases() {
+        let dir = tempdir().unwrap();
+        let wasm_path = dir.path().join("bundle.wasm");
+        fs::write(&wasm_path, b"abc").unwrap();
+        fs::write(
+            dir.path().join("component.manifest.json"),
+            serde_json::json!({
+                "artifacts": { "component_wasm": "bundle.wasm" }
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            manifest_wasm_from_dir(dir.path()).unwrap(),
+            Some(wasm_path.clone())
+        );
+        assert!(compute_sha256(&wasm_path).unwrap().starts_with("sha256:"));
+
+        fs::write(
+            dir.path().join("component.manifest.json"),
+            serde_json::json!({
+                "artifacts": { "component_wasm": "missing.wasm" }
+            })
+            .to_string(),
+        )
+        .unwrap();
+        assert_eq!(manifest_wasm_from_dir(dir.path()).unwrap(), None);
+    }
 }

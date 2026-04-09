@@ -1,0 +1,30 @@
+name: Nightly Wizard E2E
+
+permissions:
+  contents: read
+  packages: read
+
+on:
+  schedule:
+    - cron: "0 2 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  wizard-e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/rust-setup
+      - name: Install cargo-binstall
+        run: cargo install cargo-binstall --locked
+      - name: Install greentic-pack
+        run: cargo binstall --no-confirm greentic-pack
+      - name: Build greentic-flow
+        run: cargo build --bin greentic-flow
+      - name: Run nightly wizard e2e
+        run: bash ci/nightly_wizard_e2e.sh
