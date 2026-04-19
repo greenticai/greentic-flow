@@ -215,6 +215,9 @@ pub fn plan_add_step(
         operation: normalized.operation.clone(),
         payload: normalized.payload.clone(),
         output: serde_json::Value::Object(Default::default()),
+        in_map: None,
+        out_map: None,
+        err_map: None,
         routing,
         telemetry: normalized.telemetry.clone(),
     };

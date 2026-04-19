@@ -98,8 +98,7 @@ fn run_interactive_with_io<R: BufRead, W: Write>(
             }
             let prompt = match &question.kind {
                 QuestionKind::Choice { options } => {
-                    let mut idx = 1usize;
-                    for option in options {
+                    for (idx, option) in (1usize..).zip(options.iter()) {
                         let option_label = resolve_text(&option.label, catalog, locale);
                         writeln!(writer, "  {idx}. {option_label} ({})", option.value).map_err(
                             |err| FlowError::Internal {
@@ -107,7 +106,6 @@ fn run_interactive_with_io<R: BufRead, W: Write>(
                                 location: FlowErrorLocation::new(None, None, None),
                             },
                         )?;
-                        idx += 1;
                     }
                     resolve_cli_text(
                         catalog,

@@ -2454,6 +2454,176 @@ fn wizard_answers_plan_registers_referenced_asset_in_pack_yaml() {
 }
 
 #[test]
+fn wizard_answers_plan_add_step_persists_mapping_aliases() {
+    let wasm_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("workspace parent")
+        .join("component-adaptive-card")
+        .join("dist")
+        .join("component_adaptive_card__0_6_0.wasm");
+    if !wasm_path.exists() {
+        return;
+    }
+
+    let dir = tempdir().unwrap();
+    let pack_dir = dir.path().join("pack");
+    seed_wizard_pack(&pack_dir, &wasm_path);
+
+    let answers_path = pack_dir.join("answers.json");
+    fs::write(
+        &answers_path,
+        serde_json::to_string_pretty(&json!({
+            "schema_id": "greentic-flow.wizard.plan",
+            "schema_version": "2.0.0",
+            "actions": [{
+                "action": "add-step",
+                "flow": "flows/main.ygtc",
+                "step_id": "adaptive_mapped",
+                "component": "components/component_adaptive_card__0_6_0.wasm",
+                "mode": "default",
+                "answers": {
+                    "card_source": "inline",
+                    "default_card_inline": "{\"type\":\"AdaptiveCard\",\"version\":\"1.6\",\"body\":[{\"type\":\"TextBlock\",\"text\":\"Mapped\"}]}",
+                    "multilingual": false
+                },
+                "in_map": {
+                    "source": "$.input"
+                },
+                "out_map": {
+                    "target": "$.output"
+                },
+                "err_map": {
+                    "target": "$.error"
+                }
+            }]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    cargo_bin_cmd!("greentic-flow")
+        .arg("wizard")
+        .arg(&pack_dir)
+        .arg("--answers")
+        .arg(&answers_path)
+        .assert()
+        .success();
+
+    let doc = load_ygtc_from_path(&pack_dir.join("flows/main.ygtc")).expect("load flow");
+    let raw = &doc.nodes.get("adaptive_mapped").expect("added node").raw;
+    assert_eq!(raw.get("in_map"), Some(&json!({ "source": "$.input" })));
+    assert_eq!(raw.get("out_map"), Some(&json!({ "target": "$.output" })));
+    assert_eq!(raw.get("err_map"), Some(&json!({ "target": "$.error" })));
+}
+
+#[test]
+fn wizard_answers_plan_update_step_persists_mapping_aliases() {
+    let wasm_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("workspace parent")
+        .join("component-adaptive-card")
+        .join("dist")
+        .join("component_adaptive_card__0_6_0.wasm");
+    if !wasm_path.exists() {
+        return;
+    }
+
+    let dir = tempdir().unwrap();
+    let pack_dir = dir.path().join("pack");
+    seed_wizard_pack(&pack_dir, &wasm_path);
+
+    let add_answers_path = pack_dir.join("add-answers.json");
+    fs::write(
+        &add_answers_path,
+        serde_json::to_string_pretty(&json!({
+            "schema_id": "greentic-flow.wizard.plan",
+            "schema_version": "2.0.0",
+            "actions": [{
+                "action": "add-step",
+                "flow": "flows/main.ygtc",
+                "step_id": "adaptive_update_mapped",
+                "component": "components/component_adaptive_card__0_6_0.wasm",
+                "mode": "default",
+                "answers": {
+                    "card_source": "inline",
+                    "default_card_inline": "{\"type\":\"AdaptiveCard\",\"version\":\"1.6\",\"body\":[{\"type\":\"TextBlock\",\"text\":\"Before update\"}]}",
+                    "multilingual": false
+                }
+            }]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    cargo_bin_cmd!("greentic-flow")
+        .arg("wizard")
+        .arg(&pack_dir)
+        .arg("--answers")
+        .arg(&add_answers_path)
+        .assert()
+        .success();
+
+    let update_answers_path = pack_dir.join("update-answers.json");
+    fs::write(
+        &update_answers_path,
+        serde_json::to_string_pretty(&json!({
+            "schema_id": "greentic-flow.wizard.plan",
+            "schema_version": "2.0.0",
+            "actions": [{
+                "action": "update-step",
+                "flow": "flows/main.ygtc",
+                "step_id": "adaptive_update_mapped",
+                "component": "components/component_adaptive_card__0_6_0.wasm",
+                "mode": "default",
+                "answers": {
+                    "card_source": "inline",
+                    "default_card_inline": "{\"type\":\"AdaptiveCard\",\"version\":\"1.6\",\"body\":[{\"type\":\"TextBlock\",\"text\":\"After update\"}]}",
+                    "multilingual": false
+                },
+                "in_map": {
+                    "source": "$.session.input"
+                },
+                "out_map": {
+                    "target": "$.session.output"
+                },
+                "err_map": {
+                    "target": "$.session.error"
+                }
+            }]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    cargo_bin_cmd!("greentic-flow")
+        .arg("wizard")
+        .arg(&pack_dir)
+        .arg("--answers")
+        .arg(&update_answers_path)
+        .assert()
+        .success();
+
+    let doc = load_ygtc_from_path(&pack_dir.join("flows/main.ygtc")).expect("load flow");
+    let raw = &doc
+        .nodes
+        .get("adaptive_update_mapped")
+        .expect("updated node")
+        .raw;
+    assert_eq!(
+        raw.get("in_map"),
+        Some(&json!({ "source": "$.session.input" }))
+    );
+    assert_eq!(
+        raw.get("out_map"),
+        Some(&json!({ "target": "$.session.output" }))
+    );
+    assert_eq!(
+        raw.get("err_map"),
+        Some(&json!({ "target": "$.session.error" }))
+    );
+}
+
+#[test]
 fn add_step_rejects_invalid_component_scheme() {
     let dir = tempdir().unwrap();
     let flow_path = dir.path().join("flow.ygtc");

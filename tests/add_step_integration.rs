@@ -49,6 +49,9 @@ fn add_step_with_real_manifest_catalog() {
             operation: "op".to_string(),
             payload: payload.clone(),
             output: serde_json::Value::Object(Default::default()),
+            in_map: None,
+            out_map: None,
+            err_map: None,
             routing: vec![Route {
                 to: Some("end".to_string()),
                 ..Route::default()
@@ -63,6 +66,9 @@ fn add_step_with_real_manifest_catalog() {
             operation: "op".to_string(),
             payload: payload.clone(),
             output: serde_json::Value::Object(Default::default()),
+            in_map: None,
+            out_map: None,
+            err_map: None,
             routing: vec![Route {
                 out: true,
                 ..Route::default()

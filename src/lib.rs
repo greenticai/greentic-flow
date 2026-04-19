@@ -119,11 +119,24 @@ pub fn compile_flow(doc: FlowDoc) -> Result<Flow> {
             .unwrap_or_default();
         let mut op_key: Option<String> = None;
         let mut payload: Option<Value> = None;
-        let mut output_mapping = Value::Object(Default::default());
+        let mut input_mapping: Option<Value> = None;
+        let mut output_mapping: Option<Value> = None;
+        let mut err_mapping: Option<Value> = None;
         for (k, v) in node_doc.raw {
-            if k == "output" {
-                output_mapping = v;
-                continue;
+            match k.as_str() {
+                "in_map" => {
+                    input_mapping = Some(v);
+                    continue;
+                }
+                "out_map" | "output" => {
+                    output_mapping = Some(v);
+                    continue;
+                }
+                "err_map" => {
+                    err_mapping = Some(v);
+                    continue;
+                }
+                _ => {}
             }
             op_key = Some(k);
             payload = Some(v);
@@ -147,11 +160,14 @@ pub fn compile_flow(doc: FlowDoc) -> Result<Flow> {
                 operation: op_field,
             },
             input: InputMapping {
-                mapping: payload.unwrap_or_else(|| Value::Object(Default::default())),
+                mapping: input_mapping
+                    .or(payload)
+                    .unwrap_or_else(|| Value::Object(Default::default())),
             },
             output: OutputMapping {
-                mapping: output_mapping,
+                mapping: output_mapping.unwrap_or_else(|| Value::Object(Default::default())),
             },
+            err_map: err_mapping.map(|mapping| OutputMapping { mapping }),
             routing,
             telemetry,
         };
