@@ -1994,7 +1994,11 @@ fn schema_for_wizard_plan_action(
                     action.component.as_deref(),
                     action.mode.as_deref(),
                 ) {
-                    let flow_path = pack_dir.join(flow);
+                    let flow_path = resolve_wizard_plan_flow_path(
+                        pack_dir,
+                        flow,
+                        "wizard action flow path",
+                    )?;
                     let questions = questions_for_component_schema_at_flow(
                         component,
                         wizard_mode_arg_from_record(mode)?,
@@ -3084,6 +3088,22 @@ fn ensure_safe_pack_relative_path(path: &Path, label: &str) -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn resolve_wizard_plan_flow_path(pack_dir: &Path, flow: &str, label: &str) -> Result<PathBuf> {
+    let flow_rel = PathBuf::from(flow);
+    ensure_safe_pack_relative_path(&flow_rel, label)?;
+    let mut components = flow_rel.components();
+    let Some(std::path::Component::Normal(first)) = components.next() else {
+        anyhow::bail!("{label} must start with flows/");
+    };
+    if first != OsStr::new("flows") {
+        anyhow::bail!("{label} must start with flows/");
+    }
+    if flow_rel.extension() != Some(OsStr::new("ygtc")) {
+        anyhow::bail!("{label} must point to a .ygtc flow file");
+    }
+    Ok(pack_dir.join(flow_rel))
 }
 
 fn validate_asset_extension(file_name: &str, file_types: &[String]) -> Result<()> {
@@ -4224,12 +4244,13 @@ fn execute_add_flow_plan_action(pack_dir: &Path, action: &WizardPlanAction) -> R
         .flow
         .as_deref()
         .ok_or_else(|| anyhow!("add-flow action missing flow"))?;
+    let flow_path = resolve_wizard_plan_flow_path(pack_dir, flow_rel, "add-flow action flow path")?;
     let flow_id = action
         .flow_id
         .clone()
         .ok_or_else(|| anyhow!("add-flow action missing flow_id"))?;
     write_new_flow_file(NewFlowFileSpec {
-        flow_path: pack_dir.join(flow_rel),
+        flow_path,
         flow_id: action
             .flow_id
             .clone()
@@ -4393,8 +4414,10 @@ fn execute_edit_flow_summary_plan_action(pack_dir: &Path, action: &WizardPlanAct
         .flow
         .as_deref()
         .ok_or_else(|| anyhow!("edit-flow-summary action missing flow"))?;
+    let flow_path =
+        resolve_wizard_plan_flow_path(pack_dir, flow, "edit-flow-summary action flow path")?;
     apply_flow_summary_update(
-        &pack_dir.join(flow),
+        &flow_path,
         action.name.clone(),
         action.description.clone(),
     )?;
@@ -5586,7 +5609,7 @@ fn execute_delete_flow_plan_action(pack_dir: &Path, action: &WizardPlanAction) -
         .flow
         .as_deref()
         .ok_or_else(|| anyhow!("delete-flow action missing flow"))?;
-    let flow_path = pack_dir.join(flow);
+    let flow_path = resolve_wizard_plan_flow_path(pack_dir, flow, "delete-flow action flow path")?;
     if flow_path.exists() {
         fs::remove_file(&flow_path)
             .with_context(|| format!("delete flow {}", flow_path.display()))?;
@@ -6741,23 +6764,23 @@ fn split_component_schema_source(component: &str) -> (Option<PathBuf>, Option<St
     }
 }
 
-fn resolve_plan_local_wasm(pack_dir: &Path, path: PathBuf) -> PathBuf {
-    let candidate = if path.is_absolute() {
-        path
-    } else {
-        pack_dir.join(&path)
-    };
+fn resolve_plan_local_wasm(pack_dir: &Path, path: PathBuf) -> Result<PathBuf> {
+    if path.is_absolute() {
+        anyhow::bail!("wizard action local wasm path must be relative to the pack root");
+    }
+    ensure_safe_pack_relative_path(&path, "wizard action local wasm path")?;
+    let candidate = pack_dir.join(&path);
     if candidate.exists() {
-        return candidate;
+        return Ok(candidate);
     }
     let Some(parent) = candidate.parent() else {
-        return candidate;
+        return Ok(candidate);
     };
     let Some(stem) = candidate.file_stem().and_then(|value| value.to_str()) else {
-        return candidate;
+        return Ok(candidate);
     };
     let Some((base, _)) = stem.split_once("-sha256:") else {
-        return candidate;
+        return Ok(candidate);
     };
     let ext = candidate
         .extension()
@@ -6765,9 +6788,9 @@ fn resolve_plan_local_wasm(pack_dir: &Path, path: PathBuf) -> PathBuf {
         .unwrap_or("wasm");
     let fallback = parent.join(format!("{base}.{ext}"));
     if fallback.exists() {
-        fallback
+        Ok(fallback)
     } else {
-        candidate
+        Ok(candidate)
     }
 }
 
@@ -6784,12 +6807,15 @@ fn execute_add_step_plan_action(pack_dir: &Path, action: &WizardPlanAction) -> R
         .mode
         .as_deref()
         .ok_or_else(|| anyhow!("add-step action missing mode"))?;
+    let flow_path = resolve_wizard_plan_flow_path(pack_dir, flow, "add-step action flow path")?;
     let (local_wasm, component_ref) = split_component_schema_source(component);
-    let local_wasm = local_wasm.map(|path| resolve_plan_local_wasm(pack_dir, path));
+    let local_wasm = local_wasm
+        .map(|path| resolve_plan_local_wasm(pack_dir, path))
+        .transpose()?;
     handle_add_step(
         AddStepArgs {
             component_id: None,
-            flow_path: pack_dir.join(flow),
+            flow_path,
             after: action.after.clone(),
             mode: AddStepMode::Default,
             pack_alias: None,
@@ -6856,12 +6882,16 @@ fn execute_update_step_plan_action(pack_dir: &Path, action: &WizardPlanAction) -
         .step_id
         .clone()
         .ok_or_else(|| anyhow!("update-step action missing step_id"))?;
+    let flow_path =
+        resolve_wizard_plan_flow_path(pack_dir, flow, "update-step action flow path")?;
     let (local_wasm, component_ref) = split_component_schema_source(component);
-    let local_wasm = local_wasm.map(|path| resolve_plan_local_wasm(pack_dir, path));
+    let local_wasm = local_wasm
+        .map(|path| resolve_plan_local_wasm(pack_dir, path))
+        .transpose()?;
     handle_update_step(
         UpdateStepArgs {
             component_id: None,
-            flow_path: pack_dir.join(flow),
+            flow_path,
             step: Some(step_id),
             mode: "default".to_string(),
             wizard_mode: Some(wizard_mode_arg_from_record(mode)?),
@@ -6913,10 +6943,15 @@ fn execute_delete_step_plan_action(pack_dir: &Path, action: &WizardPlanAction) -
         .as_deref()
         .map(split_component_schema_source)
         .unwrap_or((None, None));
+    let local_wasm = local_wasm
+        .map(|path| resolve_plan_local_wasm(pack_dir, path))
+        .transpose()?;
+    let flow_path =
+        resolve_wizard_plan_flow_path(pack_dir, flow, "delete-step action flow path")?;
     handle_delete_step(
         DeleteStepArgs {
             component_id: None,
-            flow_path: pack_dir.join(flow),
+            flow_path,
             step: action.step_id.clone(),
             wizard_mode: action
                 .mode
@@ -8735,6 +8770,39 @@ nodes: {}
         let loaded = super::load_wizard_plan(&path).expect("load wizard plan");
 
         assert_eq!(loaded, plan);
+    }
+
+    #[test]
+    fn wizard_plan_flow_path_rejects_traversal() {
+        let dir = tempdir().expect("temp dir");
+        let err = super::resolve_wizard_plan_flow_path(
+            dir.path(),
+            "../outside.ygtc",
+            "test flow path",
+        )
+        .expect_err("expected traversal to be rejected");
+        assert!(err.to_string().contains("must not escape the pack root"));
+    }
+
+    #[test]
+    fn wizard_plan_flow_path_requires_flows_prefix_and_ygtc_extension() {
+        let dir = tempdir().expect("temp dir");
+        let err = super::resolve_wizard_plan_flow_path(
+            dir.path(),
+            "assets/not-a-flow.json",
+            "test flow path",
+        )
+        .expect_err("expected non-flow path to be rejected");
+        let msg = err.to_string();
+        assert!(msg.contains("must start with flows/") || msg.contains(".ygtc"));
+    }
+
+    #[test]
+    fn resolve_plan_local_wasm_rejects_absolute_paths() {
+        let dir = tempdir().expect("temp dir");
+        let err = super::resolve_plan_local_wasm(dir.path(), PathBuf::from("/tmp/evil.wasm"))
+            .expect_err("expected absolute path to be rejected");
+        assert!(err.to_string().contains("must be relative to the pack root"));
     }
 
     #[test]
@@ -11215,6 +11283,10 @@ fn warn_unknown_keys(answers: &QuestionAnswers, questions: &[Question]) {
         }
     }
     if !unknown.is_empty() {
+        let unknown = unknown
+            .iter()
+            .map(|key| sanitize_for_log(key))
+            .collect::<Vec<_>>();
         eprintln!("warning: unknown answer keys: {}", unknown.join(", "));
     }
 }
