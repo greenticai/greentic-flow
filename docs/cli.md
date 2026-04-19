@@ -83,6 +83,7 @@ greentic-flow add-step --flow flows/main.ygtc --mode config \
 - Runs the component’s `dev_flows.default` config to emit a StepSpec with defaults and placeholder routing.
 - If the selected dev_flow defines questions, add-step prompts interactively unless you pass `--answers`/`--answers-file`.
 - `--answers`/`--answers-file` accept JSON objects keyed by question id; non-interactive mode fails if required answers are missing.
+- When using `greentic-flow wizard --answers` with declarative step-plan actions, flow-level mapping aliases must be top-level action fields: `in_map`, `out_map`, and `err_map`. They are separate from component `answers`.
 - Still requires a source: add `--local-wasm ...` for local builds or `--component ... [--pin]` for remotes.
 - If you don’t pass `--config-flow` or `--manifest`, config mode reads `component.manifest.json` next to the local wasm or inside the cached remote component.
 
@@ -137,6 +138,7 @@ Requires a sidecar entry for the node; errors if missing (suggests `bind-compone
 Config mode reads `dev_flows.default` from the component manifest alongside the bound wasm (or cached remote component) to re-materialize the payload before applying overrides.
 - If the selected dev_flow defines questions, update-step prompts interactively for missing required values unless `--non-interactive` is set. `show_if` rules are honored.
 - Wizard mode names are `default|setup|update|remove`.
+- For declarative `greentic-flow wizard --answers` plans, use top-level `in_map`, `out_map`, and `err_map` on the `update-step` action rather than placing them inside component `answers`.
 
 ### delete-step
 Remove a node and optionally splice predecessors to its routing.
@@ -209,4 +211,3 @@ greentic-flow doctor-answers --schema answers.schema.json --answers answers.json
 ## CI usage
 - Run `ci/local_check.sh` (or `cargo fmt && cargo clippy --all-targets -- -D warnings && cargo test`) in CI.
 - Use `greentic-flow doctor` in pipelines to enforce schema validity on committed flows.
-

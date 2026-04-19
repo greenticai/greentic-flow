@@ -31,6 +31,9 @@ pub struct NodeIr {
     pub operation: String,
     pub payload: Value,
     pub output: Value,
+    pub in_map: Option<Value>,
+    pub out_map: Option<Value>,
+    pub err_map: Option<Value>,
     pub routing: Vec<Route>,
     pub telemetry: Option<Value>,
 }
@@ -64,6 +67,9 @@ impl FlowIr {
                 .get("output")
                 .cloned()
                 .unwrap_or_else(|| Value::Object(Map::new()));
+            let in_map = node_doc.raw.get("in_map").cloned();
+            let out_map = node_doc.raw.get("out_map").cloned();
+            let err_map = node_doc.raw.get("err_map").cloned();
             nodes.insert(
                 id.clone(),
                 NodeIr {
@@ -71,6 +77,9 @@ impl FlowIr {
                     operation,
                     payload,
                     output,
+                    in_map,
+                    out_map,
+                    err_map,
                     routing,
                     telemetry: node_doc
                         .telemetry
@@ -108,6 +117,15 @@ impl FlowIr {
                     .unwrap_or(false)
             {
                 raw.insert("output".to_string(), node_ir.output.clone());
+            }
+            if let Some(in_map) = node_ir.in_map.as_ref() {
+                raw.insert("in_map".to_string(), in_map.clone());
+            }
+            if let Some(out_map) = node_ir.out_map.as_ref() {
+                raw.insert("out_map".to_string(), out_map.clone());
+            }
+            if let Some(err_map) = node_ir.err_map.as_ref() {
+                raw.insert("err_map".to_string(), err_map.clone());
             }
             let routing_value =
                 serde_json::to_value(&node_ir.routing).map_err(|e| FlowError::Internal {
@@ -254,6 +272,9 @@ fn extract_operation(node: &NodeDoc, node_id: &str) -> Result<(String, Value)> {
         "routing",
         "telemetry",
         "output",
+        "in_map",
+        "out_map",
+        "err_map",
         "retry",
         "timeout",
         "when",
@@ -304,4 +325,48 @@ fn extract_operation(node: &NodeDoc, node_id: &str) -> Result<(String, Value)> {
         message: format!("node '{node_id}' missing operation key"),
         location: FlowErrorLocation::at_path(format!("nodes.{node_id}")),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_flow_to_ir;
+    use serde_json::json;
+
+    #[test]
+    fn parse_and_roundtrip_preserves_alias_maps() {
+        let yaml = r#"
+id: alias_flow
+type: messaging
+schema_version: 2
+nodes:
+  start:
+    component.exec:
+      component: repo://demo/component
+      config:
+        greeting: hi
+    operation: run
+    in_map:
+      source: $.input
+    out_map:
+      target: $.output
+    err_map:
+      target: $.error
+    routing: out
+"#;
+
+        let flow = parse_flow_to_ir(yaml).expect("parse flow");
+        let node = flow.nodes.get("start").expect("start node");
+        assert_eq!(node.in_map.as_ref(), Some(&json!({ "source": "$.input" })));
+        assert_eq!(
+            node.out_map.as_ref(),
+            Some(&json!({ "target": "$.output" }))
+        );
+        assert_eq!(node.err_map.as_ref(), Some(&json!({ "target": "$.error" })));
+
+        let doc = flow.to_doc().expect("to doc");
+        let raw = &doc.nodes.get("start").expect("start doc node").raw;
+        assert_eq!(raw.get("in_map"), Some(&json!({ "source": "$.input" })));
+        assert_eq!(raw.get("out_map"), Some(&json!({ "target": "$.output" })));
+        assert_eq!(raw.get("err_map"), Some(&json!({ "target": "$.error" })));
+    }
 }

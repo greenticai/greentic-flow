@@ -214,7 +214,11 @@ fn canonical_descriptor_hash(
             }
         }
     }
-    format!("{:x}", hasher.finalize())
+    let digest = hasher.finalize();
+    digest
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>()
 }
 
 fn derive_contract_meta_from_descriptor(
@@ -234,7 +238,11 @@ fn derive_contract_meta_from_descriptor(
     schema_hasher.update(op.name.as_bytes());
     hash_io_schema(&mut schema_hasher, &op.input);
     hash_io_schema(&mut schema_hasher, &op.output);
-    let schema_hash = format!("{:x}", schema_hasher.finalize());
+    let schema_digest = schema_hasher.finalize();
+    let schema_hash = schema_digest
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
 
     let (config_schema, config_schema_cbor) = match &op.input.schema {
         greentic_interfaces_host::component_v0_6::exports::greentic::component::node::SchemaSource::InlineCbor(bytes) => {
@@ -683,6 +691,12 @@ struct WizardPlanAction {
     mode: Option<String>,
     #[serde(default, skip_serializing_if = "serde_json::Map::is_empty")]
     answers: serde_json::Map<String, serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    in_map: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    out_map: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    err_map: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     locales: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -893,6 +907,15 @@ struct UpdateStepArgs {
     /// Allow contract drift when describe_hash changes.
     #[arg(long = "allow-contract-change")]
     allow_contract_change: bool,
+    /// Optional flow authoring input mapping applied after QA.
+    #[arg(skip)]
+    in_map: Option<serde_json::Value>,
+    /// Optional flow authoring success-output mapping applied after QA.
+    #[arg(skip)]
+    out_map: Option<serde_json::Value>,
+    /// Optional flow authoring error-output mapping applied after QA.
+    #[arg(skip)]
+    err_map: Option<serde_json::Value>,
 }
 
 #[derive(Args, Debug, Clone)]
@@ -1835,6 +1858,18 @@ fn generic_add_step_action_schema() -> serde_json::Value {
             "answers": {
                 "type": "object",
                 "description": "Use `greentic-flow component-schema <component> --mode <mode>` to fetch the exact schema for this object."
+            },
+            "in_map": {
+                "type": "object",
+                "description": "Optional flow authoring input mapping. This is separate from component `answers` and may reference flow payload/state/config such as `config.<key>`."
+            },
+            "out_map": {
+                "type": "object",
+                "description": "Optional flow authoring success-output mapping. This is separate from component `answers`."
+            },
+            "err_map": {
+                "type": "object",
+                "description": "Optional flow authoring error-output mapping. This is separate from component `answers`."
             }
         }
     })
@@ -1854,6 +1889,18 @@ fn generic_update_step_action_schema() -> serde_json::Value {
             "answers": {
                 "type": "object",
                 "description": "Use `greentic-flow component-schema <component> --mode <mode>` to fetch the exact schema for this object."
+            },
+            "in_map": {
+                "type": "object",
+                "description": "Optional flow authoring input mapping. This is separate from component `answers` and may reference flow payload/state/config such as `config.<key>`."
+            },
+            "out_map": {
+                "type": "object",
+                "description": "Optional flow authoring success-output mapping. This is separate from component `answers`."
+            },
+            "err_map": {
+                "type": "object",
+                "description": "Optional flow authoring error-output mapping. This is separate from component `answers`."
             }
         }
     })
@@ -1960,6 +2007,20 @@ fn schema_for_wizard_plan_action(
                     json!({"type":"object","additionalProperties":false,"properties":{}})
                 };
                 properties.insert("answers".to_string(), answers_schema);
+            }
+            if matches!(action.action.as_str(), "add-step" | "update-step") {
+                properties.insert("in_map".to_string(), json!({
+                    "type": "object",
+                    "description": "Optional flow authoring input mapping. Separate from component `answers`."
+                }));
+                properties.insert("out_map".to_string(), json!({
+                    "type": "object",
+                    "description": "Optional flow authoring success-output mapping. Separate from component `answers`."
+                }));
+                properties.insert("err_map".to_string(), json!({
+                    "type": "object",
+                    "description": "Optional flow authoring error-output mapping. Separate from component `answers`."
+                }));
             }
         }
         other => anyhow::bail!("unsupported wizard action '{other}'"),
@@ -2171,10 +2232,8 @@ fn read_input_line<R: Read + ?Sized>(reader: &mut R) -> Result<String> {
                     continue;
                 }
                 match seq[0] {
-                    b'C' => {
-                        if cursor < buf.len() {
-                            cursor += 1;
-                        }
+                    b'C' if cursor < buf.len() => {
+                        cursor += 1;
                     }
                     b'D' => {
                         cursor = cursor.saturating_sub(1);
@@ -2246,14 +2305,15 @@ fn read_input_line<R: Read + ?Sized>(reader: &mut R) -> Result<String> {
                                 cursor = buf.len();
                                 continue;
                             }
-                            b'3' => {
-                                if reader.read(&mut seq)? > 0 && seq[0] == b'~' {
+                            b'3' => match reader.read(&mut seq)? {
+                                n if n > 0 && seq[0] == b'~' => {
                                     if cursor < buf.len() {
                                         buf.remove(cursor);
                                     }
                                     continue;
                                 }
-                            }
+                                _ => {}
+                            },
                             _ => {}
                         }
                     }
@@ -4788,6 +4848,9 @@ fn wizard_add_step_with_io<R: Read, W: Write>(
             resolver,
             pin: source.pin,
             allow_contract_change: false,
+            in_map: None,
+            out_map: None,
+            err_map: None,
         },
         SchemaMode::Strict,
         OutputFormat::Human,
@@ -4867,6 +4930,9 @@ fn wizard_add_step_action_with_io<R: Read, W: Write>(
             resolver,
             pin: source.pin,
             allow_contract_change: false,
+            in_map: None,
+            out_map: None,
+            err_map: None,
         },
         SchemaMode::Strict,
         OutputFormat::Human,
@@ -5034,6 +5100,9 @@ fn wizard_update_step_with_io<R: Read, W: Write>(
             dry_run: false,
             write: false,
             allow_contract_change: false,
+            in_map: None,
+            out_map: None,
+            err_map: None,
         },
         SchemaMode::Strict,
         OutputFormat::Human,
@@ -5151,6 +5220,9 @@ fn wizard_update_step_action_with_io<R: Read, W: Write>(
             dry_run: false,
             write: false,
             allow_contract_change: false,
+            in_map: None,
+            out_map: None,
+            err_map: None,
         },
         SchemaMode::Strict,
         OutputFormat::Human,
@@ -6756,6 +6828,9 @@ fn execute_add_step_plan_action(pack_dir: &Path, action: &WizardPlanAction) -> R
             resolver: env::var("GREENTIC_FLOW_WIZARD_RESOLVER").ok(),
             pin: false,
             allow_contract_change: false,
+            in_map: action.in_map.clone(),
+            out_map: action.out_map.clone(),
+            err_map: action.err_map.clone(),
         },
         SchemaMode::Strict,
         OutputFormat::Human,
@@ -6817,6 +6892,9 @@ fn execute_update_step_plan_action(pack_dir: &Path, action: &WizardPlanAction) -
             dry_run: false,
             write: false,
             allow_contract_change: false,
+            in_map: action.in_map.clone(),
+            out_map: action.out_map.clone(),
+            err_map: action.err_map.clone(),
         },
         SchemaMode::Strict,
         OutputFormat::Human,
@@ -8619,6 +8697,47 @@ nodes: {}
     }
 
     #[test]
+    fn wizard_step_schema_includes_optional_mapping_aliases() {
+        let add = super::generic_add_step_action_schema();
+        let update = super::generic_update_step_action_schema();
+        for schema in [&add, &update] {
+            let props = schema
+                .get("properties")
+                .and_then(Value::as_object)
+                .expect("schema properties");
+            assert!(props.contains_key("in_map"));
+            assert!(props.contains_key("out_map"));
+            assert!(props.contains_key("err_map"));
+        }
+    }
+
+    #[test]
+    fn wizard_plan_roundtrip_preserves_mapping_aliases() {
+        let dir = tempdir().expect("temp dir");
+        let path = dir.path().join("answers/replay.json");
+        let plan = super::WizardPlan {
+            schema_id: "greentic-flow.wizard.plan".to_string(),
+            schema_version: "2.0.0".to_string(),
+            actions: vec![super::WizardPlanAction {
+                action: "add-step".to_string(),
+                flow: Some("flows/global/messaging/main.ygtc".to_string()),
+                component: Some("components/widget.wasm".to_string()),
+                mode: Some("default".to_string()),
+                answers: serde_json::Map::from_iter([("answer".to_string(), json!("value"))]),
+                in_map: Some(json!({ "source": "$.input" })),
+                out_map: Some(json!({ "target": "$.output" })),
+                err_map: Some(json!({ "target": "$.error" })),
+                ..super::WizardPlanAction::default()
+            }],
+        };
+
+        super::write_wizard_plan_file(&path, &plan).expect("write wizard plan");
+        let loaded = super::load_wizard_plan(&path).expect("load wizard plan");
+
+        assert_eq!(loaded, plan);
+    }
+
+    #[test]
     fn wizard_answers_flow_actions_keep_pack_yaml_in_sync() {
         let dir = tempdir().expect("temp dir");
         let pack_dir = dir.path();
@@ -9221,6 +9340,9 @@ nodes:
                 resolver: Some(resolver),
                 pin: false,
                 allow_contract_change: false,
+                in_map: None,
+                out_map: None,
+                err_map: None,
             },
             SchemaMode::Strict,
             OutputFormat::Human,
@@ -9303,6 +9425,9 @@ nodes:
                 resolver: Some(resolver),
                 pin: false,
                 allow_contract_change: false,
+                in_map: None,
+                out_map: None,
+                err_map: None,
             },
             SchemaMode::Strict,
             OutputFormat::Human,
@@ -9385,6 +9510,9 @@ nodes:
                 resolver: Some(resolver),
                 pin: false,
                 allow_contract_change: false,
+                in_map: None,
+                out_map: None,
+                err_map: None,
             },
             SchemaMode::Strict,
             OutputFormat::Human,
@@ -9477,6 +9605,9 @@ nodes:
                 resolver: Some(fixture_registry_resolver()),
                 pin: false,
                 allow_contract_change: false,
+                in_map: None,
+                out_map: None,
+                err_map: None,
             },
             SchemaMode::Strict,
             OutputFormat::Human,
@@ -9845,6 +9976,9 @@ nodes:
                 resolver: Some(format!("fixture://{}", fixture_root.display())),
                 pin: false,
                 allow_contract_change: false,
+                in_map: None,
+                out_map: None,
+                err_map: None,
             },
             SchemaMode::Strict,
             OutputFormat::Human,
@@ -10110,6 +10244,9 @@ nodes:
             resolver: Some(resolver),
             pin: false,
             allow_contract_change: false,
+            in_map: None,
+            out_map: None,
+            err_map: None,
         };
         handle_add_step(args, SchemaMode::Strict, OutputFormat::Human, false).expect("add step");
 
@@ -10324,6 +10461,9 @@ nodes:
                 resolver: Some(resolver.clone()),
                 pin: false,
                 allow_contract_change: false,
+                in_map: None,
+                out_map: None,
+                err_map: None,
             },
             SchemaMode::Strict,
             OutputFormat::Human,
@@ -10365,6 +10505,9 @@ nodes:
                 dry_run: false,
                 write: false,
                 allow_contract_change: false,
+                in_map: None,
+                out_map: None,
+                err_map: None,
             },
             SchemaMode::Strict,
             OutputFormat::Human,
@@ -10514,6 +10657,9 @@ nodes:
                 resolver: Some(resolver.clone()),
                 pin: false,
                 allow_contract_change: false,
+                in_map: None,
+                out_map: None,
+                err_map: None,
             },
             SchemaMode::Strict,
             OutputFormat::Human,
@@ -10574,6 +10720,9 @@ nodes:
                 dry_run: false,
                 write: false,
                 allow_contract_change: false,
+                in_map: None,
+                out_map: None,
+                err_map: None,
             },
             SchemaMode::Strict,
             OutputFormat::Human,
@@ -10646,6 +10795,9 @@ nodes:
                 resolver: Some(resolver),
                 pin: false,
                 allow_contract_change: false,
+                in_map: None,
+                out_map: None,
+                err_map: None,
             },
             SchemaMode::Strict,
             OutputFormat::Human,
@@ -11241,6 +11393,15 @@ struct AddStepArgs {
     /// Allow contract drift when describe_hash changes.
     #[arg(long = "allow-contract-change")]
     allow_contract_change: bool,
+    /// Optional flow authoring input mapping applied after QA.
+    #[arg(skip)]
+    in_map: Option<serde_json::Value>,
+    /// Optional flow authoring success-output mapping applied after QA.
+    #[arg(skip)]
+    out_map: Option<serde_json::Value>,
+    /// Optional flow authoring error-output mapping applied after QA.
+    #[arg(skip)]
+    err_map: Option<serde_json::Value>,
 }
 
 #[derive(Args, Debug)]
@@ -11400,6 +11561,23 @@ fn should_overwrite_wizard_answers(existing_flag: bool, interactive: bool) -> bo
     existing_flag || interactive
 }
 
+fn apply_mapping_aliases_to_node(
+    node: &mut greentic_flow::flow_ir::NodeIr,
+    in_map: Option<&serde_json::Value>,
+    out_map: Option<&serde_json::Value>,
+    err_map: Option<&serde_json::Value>,
+) {
+    if let Some(in_map) = in_map {
+        node.in_map = Some(in_map.clone());
+    }
+    if let Some(out_map) = out_map {
+        node.out_map = Some(out_map.clone());
+    }
+    if let Some(err_map) = err_map {
+        node.err_map = Some(err_map.clone());
+    }
+}
+
 fn handle_add_step_with_qa_io(
     args: AddStepArgs,
     schema_mode: SchemaMode,
@@ -11549,6 +11727,14 @@ fn handle_add_step_with_qa_io(
             .map_err(|diags| anyhow::anyhow!("planning failed: {:?}", diags))?;
         let inserted_id = plan.new_node.id.clone();
         let mut updated = apply_and_validate(&flow_ir, plan, &empty_catalog, args.allow_cycles)?;
+        if let Some(node) = updated.nodes.get_mut(&inserted_id) {
+            apply_mapping_aliases_to_node(
+                node,
+                args.in_map.as_ref(),
+                args.out_map.as_ref(),
+                args.err_map.as_ref(),
+            );
+        }
 
         let abi_version = args
             .abi_version
@@ -11785,7 +11971,15 @@ fn handle_add_step_with_qa_io(
     let plan = plan_add_step(&flow_ir, spec, &catalog)
         .map_err(|diags| anyhow::anyhow!("planning failed: {:?}", diags))?;
     let inserted_id = plan.new_node.id.clone();
-    let updated = apply_and_validate(&flow_ir, plan, &catalog, args.allow_cycles)?;
+    let mut updated = apply_and_validate(&flow_ir, plan, &catalog, args.allow_cycles)?;
+    if let Some(node) = updated.nodes.get_mut(&inserted_id) {
+        apply_mapping_aliases_to_node(
+            node,
+            args.in_map.as_ref(),
+            args.out_map.as_ref(),
+            args.err_map.as_ref(),
+        );
+    }
     let updated_doc = updated.to_doc()?;
     let mut output = serde_yaml_bw::to_string(&updated_doc)?;
     if !output.ends_with('\n') {
@@ -11983,6 +12177,12 @@ fn handle_update_step_with_qa_io(
         ensure_wizard_config_not_error(&component_identity, wizard_mode, &config_json)?;
         node.payload = config_json;
         node.operation = new_operation.clone();
+        apply_mapping_aliases_to_node(
+            &mut node,
+            args.in_map.as_ref(),
+            args.out_map.as_ref(),
+            args.err_map.as_ref(),
+        );
         if let Some(routing) = build_update_routing(&args)? {
             node.routing = routing;
         }
@@ -12202,6 +12402,12 @@ fn handle_update_step_with_qa_io(
 
     node.operation = new_operation;
     node.payload = new_payload;
+    apply_mapping_aliases_to_node(
+        &mut node,
+        args.in_map.as_ref(),
+        args.out_map.as_ref(),
+        args.err_map.as_ref(),
+    );
     node.routing = new_routing;
     flow_ir.nodes.insert(step_id.clone(), node);
 
@@ -12861,7 +13067,14 @@ fn compute_local_digest(path: &Path) -> Result<String> {
     let data = fs::read(path).with_context(|| format!("read wasm at {}", path.display()))?;
     let mut hasher = Sha256::new();
     hasher.update(data);
-    let digest = format!("sha256:{:x}", hasher.finalize());
+    let digest_bytes = hasher.finalize();
+    let digest = format!(
+        "sha256:{}",
+        digest_bytes
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+    );
     Ok(digest)
 }
 
@@ -13427,12 +13640,37 @@ fn resolve_component_id_reference(
         )
         .map_err(|err| anyhow::anyhow!("resolve component via distributor: {err}"))?;
 
-    match resp.artifact {
-        greentic_types::ArtifactLocation::FilePath { path } => Ok(format!("file://{path}")),
-        greentic_types::ArtifactLocation::OciReference { reference } => Ok(reference),
-        greentic_types::ArtifactLocation::DistributorInternal { handle } => Err(anyhow!(
-            "distributor returned internal handle {handle}; cannot resolve artifact"
-        )),
+    let artifact =
+        serde_json::to_value(&resp.artifact).context("serialize distributor artifact location")?;
+    let kind = artifact
+        .get("kind")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| anyhow!("distributor artifact missing kind"))?;
+    match kind {
+        "file_path" => {
+            let path = artifact
+                .get("path")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| anyhow!("distributor file artifact missing path"))?;
+            Ok(format!("file://{path}"))
+        }
+        "oci_reference" => {
+            let reference = artifact
+                .get("reference")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| anyhow!("distributor OCI artifact missing reference"))?;
+            Ok(reference.to_string())
+        }
+        "distributor_internal" => {
+            let handle = artifact
+                .get("handle")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| anyhow!("distributor internal artifact missing handle"))?;
+            Err(anyhow!(
+                "distributor returned internal handle {handle}; cannot resolve artifact"
+            ))
+        }
+        other => Err(anyhow!("unsupported distributor artifact kind {other}")),
     }
 }
 
