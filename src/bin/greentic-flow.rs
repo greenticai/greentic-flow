@@ -1994,11 +1994,8 @@ fn schema_for_wizard_plan_action(
                     action.component.as_deref(),
                     action.mode.as_deref(),
                 ) {
-                    let flow_path = resolve_wizard_plan_flow_path(
-                        pack_dir,
-                        flow,
-                        "wizard action flow path",
-                    )?;
+                    let flow_path =
+                        resolve_wizard_plan_flow_path(pack_dir, flow, "wizard action flow path")?;
                     let questions = questions_for_component_schema_at_flow(
                         component,
                         wizard_mode_arg_from_record(mode)?,
@@ -4416,11 +4413,7 @@ fn execute_edit_flow_summary_plan_action(pack_dir: &Path, action: &WizardPlanAct
         .ok_or_else(|| anyhow!("edit-flow-summary action missing flow"))?;
     let flow_path =
         resolve_wizard_plan_flow_path(pack_dir, flow, "edit-flow-summary action flow path")?;
-    apply_flow_summary_update(
-        &flow_path,
-        action.name.clone(),
-        action.description.clone(),
-    )?;
+    apply_flow_summary_update(&flow_path, action.name.clone(), action.description.clone())?;
     upsert_pack_flow_entry(pack_dir, flow, None)
 }
 
@@ -6882,8 +6875,7 @@ fn execute_update_step_plan_action(pack_dir: &Path, action: &WizardPlanAction) -
         .step_id
         .clone()
         .ok_or_else(|| anyhow!("update-step action missing step_id"))?;
-    let flow_path =
-        resolve_wizard_plan_flow_path(pack_dir, flow, "update-step action flow path")?;
+    let flow_path = resolve_wizard_plan_flow_path(pack_dir, flow, "update-step action flow path")?;
     let (local_wasm, component_ref) = split_component_schema_source(component);
     let local_wasm = local_wasm
         .map(|path| resolve_plan_local_wasm(pack_dir, path))
@@ -6946,8 +6938,7 @@ fn execute_delete_step_plan_action(pack_dir: &Path, action: &WizardPlanAction) -
     let local_wasm = local_wasm
         .map(|path| resolve_plan_local_wasm(pack_dir, path))
         .transpose()?;
-    let flow_path =
-        resolve_wizard_plan_flow_path(pack_dir, flow, "delete-step action flow path")?;
+    let flow_path = resolve_wizard_plan_flow_path(pack_dir, flow, "delete-step action flow path")?;
     handle_delete_step(
         DeleteStepArgs {
             component_id: None,
@@ -8775,12 +8766,9 @@ nodes: {}
     #[test]
     fn wizard_plan_flow_path_rejects_traversal() {
         let dir = tempdir().expect("temp dir");
-        let err = super::resolve_wizard_plan_flow_path(
-            dir.path(),
-            "../outside.ygtc",
-            "test flow path",
-        )
-        .expect_err("expected traversal to be rejected");
+        let err =
+            super::resolve_wizard_plan_flow_path(dir.path(), "../outside.ygtc", "test flow path")
+                .expect_err("expected traversal to be rejected");
         assert!(err.to_string().contains("must not escape the pack root"));
     }
 
@@ -8802,7 +8790,10 @@ nodes: {}
         let dir = tempdir().expect("temp dir");
         let err = super::resolve_plan_local_wasm(dir.path(), PathBuf::from("/tmp/evil.wasm"))
             .expect_err("expected absolute path to be rejected");
-        assert!(err.to_string().contains("must be relative to the pack root"));
+        assert!(
+            err.to_string()
+                .contains("must be relative to the pack root")
+        );
     }
 
     #[test]
