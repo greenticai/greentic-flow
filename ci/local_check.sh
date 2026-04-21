@@ -11,6 +11,8 @@ LOCAL_CHECK_VERBOSE=${LOCAL_CHECK_VERBOSE:-0}
 LOCAL_CHECK_ALLOW_SKIP=${LOCAL_CHECK_ALLOW_SKIP:-0}
 LOCAL_CHECK_RUST_MM=${LOCAL_CHECK_RUST_MM:-}
 LOCAL_CHECK_SCHEMA_REF=${LOCAL_CHECK_SCHEMA_REF:-main}
+LOCAL_CHECK_JOBS=${LOCAL_CHECK_JOBS:-1}
+LOCAL_CHECK_MIN_FREE_MB=${LOCAL_CHECK_MIN_FREE_MB:-2048}
 SKIPPED_REQUIRED=0
 declare -a REQUIRED_SKIP_REASONS=()
 
@@ -25,6 +27,23 @@ need() {
 step() {
   echo ""
   echo "▶ $*"
+}
+
+available_mb() {
+  df -Pm . | awk 'NR==2 {print $4}'
+}
+
+ensure_free_space_mb() {
+  local required_mb=$1
+  local available
+  available="$(available_mb)"
+  if [[ -z "${available}" ]]; then
+    skip_step "unable to determine free disk space" 1
+    return
+  fi
+  if (( available < required_mb )); then
+    skip_step "insufficient free disk space: need at least ${required_mb}MB, found ${available}MB (set LOCAL_CHECK_MIN_FREE_MB to override)" 1
+  fi
 }
 
 skip_step() {
@@ -69,6 +88,9 @@ if need cargo; then
 else
   skip_step "cargo not found" 1
 fi
+echo "cargo jobs: ${LOCAL_CHECK_JOBS}"
+step "Check free disk space"
+ensure_free_space_mb "${LOCAL_CHECK_MIN_FREE_MB}"
 
 step "Verify canonical greentic component WIT is not vendored"
 if [[ -x ci/check_no_duplicate_canonical_wit.sh ]]; then
@@ -100,21 +122,21 @@ fi
 
 step "cargo clippy --workspace --all-targets --all-features -D warnings"
 if need cargo; then
-  cargo clippy --workspace --all-targets --all-features -- -D warnings
+  cargo clippy -j "${LOCAL_CHECK_JOBS}" --workspace --all-targets --all-features -- -D warnings
 else
   skip_step "cargo clippy requires cargo"
 fi
 
 step "cargo build --workspace --locked --all-features"
 if need cargo; then
-  cargo build --workspace --locked --all-features
+  cargo build -j "${LOCAL_CHECK_JOBS}" --workspace --locked --all-features
 else
   skip_step "cargo build requires cargo"
 fi
 
 step "cargo test --workspace --all-features"
 if need cargo; then
-  cargo test --workspace --all-features
+  cargo test -j "${LOCAL_CHECK_JOBS}" --workspace --all-features
 else
   skip_step "cargo test requires cargo"
 fi
@@ -126,7 +148,7 @@ elif ! need cargo && [[ ! -x target/debug/greentic-flow ]]; then
   skip_step "cargo required to build greentic-flow" 1
 else
   if [[ ! -x target/debug/greentic-flow ]]; then
-    cargo build --quiet --bin greentic-flow
+    cargo build -j "${LOCAL_CHECK_JOBS}" --quiet --bin greentic-flow
   fi
   ./target/debug/greentic-flow doctor --json tests/data/flow_ok.ygtc | python3 -c 'import json,sys; data=json.load(sys.stdin); assert data.get("ok") is True, data'
 fi

@@ -192,6 +192,10 @@ fn parse_routes(raw: Value) -> Result<Vec<Route>> {
                 .and_then(Value::as_str)
                 .map(|s| s.to_string()),
             reply: obj.get("reply").and_then(Value::as_bool).unwrap_or(false),
+            condition: obj
+                .get("condition")
+                .and_then(Value::as_str)
+                .map(|s| s.to_string()),
         });
     }
 

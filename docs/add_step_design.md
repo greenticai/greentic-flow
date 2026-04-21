@@ -1,3 +1,15 @@
+> Status: low-level implementation notes.
+>
+> This document explains the internal add/update-step mechanics and Flow IR model.
+> It is not the preferred end-user or coding-agent workflow.
+>
+> For new authoring and automation, prefer:
+>
+> - [`docs/wizard/authoring.md`](wizard/authoring.md)
+> - `greentic-flow wizard --schema`
+> - `greentic-flow component-schema`
+> - `greentic-flow wizard <pack> --answers <plan.json>`
+
 ### Overview
 
 `add-step` now works over a typed Flow IR to plan edits, apply them, and validate
