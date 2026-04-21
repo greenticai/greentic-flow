@@ -11217,7 +11217,6 @@ fn wrap_wizard_error(
     }
 }
 
-<<<<<<< Updated upstream
 fn ensure_wizard_config_not_error(
     component_id: &str,
     mode: wizard_ops::WizardMode,
@@ -11243,23 +11242,17 @@ fn ensure_wizard_config_not_error(
             "component '{component_id}' setup failed in mode '{}': {code}: {message}",
             mode.as_str()
         );
-=======
-fn is_denied_host_ref_error(err: &anyhow::Error) -> bool {
-    let lower = err.to_string().to_ascii_lowercase();
-    lower.contains("denied host ref")
-        || (lower.contains("requested capability") && lower.contains("host:"))
-}
-
-fn wizard_mode_legacy_label(mode: wizard_ops::WizardMode) -> Option<&'static str> {
-    match mode {
-        wizard_ops::WizardMode::Update => Some("upgrade"),
-        _ => None,
->>>>>>> Stashed changes
     }
     anyhow::bail!(
         "component '{component_id}' setup failed in mode '{}': {code}: {message} ({details})",
         mode.as_str()
     );
+}
+
+fn is_denied_host_ref_error(err: &anyhow::Error) -> bool {
+    let lower = err.to_string().to_ascii_lowercase();
+    lower.contains("denied host ref")
+        || (lower.contains("requested capability") && lower.contains("host:"))
 }
 
 fn wizard_answers_json_path(
@@ -11706,7 +11699,7 @@ fn handle_add_step_with_qa_io(
             args.pack.as_ref(),
             args.component_version.as_ref(),
         )?;
-        let (catalog, locale) = default_i18n_catalog(args.locale.as_deref());
+        let (mut catalog, locale) = default_i18n_catalog(args.locale.as_deref());
         let mut answers = parse_answers_map(args.answers.as_deref(), args.answers_file.as_deref())?;
 
         let mut wizard_fallback = false;
@@ -11714,104 +11707,22 @@ fn handle_add_step_with_qa_io(
         let mut contract_meta: Option<flow_meta::ComponentContractMeta> = None;
         let mut config_json = serde_json::from_str::<serde_json::Value>(&args.payload)
             .context("parse --payload as JSON")?;
+        let mut spec: Option<wizard_ops::WizardSpecOutput> = None;
 
         if let Some(fixture) = resolved.fixture.as_ref() {
             abi = fixture.abi;
-            let spec = wizard_ops::WizardSpecOutput {
+            spec = Some(wizard_ops::WizardSpecOutput {
                 abi: fixture.abi,
                 describe_cbor: fixture.describe_cbor.clone(),
                 descriptor: None,
                 qa_spec_cbor: fixture.qa_spec_cbor.clone(),
                 answers_schema_cbor: None,
-            };
-            let qa_spec = wizard_ops::decode_component_qa_spec(&spec.qa_spec_cbor, wizard_mode)?;
-            wizard_ops::merge_default_answers(&qa_spec, &mut answers);
-            if !qa_spec.questions.is_empty() {
-                qa_runner::warn_unknown_keys(&answers, &qa_spec);
-                println!(
-                    "{}",
-                    wizard_header(&component_identity, wizard_mode.as_str())
-                );
-                if args.interactive {
-                    answers = qa_runner::run_interactive(&qa_spec, &catalog, &locale, answers)?;
-                } else {
-                    qa_runner::validate_required(&qa_spec, &catalog, &locale, &answers)?;
-                }
-            }
-            let config_cbor = fixture.apply_answers_cbor.clone();
-            config_json = wizard_ops::cbor_to_json(&config_cbor)?;
+            });
         } else {
-<<<<<<< Updated upstream
-            wizard_ops::fetch_wizard_spec(&resolved.wasm_bytes, wizard_mode)
-                .map_err(|err| wrap_wizard_error(err, &component_identity, "describe", None))?
-        };
-        let qa_spec = wizard_ops::decode_component_qa_spec(&spec.qa_spec_cbor, wizard_mode)?;
-        let (mut catalog, locale) = default_i18n_catalog(args.locale.as_deref());
-        merge_component_i18n_catalog(&mut catalog, &locale, &args.flow_path, &resolved.source);
-
-        let mut answers = parse_answers_map(args.answers.as_deref(), args.answers_file.as_deref())?;
-        wizard_ops::merge_default_answers(&qa_spec, &mut answers);
-        if args.interactive && matches!(wizard_mode, wizard_ops::WizardMode::Default) {
-            seed_optional_answers_for_default_setup(&qa_spec, &mut answers);
-        }
-        if !qa_spec.questions.is_empty() {
-            qa_runner::warn_unknown_keys(&answers, &qa_spec, &catalog, &locale);
-            println!(
-                "{}",
-                wizard_header(&component_identity, wizard_mode.as_str())
-            );
-            answers = run_component_qa_with_qa_lib(
-                &qa_spec,
-                &catalog,
-                &locale,
-                answers,
-                args.interactive,
-                qa_io.as_deref_mut(),
-            )?;
-=======
             match wizard_ops::fetch_wizard_spec(&resolved.wasm_bytes, wizard_mode) {
-                Ok(spec) => {
-                    abi = spec.abi;
-                    let qa_spec =
-                        wizard_ops::decode_component_qa_spec(&spec.qa_spec_cbor, wizard_mode)?;
-                    wizard_ops::merge_default_answers(&qa_spec, &mut answers);
-                    if !qa_spec.questions.is_empty() {
-                        qa_runner::warn_unknown_keys(&answers, &qa_spec);
-                        println!(
-                            "{}",
-                            wizard_header(&component_identity, wizard_mode.as_str())
-                        );
-                        if args.interactive {
-                            answers =
-                                qa_runner::run_interactive(&qa_spec, &catalog, &locale, answers)?;
-                        } else {
-                            qa_runner::validate_required(&qa_spec, &catalog, &locale, &answers)?;
-                        }
-                    }
-                    let answers_cbor = wizard_ops::answers_to_cbor(&answers)?;
-                    let current_config = wizard_ops::empty_cbor_map();
-                    let config_cbor = wizard_ops::apply_wizard_answers(
-                        &resolved.wasm_bytes,
-                        spec.abi,
-                        wizard_mode,
-                        &current_config,
-                        &answers_cbor,
-                    )
-                    .map_err(|err| {
-                        wrap_wizard_error(err, &component_identity, "apply-answers", None)
-                    })?;
-                    config_json = wizard_ops::cbor_to_json(&config_cbor)?;
-                    contract_meta = spec
-                        .descriptor
-                        .as_ref()
-                        .map(|descriptor| {
-                            derive_contract_meta_from_descriptor(
-                                descriptor,
-                                args.operation.as_deref().unwrap_or("run"),
-                            )
-                        })
-                        .transpose()?
-                        .map(|(_, meta)| meta);
+                Ok(fetched_spec) => {
+                    abi = fetched_spec.abi;
+                    spec = Some(fetched_spec);
                 }
                 Err(err) => {
                     if !is_denied_host_ref_error(&err) {
@@ -11830,39 +11741,74 @@ fn handle_add_step_with_qa_io(
                     config_json = merge_payload(config_json, answers_to_value(&answers));
                 }
             }
->>>>>>> Stashed changes
         }
-        if let Some(captured_answers) = captured_answers.as_mut() {
+
+        if let Some(spec) = spec.as_ref() {
+            let qa_spec = wizard_ops::decode_component_qa_spec(&spec.qa_spec_cbor, wizard_mode)?;
+            merge_component_i18n_catalog(&mut catalog, &locale, &args.flow_path, &resolved.source);
+            wizard_ops::merge_default_answers(&qa_spec, &mut answers);
+            if args.interactive && matches!(wizard_mode, wizard_ops::WizardMode::Default) {
+                seed_optional_answers_for_default_setup(&qa_spec, &mut answers);
+            }
+            if !qa_spec.questions.is_empty() {
+                qa_runner::warn_unknown_keys(&answers, &qa_spec, &catalog, &locale);
+                println!(
+                    "{}",
+                    wizard_header(&component_identity, wizard_mode.as_str())
+                );
+                answers = run_component_qa_with_qa_lib(
+                    &qa_spec,
+                    &catalog,
+                    &locale,
+                    answers,
+                    args.interactive,
+                    qa_io.as_deref_mut(),
+                )?;
+            }
+            if let Some(captured_answers) = captured_answers.as_mut() {
+                captured_answers.clear();
+                captured_answers.extend(answers.clone());
+            }
+            materialize_remote_asset_answers(
+                &spec.qa_spec_cbor,
+                &mut answers,
+                &args.flow_path,
+                args.interactive,
+                qa_io,
+            )?;
+
+            let answers_cbor = wizard_ops::answers_to_cbor(&answers)?;
+            let current_config = wizard_ops::empty_cbor_map();
+            let config_cbor = if let Some(fixture) = resolved.fixture.as_ref() {
+                fixture.apply_answers_cbor.clone()
+            } else {
+                wizard_ops::apply_wizard_answers(
+                    &resolved.wasm_bytes,
+                    spec.abi,
+                    wizard_mode,
+                    &current_config,
+                    &answers_cbor,
+                )
+                .map_err(|err| wrap_wizard_error(err, &component_identity, "apply-answers", None))?
+            };
+            config_json = wizard_ops::cbor_to_json(&config_cbor)?;
+            ensure_wizard_config_not_error(&component_identity, wizard_mode, &config_json)?;
+            contract_meta = spec
+                .descriptor
+                .as_ref()
+                .map(|descriptor| {
+                    derive_contract_meta_from_descriptor(
+                        descriptor,
+                        args.operation.as_deref().unwrap_or("run"),
+                    )
+                })
+                .transpose()?
+                .map(|(_, meta)| meta);
+        } else if let Some(captured_answers) = captured_answers.as_mut() {
             captured_answers.clear();
             captured_answers.extend(answers.clone());
         }
-        materialize_remote_asset_answers(
-            &spec.qa_spec_cbor,
-            &mut answers,
-            &args.flow_path,
-            args.interactive,
-            qa_io,
-        )?;
 
-<<<<<<< Updated upstream
-        let answers_cbor = wizard_ops::answers_to_cbor(&answers)?;
-        let current_config = wizard_ops::empty_cbor_map();
-        let config_cbor = if let Some(fixture) = resolved.fixture.as_ref() {
-            fixture.apply_answers_cbor.clone()
-        } else {
-            wizard_ops::apply_wizard_answers(
-                &resolved.wasm_bytes,
-                spec.abi,
-                wizard_mode,
-                &current_config,
-                &answers_cbor,
-            )
-            .map_err(|err| wrap_wizard_error(err, &component_identity, "apply-answers", None))?
-        };
-        let operation_id = args.operation.clone().unwrap_or_else(|| "run".to_string());
-        let config_json = wizard_ops::cbor_to_json(&config_cbor)?;
-        ensure_wizard_config_not_error(&component_identity, wizard_mode, &config_json)?;
-=======
         if !config_json.is_object() {
             anyhow::bail!("wizard config payload must be a JSON object");
         }
@@ -11873,7 +11819,6 @@ fn handle_add_step_with_qa_io(
         {
             contract_meta = None;
         }
->>>>>>> Stashed changes
 
         let routing_json = routing_value
             .clone()
@@ -11964,7 +11909,7 @@ fn handle_add_step_with_qa_io(
                     &inserted_id,
                     wizard_mode.as_str(),
                     &sorted,
-                    args.overwrite_answers,
+                    should_overwrite_wizard_answers(args.overwrite_answers, args.interactive),
                 )?;
                 wizard_state::update_wizard_state(
                     &args.flow_path,
@@ -11974,25 +11919,6 @@ fn handle_add_step_with_qa_io(
                     &locale,
                 )?;
             }
-<<<<<<< Updated upstream
-            let base_dir = answers_base_dir(&args.flow_path, args.answers_dir.as_deref());
-            let _paths = answers::write_answers(
-                &base_dir,
-                &flow_ir.id,
-                &inserted_id,
-                wizard_mode.as_str(),
-                &sorted,
-                should_overwrite_wizard_answers(args.overwrite_answers, args.interactive),
-            )?;
-            wizard_state::update_wizard_state(
-                &args.flow_path,
-                &flow_ir.id,
-                &inserted_id,
-                wizard_mode.as_str(),
-                &locale,
-            )?;
-=======
->>>>>>> Stashed changes
             write_flow_file(&args.flow_path, &output, true, backup)?;
             sidecar.nodes.insert(
                 inserted_id.clone(),
