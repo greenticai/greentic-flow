@@ -1,6 +1,6 @@
 [package]
 name = "greentic-flow"
-version = "0.5.0"
+version = "0.5.1"
 edition = "2024"
 rust-version = "1.95"
 license = "MIT"
@@ -55,7 +55,7 @@ url = "2"
 wasmtime = { version = "43", features = ["component-model"] }
 wasmtime-wasi = "43"
 wasmtime-environ = "43"
-qa-spec = "0.4"
+qa-spec = "0.5"
 sys-locale = "0.3"
 unic-langid = "0.9"
 include_dir = "0.7"

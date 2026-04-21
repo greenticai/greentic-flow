@@ -168,6 +168,7 @@
   "cli.help.arg.answers.name.help": "Prefijo del archivo de salida",
   "cli.help.arg.answers.operation.help": "Operación del componente (usada para seleccionar el grafo dev_flow)",
   "cli.help.arg.answers.out_dir.help": "Directorio de salida (por defecto el directorio actual)",
+  "cli.help.arg.answers.resolver.help": "Anulación del resolvedor (fixture://...) para pruebas/CI",
   "cli.help.arg.bind_component.component_ref.help": "Referencia de componente remota (oci://, repo://, store://, etc.)",
   "cli.help.arg.bind_component.flow_path.help": "Ruta al archivo de flujo que se modificará",
   "cli.help.arg.bind_component.help.help": "Mostrar ayuda",

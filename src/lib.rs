@@ -283,7 +283,15 @@ fn compile_routing(raw: &Value, nodes: &HashSet<String>, node_id: &str) -> Resul
 
     if routes.len() == 1 {
         let route = &routes[0];
+        let has_condition = raw
+            .as_array()
+            .and_then(|routes| routes.first())
+            .and_then(Value::as_object)
+            .is_some_and(|route| route.contains_key("condition"));
         let is_out = route.out.unwrap_or(false);
+        if has_condition {
+            return Ok(Routing::Custom(raw.clone()));
+        }
         if route.reply.unwrap_or(false) {
             return Ok(Routing::Reply);
         }
@@ -330,6 +338,16 @@ fn compile_routing(raw: &Value, nodes: &HashSet<String>, node_id: &str) -> Resul
     // Attempt to build a Branch when multiple status routes are present.
     if routes.len() >= 2 {
         use std::collections::BTreeMap;
+        let has_condition = raw.as_array().is_some_and(|routes| {
+            routes.iter().any(|route| {
+                route
+                    .as_object()
+                    .is_some_and(|route| route.contains_key("condition"))
+            })
+        });
+        if has_condition {
+            return Ok(Routing::Custom(raw.clone()));
+        }
         let mut on_status: BTreeMap<String, NodeId> = BTreeMap::new();
         let mut default: Option<NodeId> = None;
         let mut any_status = false;
@@ -472,5 +490,75 @@ nodes:
         )
         .expect_err("invalid shorthand should fail during load");
         assert!(matches!(err, crate::error::FlowError::Routing { .. }));
+    }
+
+    #[test]
+    fn compile_preserves_single_conditional_route_as_custom() {
+        let flow = compile_ygtc_str(
+            r#"
+id: default
+schema_version: 2
+type: messaging
+start: greet
+
+nodes:
+  greet:
+    emit.response:
+      text: hi
+    routing:
+      - condition: in.input.text != ""
+        to: ask
+
+  ask:
+    emit.response:
+      text: ok
+    routing:
+      - out: true
+"#,
+        )
+        .expect("flow should compile");
+
+        let greet_id = NodeId::new("greet").expect("valid node id");
+        let greet = flow.nodes.get(&greet_id).expect("greet node exists");
+        assert!(matches!(greet.routing, Routing::Custom(_)));
+    }
+
+    #[test]
+    fn compile_preserves_multi_route_conditions_as_custom() {
+        let flow = compile_ygtc_str(
+            r#"
+id: default
+schema_version: 2
+type: messaging
+start: ask
+
+nodes:
+  ask:
+    provider.invoke:
+      provider_type: llm.openai.compat.ollama
+      op: chat
+    routing:
+      - condition: error != ""
+        to: send_error
+      - to: send_response
+
+  send_response:
+    emit.response:
+      text: ok
+    routing:
+      - out: true
+
+  send_error:
+    emit.response:
+      text: bad
+    routing:
+      - out: true
+"#,
+        )
+        .expect("flow should compile");
+
+        let ask_id = NodeId::new("ask").expect("valid node id");
+        let ask = flow.nodes.get(&ask_id).expect("ask node exists");
+        assert!(matches!(ask.routing, Routing::Custom(_)));
     }
 }

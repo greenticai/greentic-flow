@@ -168,6 +168,7 @@
   "cli.help.arg.answers.name.help": "Output file prefix",
   "cli.help.arg.answers.operation.help": "Component operation (used to select dev_flow graph)",
   "cli.help.arg.answers.out_dir.help": "Output directory (defaults to current directory)",
+  "cli.help.arg.answers.resolver.help": "Resolver override (fixture://...) for tests/CI",
   "cli.help.arg.component_schema.component.help": "Component reference (oci://, repo://, store://) or local wasm path",
   "cli.help.arg.component_schema.help.help": "Print help",
   "cli.help.arg.component_schema.locale.help": "Locale (BCP47) for question descriptions",

@@ -13,6 +13,17 @@ fn manifest_path(name: &str) -> PathBuf {
         .join(name)
 }
 
+fn fixture_registry_resolver() -> String {
+    format!(
+        "fixture://{}",
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests")
+            .join("fixtures")
+            .join("registry")
+            .display()
+    )
+}
+
 fn validate_with_schema(schema: &serde_json::Value, instance: &serde_json::Value) -> bool {
     let compiled = jsonschema::options()
         .with_draft(Draft::Draft202012)
@@ -168,4 +179,36 @@ fn doctor_answers_enforces_conditionals() {
             .filter_map(|v| v.as_str())
             .any(|msg| msg.contains("asset_path"))
     );
+}
+
+#[test]
+fn answers_supports_component_refs_via_wizard_resolution() {
+    let dir = tempdir().unwrap();
+    let schema_path = dir.path().join("widget.schema.json");
+    let example_path = dir.path().join("widget.example.json");
+
+    cargo_bin_cmd!("greentic-flow")
+        .arg("answers")
+        .arg("--component")
+        .arg("oci://acme/widget:1")
+        .arg("--resolver")
+        .arg(fixture_registry_resolver())
+        .arg("--operation")
+        .arg("handle_message")
+        .arg("--name")
+        .arg("widget")
+        .arg("--out-dir")
+        .arg(dir.path())
+        .assert()
+        .success();
+
+    assert!(schema_path.exists());
+    assert!(example_path.exists());
+
+    let schema: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&schema_path).unwrap()).unwrap();
+    let example: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&example_path).unwrap()).unwrap();
+
+    assert!(validate_with_schema(&schema, &example));
 }

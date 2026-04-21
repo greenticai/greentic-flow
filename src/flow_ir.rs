@@ -48,6 +48,8 @@ pub struct Route {
     pub status: Option<String>,
     #[serde(default, skip_serializing_if = "is_false")]
     pub reply: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub condition: Option<String>,
 }
 
 fn is_false(value: &bool) -> bool {
@@ -137,6 +139,7 @@ impl FlowIr {
                 && node_ir.routing[0].to.is_none()
                 && !node_ir.routing[0].reply
                 && node_ir.routing[0].status.is_none()
+                && node_ir.routing[0].condition.is_none()
             {
                 Value::String("out".to_string())
             } else if node_ir.routing.len() == 1
@@ -144,6 +147,7 @@ impl FlowIr {
                 && node_ir.routing[0].to.is_none()
                 && !node_ir.routing[0].out
                 && node_ir.routing[0].status.is_none()
+                && node_ir.routing[0].condition.is_none()
             {
                 Value::String("reply".to_string())
             } else {
@@ -242,6 +246,8 @@ fn parse_routing(node: &NodeDoc, node_id: &str) -> Result<Vec<Route>> {
         status: Option<String>,
         #[serde(default)]
         reply: Option<bool>,
+        #[serde(default)]
+        condition: Option<String>,
     }
 
     let routes: Vec<RouteDoc> =
@@ -257,6 +263,7 @@ fn parse_routing(node: &NodeDoc, node_id: &str) -> Result<Vec<Route>> {
             out: r.out.unwrap_or(false),
             status: r.status,
             reply: r.reply.unwrap_or(false),
+            condition: r.condition,
         })
         .collect())
 }
