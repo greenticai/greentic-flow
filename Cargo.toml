@@ -1,6 +1,6 @@
 [package]
 name = "greentic-flow"
-version = "0.5.1"
+version = "0.5.2"
 edition = "2024"
 rust-version = "1.95"
 license = "MIT"
@@ -79,7 +79,7 @@ harness = false
 serde_json = "1"
 
 [package.metadata.binstall]
-pkg-url = "{ repo }/releases/download/v{ version }/{ name }-v{ version }-{ target }.tgz"
+pkg-url = "{ repo }/releases/download/v{ version }/{ name }-v{ version }-{ target }.tar.gz"
 pkg-fmt = "tar.gz"
 bin-dir = "{ name }-v{ version }-{ target }/{ bin }{ binary-ext }"
 targets = [
