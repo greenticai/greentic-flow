@@ -582,7 +582,7 @@ checksum = "cf044036a9d87f059698002c11f72f0f46f1fcc3228b3bc1fd1a3a621653f2ff"
 dependencies = [
  "greentic-interfaces-guest",
  "greentic-types",
- "qa-spec 0.5.0",
+ "qa-spec",
  "serde",
  "serde_cbor",
  "serde_json",
@@ -1560,7 +1560,7 @@ dependencies = [
  "pathdiff",
  "predicates",
  "pretty_assertions",
- "qa-spec 0.4.14",
+ "qa-spec",
  "regex",
  "reqwest 0.13.2",
  "semver",
@@ -1660,7 +1660,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f39af103bdff83a5db6852bded23317cc36aaa0134a9469f9ca1993743110740"
 dependencies = [
  "component-qa",
- "qa-spec 0.5.0",
+ "qa-spec",
  "serde",
  "serde_json",
  "tempfile",
@@ -3181,22 +3181,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn",
-]
-
-[[package]]
-name = "qa-spec"
-version = "0.4.14"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8ac9b6da8cd0a630c37a7c35dad38a5f319bbb4c4dff3310d935bd0745add60b"
-dependencies = [
- "globset",
- "handlebars",
- "regex",
- "schemars",
- "serde",
- "serde_cbor",
- "serde_json",
- "thiserror 2.0.18",
 ]
 
 [[package]]
