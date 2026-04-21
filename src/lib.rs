@@ -338,15 +338,13 @@ fn compile_routing(raw: &Value, nodes: &HashSet<String>, node_id: &str) -> Resul
     // Attempt to build a Branch when multiple status routes are present.
     if routes.len() >= 2 {
         use std::collections::BTreeMap;
-        let has_condition = raw
-            .as_array()
-            .is_some_and(|routes| {
-                routes.iter().any(|route| {
-                    route
-                        .as_object()
-                        .is_some_and(|route| route.contains_key("condition"))
-                })
-            });
+        let has_condition = raw.as_array().is_some_and(|routes| {
+            routes.iter().any(|route| {
+                route
+                    .as_object()
+                    .is_some_and(|route| route.contains_key("condition"))
+            })
+        });
         if has_condition {
             return Ok(Routing::Custom(raw.clone()));
         }
@@ -493,11 +491,6 @@ nodes:
         .expect_err("invalid shorthand should fail during load");
         assert!(matches!(err, crate::error::FlowError::Routing { .. }));
     }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
 
     #[test]
     fn compile_preserves_single_conditional_route_as_custom() {

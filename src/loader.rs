@@ -387,12 +387,14 @@ fn parse_routes(
                 out: Some(true),
                 status: None,
                 reply: None,
+                condition: None,
             }]),
             "reply" => Ok(vec![RouteDoc {
                 to: None,
                 out: None,
                 status: None,
                 reply: Some(true),
+                condition: None,
             }]),
             other => Err(FlowError::Routing {
                 node_id: node_id.to_string(),
@@ -421,6 +423,9 @@ struct RouteDoc {
     #[allow(dead_code)]
     #[serde(default)]
     pub reply: Option<bool>,
+    #[allow(dead_code)]
+    #[serde(default)]
+    pub condition: Option<String>,
 }
 
 fn validate_json(

@@ -1,45 +1,22 @@
-# Flow Scaffold Wizard Provider
+# Wizard Docs
 
-`greentic-flow` exposes a deterministic scaffold provider under `src/wizard/` for delegated wizard orchestration.
+The preferred authoring path in `greentic-flow` is the pack-level wizard:
 
-## Contract
-- `spec(mode=scaffold|new, ctx) -> QaSpec`
-- `apply(mode, ctx, answers, options) -> WizardPlan`
-- `execute_plan(plan)` is separate from `apply` to keep replay deterministic.
+```bash
+greentic-flow wizard <pack>
+greentic-flow wizard <pack> --answers <plan.json>
+greentic-flow wizard --schema
+```
 
-## CLI adapter in this repo
-- `greentic-flow wizard new ...` is wired as the adapter entrypoint.
-- Adapter flow: CLI args -> provider answers -> `apply(mode=new)` -> execute plan.
-- File writing still uses existing CLI overwrite/backup behavior.
+Use the dedicated guide for the full workflow:
 
-## Stable question IDs
-- `flow.name`
-- `flow.title` (optional)
-- `flow.description` (optional)
-- `flow.path`
-- `flow.entrypoint`
-- `flow.kind`
-- `flow.nodes.scaffold`
-- `flow.nodes.variant`
+- Wizard authoring guide: [`docs/wizard/authoring.md`](authoring.md)
 
-## Modes
-- `scaffold`
-- `new`
+That guide covers:
 
-Both modes are currently aliases over the same scaffold template logic for MVP.
+- the human workflow for creating and editing flows in a pack
+- the preferred automation path using `wizard --schema` and `wizard --answers`
+- how coding agents should fetch per-component answer schemas with `component-schema`
+- how to author `add-step` / `update-step` actions correctly, including `operation`, `routing`, and flow-level mappings
 
-## Plan steps
-- `EnsureDir`
-- `WriteFile`
-- `ValidateFlow` (in-process loader/compile/lint)
-- `RunCommand` (fallback shape; execution intentionally not enabled in-process)
-
-## Validation behavior
-- Validation is opt-in via `ApplyOptions { validate: true }`.
-- Default is `validate = false` for faster scaffolding.
-
-## Starter graph variants
-- `start-end`
-- `start-log-end`
-
-If `flow.nodes.scaffold = false`, the generated flow has no starter nodes.
+Low-level commands such as `add-step`, `update-step`, and `bind-component` still exist, but they are escape hatches. For new flow authoring and automation, prefer the wizard plan flow.

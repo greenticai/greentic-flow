@@ -55,7 +55,7 @@ url = "2"
 wasmtime = { version = "43", features = ["component-model"] }
 wasmtime-wasi = "43"
 wasmtime-environ = "43"
-qa-spec = "0.4"
+qa-spec = "0.5"
 sys-locale = "0.3"
 unic-langid = "0.9"
 include_dir = "0.7"
