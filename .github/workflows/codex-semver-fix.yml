@@ -4,7 +4,7 @@ name: Codex Semver Fix
 
 on:
   schedule:
-    - cron: "21 6 * * *"
+    - cron: "26 3 * * *"
   workflow_dispatch:
     inputs:
       branch:
