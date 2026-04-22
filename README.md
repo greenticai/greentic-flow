@@ -4,6 +4,8 @@ Human-friendly YGTc v2 flow authoring: create flows, add component steps, keep r
 
 Canonical docs in this repository track the v0.6 model. For historical compatibility notes, use `docs/vision/legacy.md`.
 
+Coding agents and automation should not treat this README as the full authoring contract. Use [`docs/wizard/authoring.md`](docs/wizard/authoring.md) and prefer `greentic-flow wizard --schema`, `greentic-flow component-schema`, and `greentic-flow wizard <pack> --answers <plan.json>`.
+
 ## Why flows?
 - **Readable YAML**: node key = node name, one operation key inside, routing shorthand (`out|reply|[...]`).
 - **Component-free authoring**: flows stay human; component sources live in a sidecar resolve file.
@@ -48,61 +50,34 @@ nodes:
     routing: out
 ```
 
-## Add a component step (scaffold + build with greentic-component)
+## Preferred Authoring Path
 
-First scaffold the component with `greentic-component new --name hello-world --non-interactive` (run it in your desired components directory; it creates `hello-world/` with a manifest), then build it:
+For day-to-day authoring, prefer the pack-level wizard instead of editing `*.ygtc` by hand.
 
-```bash
-greentic-component new --name hello-world --non-interactive 
-greentic-component build --manifest hello-world/component.manifest.json
-```
-
-This produces `hello-world/target/wasm32-wasip2/release/hello_world.wasm` and dev_flows with defaults. Then add it to a flow:
+Interactive use:
 
 ```bash
-greentic-flow add-step --flow hello.ygtc \
-  --node-id hello-world \
-  --operation handle_message \
-  --payload '{"input":"Hello from hello-world!"}' \
-  --routing-out \
-  --local-wasm components/hello-world/target/wasm32-wasip2/release/hello_world.wasm
+greentic-flow wizard /path/to/pack
 ```
 
-This inserts a `hello-world` node (ordering preserved) and writes a sidecar `docs/examples/hello_with_component.ygtc.resolve.json` that binds the node to your local wasm (add `--pin` to hash it). The resulting flow looks like:
-
-Local wasm bindings are stored in the sidecar as `file://<relative/path>` from the flow directory. Relative `--local-wasm` inputs are resolved from your current working directory first.
-
-```yaml
-id: hello-component
-type: messaging
-schema_version: 2
-start: hello-world
-nodes:
-  hello-world:
-    handle_message:
-      input:
-        input: "Hello from hello-world!"
-    routing: out
-```
-
-## Use public components (remote + pin)
+Replay a saved plan without prompts:
 
 ```bash
-greentic-flow add-step --flow flows/main.ygtc \
-  --node-id templates \
-  --operation run --payload '{}' \
-  --routing-out \
-  --component oci://ghcr.io/greenticai/components/templates:0.1.2 \
-  --pin
+greentic-flow wizard /path/to/pack --answers plan.json
 ```
 
-The sidecar records the remote reference and resolved digest (`--pin`). Perfect for CI where you want reproducible pulls.
+The wizard works best when your project is organized as a pack root:
 
-## Update or delete steps safely
-- `greentic-flow update-step --flow flows/main.ygtc --step hello --answers '{"input":"hi again"}' --routing-reply`
-  - Re-materializes using the sidecar binding, prefills current payload, merges your answers, and rewrites routing to `reply`.
-- `greentic-flow delete-step --flow flows/main.ygtc --step mid --strategy splice`
-  - Removes `mid` and splices predecessors to the deleted node’s targets; removes the sidecar entry too.
+```text
+/path/to/pack/
+  pack.yaml
+  flows/
+    main.ygtc
+```
+
+If you are building components locally, place their wasm files under `components/` in the pack or use pinned public component references. The wizard keeps the flow, sidecar, and pack metadata aligned.
+
+If you want the full schema-driven workflow for automation, coding agents, or CI replay, use the dedicated guide: [`docs/wizard/authoring.md`](docs/wizard/authoring.md).
 
 ## Wizard and Capability Boundaries
 - `greentic-flow` orchestrates canonical setup via `describe()` + `invoke("setup.apply_answers")` and flow/sidecar updates.
@@ -121,6 +96,7 @@ Uses the embedded `schemas/ygtc.flow.schema.json` by default; add `--registry <a
 
 ## Deep dives
 - Docs index: [`docs/README.md`](docs/README.md)
+- Preferred wizard authoring guide: [`docs/wizard/authoring.md`](docs/wizard/authoring.md)
 - CLI details and routing flags: [`docs/cli.md`](docs/cli.md)
 - Add-step design and routing rules: [`docs/add_step_design.md`](docs/add_step_design.md)
 - Deployment flows: [`docs/deployment-flows.md`](docs/deployment-flows.md)
@@ -150,4 +126,3 @@ Or run everything: `LOCAL_CHECK_ONLINE=1 ci/local_check.sh`
 - Every push to `master` compares the previous commit; if a crate version changed, a tag `<crate-name>-v<semver>` is created and pushed automatically.
 - The publish workflow runs on the tagged commit and attempts to publish all changed crates to crates.io using `katyo/publish-crates@v2`.
 - Publishing is idempotent: if the version already exists on crates.io, the workflow succeeds without error.
-

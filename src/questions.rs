@@ -265,22 +265,16 @@ fn consume_escape_sequence<R: Read>(
     }
 
     match seq.as_slice() {
-        [b'D'] => {
-            if *cursor > 0 {
-                *cursor -= 1;
-            }
+        [b'D'] if *cursor > 0 => {
+            *cursor -= 1;
         }
-        [b'C'] => {
-            if *cursor < bytes.len() {
-                *cursor += 1;
-            }
+        [b'C'] if *cursor < bytes.len() => {
+            *cursor += 1;
         }
         [b'H'] | [b'1', b'~'] | [b'7', b'~'] => *cursor = 0,
         [b'F'] | [b'4', b'~'] | [b'8', b'~'] => *cursor = bytes.len(),
-        [b'3', b'~'] => {
-            if *cursor < bytes.len() {
-                bytes.remove(*cursor);
-            }
+        [b'3', b'~'] if *cursor < bytes.len() => {
+            bytes.remove(*cursor);
         }
         _ => {}
     }

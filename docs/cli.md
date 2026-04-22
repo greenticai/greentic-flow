@@ -24,6 +24,42 @@ greentic-flow --help
 
 ## Commands
 
+### wizard
+Preferred pack-level authoring entrypoint.
+
+Interactive use:
+
+```
+greentic-flow wizard /path/to/pack
+```
+
+Generic action-plan schema:
+
+```
+greentic-flow wizard --schema
+```
+
+Apply a declarative plan non-interactively:
+
+```
+greentic-flow wizard /path/to/pack --answers plan.json
+```
+
+Print a strict schema for an existing plan:
+
+```
+greentic-flow wizard /path/to/pack --schema --answers plan.json
+```
+
+Notes:
+
+- `wizard` operates on a pack root, not a loose flow file.
+- `--schema` without a pack prints the generic wizard plan schema.
+- `--schema --answers <existing-plan>` with a pack prints a schema constrained to that plan.
+- For automation and coding agents, this is the preferred path.
+- Fetch per-component answer contracts with `greentic-flow component-schema <component> --mode <mode>` before filling `answers` for `add-step` or `update-step`.
+- See `docs/wizard/authoring.md` for the recommended end-to-end workflow.
+
 ### new
 Create a minimal v2 flow file.
 
@@ -33,13 +69,6 @@ greentic-flow new --flow flows/main.ygtc --id main --type messaging \
 ```
 
 Writes an empty `nodes: {}` skeleton. Refuses to overwrite unless `--force`.
-
-Wizard adapter:
-```
-greentic-flow wizard new --flow flows/main.ygtc --id main --type messaging \
-  [--schema-version 2] [--name "Title"] [--description "text"] [--force]
-```
-`wizard new` routes through the flow scaffold provider (`spec/apply -> plan`) and then executes the plan.
 
 ### update
 Non-destructive metadata edits (name/description/tags/id/type/schema_version).
@@ -52,6 +81,11 @@ Preserves nodes/entrypoints. Changing `--type` is allowed only on empty flows (n
 
 ### add-step
 Developer guide: insert a component-backed node and keep the sidecar in sync. Always writes v2 YAML; sidecar tracks where to fetch/locate the component (local wasm or remote ref).
+
+Preferred workflow note:
+
+- for automation and multi-step authoring, prefer `greentic-flow wizard --schema`, `greentic-flow component-schema`, and `greentic-flow wizard <pack> --answers <plan.json>`
+- use direct `add-step` when you intentionally want a low-level one-off mutation
 
 Start simple (local wasm, manual payload):
 ```
@@ -83,6 +117,11 @@ greentic-flow add-step --flow flows/main.ygtc --mode config \
 - Runs the component’s `dev_flows.default` config to emit a StepSpec with defaults and placeholder routing.
 - If the selected dev_flow defines questions, add-step prompts interactively unless you pass `--answers`/`--answers-file`.
 - `--answers`/`--answers-file` accept JSON objects keyed by question id; non-interactive mode fails if required answers are missing.
+- When using `greentic-flow wizard --answers` with declarative step-plan actions:
+  - flow-level mapping fields must be top-level action fields: `in_map`, `out_map`, and `err_map`
+  - `routing` must be `"out"`, `"reply"`, or a route array
+  - `operation` should be supplied whenever the component contract is ambiguous or has no safe default
+  - these fields are separate from component `answers`
 - Still requires a source: add `--local-wasm ...` for local builds or `--component ... [--pin]` for remotes.
 - If you don’t pass `--config-flow` or `--manifest`, config mode reads `component.manifest.json` next to the local wasm or inside the cached remote component.
 
@@ -127,6 +166,10 @@ Safety/inspection:
 ### update-step
 Re-materialize an existing node using its sidecar binding. Prefills with current payload; merges answers; preserves routing unless overridden.
 
+Preferred workflow note:
+
+- for declarative automation, prefer `wizard --answers` over calling `update-step` directly
+
 ```
 greentic-flow update-step --flow flows/main.ygtc --step hello \
   --answers '{"input":"hi again"}' --routing-reply
@@ -137,6 +180,10 @@ Requires a sidecar entry for the node; errors if missing (suggests `bind-compone
 Config mode reads `dev_flows.default` from the component manifest alongside the bound wasm (or cached remote component) to re-materialize the payload before applying overrides.
 - If the selected dev_flow defines questions, update-step prompts interactively for missing required values unless `--non-interactive` is set. `show_if` rules are honored.
 - Wizard mode names are `default|setup|update|remove`.
+- For declarative `greentic-flow wizard --answers` plans:
+  - use top-level `in_map`, `out_map`, and `err_map` rather than placing them inside component `answers`
+  - use top-level `routing` for route changes
+  - use top-level `operation` when you need to change or pin the operation explicitly
 
 ### delete-step
 Remove a node and optionally splice predecessors to its routing.
@@ -185,6 +232,25 @@ greentic-flow answers --component <oci|path> --operation <op> --name <prefix> [-
 - Falls back to `dev_flows.default` if the requested flow is missing.
 - Writes `<prefix>.schema.json` and `<prefix>.example.json`; example validates against schema.
 
+For wizard-plan automation, prefer `component-schema` below. `answers` remains useful when you want an operation-oriented schema/example pair on disk.
+
+### component-schema
+Emit the exact wizard answer schema for a component and wizard mode.
+
+```
+greentic-flow component-schema <component> --mode default|setup|update|remove [--out schema.json]
+```
+
+Use this before filling the `answers` object in a wizard plan action.
+
+Notes:
+
+- `component-schema` is the preferred schema surface for wizard-plan `add-step` and `update-step` actions.
+- `answers` in a wizard plan must match the schema returned for the chosen component and mode.
+- `routing`, `operation`, `in_map`, `out_map`, and `err_map` are wizard-plan fields, not component answers.
+- For runnable operations that need both persisted config and invocation input, prefer a two-phase wizard plan:
+  first `add-step` with setup/config answers, then `update-step` with `operation`, `in_map`, and `routing`.
+
 ### doctor-answers
 Validate answers JSON against a schema.
 
@@ -209,4 +275,3 @@ greentic-flow doctor-answers --schema answers.schema.json --answers answers.json
 ## CI usage
 - Run `ci/local_check.sh` (or `cargo fmt && cargo clippy --all-targets -- -D warnings && cargo test`) in CI.
 - Use `greentic-flow doctor` in pipelines to enforce schema validity on committed flows.
-

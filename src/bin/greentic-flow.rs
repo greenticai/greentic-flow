@@ -38,8 +38,8 @@ use greentic_flow::{
     answers,
     component_catalog::ManifestCatalog,
     component_schema::{
-        is_effectively_empty_schema, jsonschema_options_with_base, resolve_input_schema,
-        schema_guidance, validate_payload_against_schema,
+        SchemaResolution, is_effectively_empty_schema, jsonschema_options_with_base,
+        resolve_input_schema, schema_guidance, validate_payload_against_schema,
     },
     config_flow::run_config_flow,
     contracts,
@@ -214,7 +214,11 @@ fn canonical_descriptor_hash(
             }
         }
     }
-    format!("{:x}", hasher.finalize())
+    let digest = hasher.finalize();
+    digest
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>()
 }
 
 fn derive_contract_meta_from_descriptor(
@@ -234,7 +238,11 @@ fn derive_contract_meta_from_descriptor(
     schema_hasher.update(op.name.as_bytes());
     hash_io_schema(&mut schema_hasher, &op.input);
     hash_io_schema(&mut schema_hasher, &op.output);
-    let schema_hash = format!("{:x}", schema_hasher.finalize());
+    let schema_digest = schema_hasher.finalize();
+    let schema_hash = schema_digest
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
 
     let (config_schema, config_schema_cbor) = match &op.input.schema {
         greentic_interfaces_host::component_v0_6::exports::greentic::component::node::SchemaSource::InlineCbor(bytes) => {
@@ -256,6 +264,71 @@ fn derive_contract_meta_from_descriptor(
         config_schema_cbor,
     };
     Ok((config_schema, meta))
+}
+
+fn validate_wizard_generated_payload_against_contract(
+    component_id: &str,
+    operation_id: &str,
+    wizard_mode: wizard_ops::WizardMode,
+    describe_cbor: &[u8],
+    descriptor: Option<
+        &greentic_interfaces_host::component_v0_6::exports::greentic::component::node::ComponentDescriptor,
+    >,
+    payload: &serde_json::Value,
+) -> Result<()> {
+    let schema = if !describe_cbor.is_empty() {
+        let describe = contracts::decode_component_describe(describe_cbor)?;
+        Some(
+            contracts::find_operation(&describe, operation_id)?
+                .input
+                .schema
+                .clone(),
+        )
+    } else if let Some(descriptor) = descriptor {
+        let op = descriptor
+            .ops
+            .iter()
+            .find(|op| op.name == operation_id)
+            .ok_or_else(|| anyhow!("operation '{}' not found in descriptor.ops", operation_id))?;
+        match &op.input.schema {
+            greentic_interfaces_host::component_v0_6::exports::greentic::component::node::SchemaSource::InlineCbor(
+                bytes,
+            ) => Some(
+                greentic_types::cbor::canonical::from_cbor::<
+                    greentic_types::schemas::common::schema_ir::SchemaIr,
+                >(bytes)
+                .map_err(|err| anyhow!("decode descriptor input schema cbor: {err}"))?,
+            ),
+            _ => None,
+        }
+    } else {
+        None
+    };
+
+    let Some(schema) = schema else {
+        return Ok(());
+    };
+
+    let payload_cbor = greentic_types::cbor::canonical::to_canonical_cbor_allow_floats(payload)
+        .map_err(|err| anyhow!("encode wizard payload for contract validation: {err}"))?;
+    let payload_value: ciborium::value::Value = ciborium::de::from_reader(payload_cbor.as_slice())
+        .map_err(|err| anyhow!("decode wizard payload cbor: {err}"))?;
+    let errors = validate_value_against_schema(&schema, &payload_value)
+        .into_iter()
+        .filter(|diag| matches!(diag.severity, Severity::Error))
+        .map(|diag| diag.message)
+        .collect::<Vec<_>>();
+    if errors.is_empty() {
+        return Ok(());
+    }
+
+    anyhow::bail!(
+        "wizard mode '{}' cannot create a runnable '{}' step for component '{}' because the operation requires invocation input that the wizard did not provide: {}",
+        wizard_mode.as_str(),
+        operation_id,
+        component_id,
+        errors.join("; ")
+    )
 }
 
 fn bytes_to_hex(bytes: &[u8]) -> String {
@@ -681,8 +754,18 @@ struct WizardPlanAction {
     component: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     mode: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    operation: Option<String>,
     #[serde(default, skip_serializing_if = "serde_json::Map::is_empty")]
     answers: serde_json::Map<String, serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    routing: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    in_map: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    out_map: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    err_map: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     locales: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -793,6 +876,9 @@ struct AnswersArgs {
     /// Output directory (defaults to current directory).
     #[arg(long = "out-dir")]
     out_dir: Option<PathBuf>,
+    /// Resolver override (fixture://...) for tests/CI.
+    #[arg(long = "resolver", hide = true)]
+    resolver: Option<String>,
 }
 
 #[derive(Args, Debug)]
@@ -893,6 +979,18 @@ struct UpdateStepArgs {
     /// Allow contract drift when describe_hash changes.
     #[arg(long = "allow-contract-change")]
     allow_contract_change: bool,
+    /// Optional flow authoring input mapping applied after QA.
+    #[arg(skip)]
+    in_map: Option<serde_json::Value>,
+    /// Optional flow authoring success-output mapping applied after QA.
+    #[arg(skip)]
+    out_map: Option<serde_json::Value>,
+    /// Optional flow authoring error-output mapping applied after QA.
+    #[arg(skip)]
+    err_map: Option<serde_json::Value>,
+    /// Optional inline routing JSON for internal wizard-plan execution.
+    #[arg(skip)]
+    routing_inline_json: Option<serde_json::Value>,
 }
 
 #[derive(Args, Debug, Clone)]
@@ -982,6 +1080,17 @@ struct DeleteStepArgs {
 enum AnswersMode {
     Default,
     Config,
+}
+
+impl AnswersMode {
+    fn to_wizard_mode(self) -> Result<WizardModeArg> {
+        match self {
+            AnswersMode::Default => Ok(WizardModeArg::Default),
+            AnswersMode::Config => anyhow::bail!(
+                "answers --mode config requires a component manifest; wasm/component refs only support wizard-derived default answers"
+            ),
+        }
+    }
 }
 
 fn main() -> Result<()> {
@@ -1832,10 +1941,15 @@ fn generic_add_step_action_schema() -> serde_json::Value {
             "step_id": { "type": "string" },
             "component": { "type": "string" },
             "mode": { "enum": ["default", "setup", "update", "remove"] },
+            "operation": { "type": "string" },
             "answers": {
                 "type": "object",
                 "description": "Use `greentic-flow component-schema <component> --mode <mode>` to fetch the exact schema for this object."
-            }
+            },
+            "routing": wizard_plan_routing_schema(),
+            "in_map": wizard_plan_mapping_schema("Optional flow authoring input mapping. This is separate from component `answers` and may reference flow payload/state/config such as `config.<key>`."),
+            "out_map": wizard_plan_mapping_schema("Optional flow authoring success-output mapping. This is separate from component `answers`."),
+            "err_map": wizard_plan_mapping_schema("Optional flow authoring error-output mapping. This is separate from component `answers`.")
         }
     })
 }
@@ -1851,11 +1965,32 @@ fn generic_update_step_action_schema() -> serde_json::Value {
             "step_id": { "type": "string" },
             "component": { "type": "string" },
             "mode": { "enum": ["default", "setup", "update", "remove"] },
+            "operation": { "type": "string" },
             "answers": {
                 "type": "object",
                 "description": "Use `greentic-flow component-schema <component> --mode <mode>` to fetch the exact schema for this object."
-            }
+            },
+            "routing": wizard_plan_routing_schema(),
+            "in_map": wizard_plan_mapping_schema("Optional flow authoring input mapping. This is separate from component `answers` and may reference flow payload/state/config such as `config.<key>`."),
+            "out_map": wizard_plan_mapping_schema("Optional flow authoring success-output mapping. This is separate from component `answers`."),
+            "err_map": wizard_plan_mapping_schema("Optional flow authoring error-output mapping. This is separate from component `answers`.")
         }
+    })
+}
+
+fn wizard_plan_mapping_schema(description: &str) -> serde_json::Value {
+    json!({
+        "description": description
+    })
+}
+
+fn wizard_plan_routing_schema() -> serde_json::Value {
+    json!({
+        "description": "Optional routing intent. Use \"out\", \"reply\", or an explicit route array such as [{\"to\":\"next\"}].",
+        "anyOf": [
+            { "enum": ["out", "reply"] },
+            { "type": "array" }
+        ]
     })
 }
 
@@ -1940,6 +2075,9 @@ fn schema_for_wizard_plan_action(
                 required.push(json!("mode"));
                 properties.insert("mode".to_string(), json!({ "const": mode }));
             }
+            if let Some(operation) = action.operation.as_ref() {
+                properties.insert("operation".to_string(), json!({ "const": operation }));
+            }
             if action.component.is_some() || !action.answers.is_empty() {
                 required.push(json!("answers"));
                 let answers_schema = if let (Some(flow), Some(component), Some(mode)) = (
@@ -1947,7 +2085,8 @@ fn schema_for_wizard_plan_action(
                     action.component.as_deref(),
                     action.mode.as_deref(),
                 ) {
-                    let flow_path = pack_dir.join(flow);
+                    let flow_path =
+                        resolve_wizard_plan_flow_path(pack_dir, flow, "wizard action flow path")?;
                     let questions = questions_for_component_schema_at_flow(
                         component,
                         wizard_mode_arg_from_record(mode)?,
@@ -1960,6 +2099,31 @@ fn schema_for_wizard_plan_action(
                     json!({"type":"object","additionalProperties":false,"properties":{}})
                 };
                 properties.insert("answers".to_string(), answers_schema);
+            }
+            if matches!(action.action.as_str(), "add-step" | "update-step") {
+                if let Some(routing) = action.routing.as_ref() {
+                    properties.insert("routing".to_string(), json!({ "const": routing }));
+                } else {
+                    properties.insert("routing".to_string(), wizard_plan_routing_schema());
+                }
+                properties.insert(
+                    "in_map".to_string(),
+                    wizard_plan_mapping_schema(
+                        "Optional flow authoring input mapping. Separate from component `answers`.",
+                    ),
+                );
+                properties.insert(
+                    "out_map".to_string(),
+                    wizard_plan_mapping_schema(
+                        "Optional flow authoring success-output mapping. Separate from component `answers`.",
+                    ),
+                );
+                properties.insert(
+                    "err_map".to_string(),
+                    wizard_plan_mapping_schema(
+                        "Optional flow authoring error-output mapping. Separate from component `answers`.",
+                    ),
+                );
             }
         }
         other => anyhow::bail!("unsupported wizard action '{other}'"),
@@ -1990,6 +2154,56 @@ fn execute_wizard_plan_action(pack_dir: &Path, action: &WizardPlanAction) -> Res
         "delete-step" => execute_delete_step_plan_action(pack_dir, action),
         other => anyhow::bail!("unsupported wizard action '{other}'"),
     }
+}
+
+fn apply_wizard_plan_add_step_routing(
+    args: &mut AddStepArgs,
+    routing: Option<&serde_json::Value>,
+) -> Result<()> {
+    let Some(routing) = routing else {
+        return Ok(());
+    };
+    args.routing_out = false;
+    args.routing_reply = false;
+    args.routing_next = None;
+    args.routing_multi_to = None;
+    args.routing_json = None;
+    args.routing_inline_json = None;
+    match routing {
+        serde_json::Value::String(value) if value == "out" => args.routing_out = true,
+        serde_json::Value::String(value) if value == "reply" => args.routing_reply = true,
+        serde_json::Value::Array(_) => args.routing_inline_json = Some(routing.clone()),
+        other => anyhow::bail!(
+            "wizard plan routing must be \"out\", \"reply\", or a route array, got {}",
+            other
+        ),
+    }
+    Ok(())
+}
+
+fn apply_wizard_plan_update_step_routing(
+    args: &mut UpdateStepArgs,
+    routing: Option<&serde_json::Value>,
+) -> Result<()> {
+    let Some(routing) = routing else {
+        return Ok(());
+    };
+    args.routing_out = false;
+    args.routing_reply = false;
+    args.routing_next = None;
+    args.routing_multi_to = None;
+    args.routing_json = None;
+    args.routing_inline_json = None;
+    match routing {
+        serde_json::Value::String(value) if value == "out" => args.routing_out = true,
+        serde_json::Value::String(value) if value == "reply" => args.routing_reply = true,
+        serde_json::Value::Array(_) => args.routing_inline_json = Some(routing.clone()),
+        other => anyhow::bail!(
+            "wizard plan routing must be \"out\", \"reply\", or a route array, got {}",
+            other
+        ),
+    }
+    Ok(())
 }
 
 fn sync_staged_pack_back(session: &mut WizardSession) -> Result<()> {
@@ -2171,10 +2385,8 @@ fn read_input_line<R: Read + ?Sized>(reader: &mut R) -> Result<String> {
                     continue;
                 }
                 match seq[0] {
-                    b'C' => {
-                        if cursor < buf.len() {
-                            cursor += 1;
-                        }
+                    b'C' if cursor < buf.len() => {
+                        cursor += 1;
                     }
                     b'D' => {
                         cursor = cursor.saturating_sub(1);
@@ -2246,14 +2458,15 @@ fn read_input_line<R: Read + ?Sized>(reader: &mut R) -> Result<String> {
                                 cursor = buf.len();
                                 continue;
                             }
-                            b'3' => {
-                                if reader.read(&mut seq)? > 0 && seq[0] == b'~' {
+                            b'3' => match reader.read(&mut seq)? {
+                                n if n > 0 && seq[0] == b'~' => {
                                     if cursor < buf.len() {
                                         buf.remove(cursor);
                                     }
                                     continue;
                                 }
-                            }
+                                _ => {}
+                            },
                             _ => {}
                         }
                     }
@@ -3026,6 +3239,22 @@ fn ensure_safe_pack_relative_path(path: &Path, label: &str) -> Result<()> {
     Ok(())
 }
 
+fn resolve_wizard_plan_flow_path(pack_dir: &Path, flow: &str, label: &str) -> Result<PathBuf> {
+    let flow_rel = PathBuf::from(flow);
+    ensure_safe_pack_relative_path(&flow_rel, label)?;
+    let mut components = flow_rel.components();
+    let Some(std::path::Component::Normal(first)) = components.next() else {
+        anyhow::bail!("{label} must start with flows/");
+    };
+    if first != OsStr::new("flows") {
+        anyhow::bail!("{label} must start with flows/");
+    }
+    if flow_rel.extension() != Some(OsStr::new("ygtc")) {
+        anyhow::bail!("{label} must point to a .ygtc flow file");
+    }
+    Ok(pack_dir.join(flow_rel))
+}
+
 fn validate_asset_extension(file_name: &str, file_types: &[String]) -> Result<()> {
     if file_types.is_empty() {
         return Ok(());
@@ -3717,12 +3946,17 @@ fn wizard_component_record_value_for_node(flow_path: &Path, step_id: &str) -> Re
         .ok_or_else(|| anyhow!("missing sidecar entry for node '{step_id}'"))?;
     let value = match &source.source {
         ComponentSourceRefV1::Local { path, .. } => {
-            let absolute = local_path_from_sidecar(path, flow_path);
+            let absolute = fs::canonicalize(local_path_from_sidecar(path, flow_path))
+                .unwrap_or_else(|_| local_path_from_sidecar(path, flow_path));
             let pack_dir = infer_pack_root_from_flow_path(flow_path)?;
-            diff_paths(&absolute, &pack_dir)
-                .unwrap_or(absolute)
-                .to_string_lossy()
-                .replace('\\', "/")
+            if let Ok(rel) = absolute.strip_prefix(&pack_dir) {
+                rel.to_string_lossy().replace('\\', "/")
+            } else {
+                diff_paths(&absolute, &pack_dir)
+                    .unwrap_or(absolute)
+                    .to_string_lossy()
+                    .replace('\\', "/")
+            }
         }
         ComponentSourceRefV1::Oci { r#ref, .. }
         | ComponentSourceRefV1::Repo { r#ref, .. }
@@ -4164,12 +4398,13 @@ fn execute_add_flow_plan_action(pack_dir: &Path, action: &WizardPlanAction) -> R
         .flow
         .as_deref()
         .ok_or_else(|| anyhow!("add-flow action missing flow"))?;
+    let flow_path = resolve_wizard_plan_flow_path(pack_dir, flow_rel, "add-flow action flow path")?;
     let flow_id = action
         .flow_id
         .clone()
         .ok_or_else(|| anyhow!("add-flow action missing flow_id"))?;
     write_new_flow_file(NewFlowFileSpec {
-        flow_path: pack_dir.join(flow_rel),
+        flow_path,
         flow_id: action
             .flow_id
             .clone()
@@ -4333,11 +4568,9 @@ fn execute_edit_flow_summary_plan_action(pack_dir: &Path, action: &WizardPlanAct
         .flow
         .as_deref()
         .ok_or_else(|| anyhow!("edit-flow-summary action missing flow"))?;
-    apply_flow_summary_update(
-        &pack_dir.join(flow),
-        action.name.clone(),
-        action.description.clone(),
-    )?;
+    let flow_path =
+        resolve_wizard_plan_flow_path(pack_dir, flow, "edit-flow-summary action flow path")?;
+    apply_flow_summary_update(&flow_path, action.name.clone(), action.description.clone())?;
     upsert_pack_flow_entry(pack_dir, flow, None)
 }
 
@@ -4788,6 +5021,10 @@ fn wizard_add_step_with_io<R: Read, W: Write>(
             resolver,
             pin: source.pin,
             allow_contract_change: false,
+            in_map: None,
+            out_map: None,
+            err_map: None,
+            routing_inline_json: None,
         },
         SchemaMode::Strict,
         OutputFormat::Human,
@@ -4867,6 +5104,10 @@ fn wizard_add_step_action_with_io<R: Read, W: Write>(
             resolver,
             pin: source.pin,
             allow_contract_change: false,
+            in_map: None,
+            out_map: None,
+            err_map: None,
+            routing_inline_json: None,
         },
         SchemaMode::Strict,
         OutputFormat::Human,
@@ -5034,6 +5275,10 @@ fn wizard_update_step_with_io<R: Read, W: Write>(
             dry_run: false,
             write: false,
             allow_contract_change: false,
+            in_map: None,
+            out_map: None,
+            err_map: None,
+            routing_inline_json: None,
         },
         SchemaMode::Strict,
         OutputFormat::Human,
@@ -5151,6 +5396,10 @@ fn wizard_update_step_action_with_io<R: Read, W: Write>(
             dry_run: false,
             write: false,
             allow_contract_change: false,
+            in_map: None,
+            out_map: None,
+            err_map: None,
+            routing_inline_json: None,
         },
         SchemaMode::Strict,
         OutputFormat::Human,
@@ -5514,7 +5763,7 @@ fn execute_delete_flow_plan_action(pack_dir: &Path, action: &WizardPlanAction) -
         .flow
         .as_deref()
         .ok_or_else(|| anyhow!("delete-flow action missing flow"))?;
-    let flow_path = pack_dir.join(flow);
+    let flow_path = resolve_wizard_plan_flow_path(pack_dir, flow, "delete-flow action flow path")?;
     if flow_path.exists() {
         fs::remove_file(&flow_path)
             .with_context(|| format!("delete flow {}", flow_path.display()))?;
@@ -5852,6 +6101,192 @@ fn copy_local_wasm_into_pack_components(pack_dir: &Path, selected_path: &Path) -
             .with_context(|| format!("copy wasm {} -> {}", src_abs.display(), dest.display()))?;
     }
     Ok(dest)
+}
+
+fn canonicalize_cli_local_wasm_path(path: &Path) -> Result<PathBuf> {
+    let raw = path.to_string_lossy();
+    let trimmed = raw.strip_prefix("file://").unwrap_or(&raw);
+    let candidate = PathBuf::from(trimmed);
+    let candidate = if candidate.is_absolute() {
+        candidate
+    } else {
+        std::env::current_dir()
+            .context("resolve current directory")?
+            .join(candidate)
+    };
+    fs::canonicalize(&candidate)
+        .with_context(|| format!("resolve local wasm path {}", candidate.display()))
+}
+
+fn maybe_vendor_local_wasm_for_pack(
+    flow_path: &Path,
+    local_wasm: Option<&PathBuf>,
+) -> Result<(Option<PathBuf>, Option<PathBuf>)> {
+    let Some(local_wasm) = local_wasm else {
+        return Ok((None, None));
+    };
+    let pack_dir = match infer_pack_root_from_flow_path(flow_path) {
+        Ok(pack_dir) => pack_dir,
+        Err(_) => return Ok((Some(local_wasm.clone()), None)),
+    };
+    if !pack_dir.join("pack.yaml").exists() {
+        return Ok((Some(local_wasm.clone()), None));
+    }
+
+    let source_abs = canonicalize_cli_local_wasm_path(local_wasm)?;
+    let components_dir = pack_dir.join("components");
+    let selected_abs = if source_abs.starts_with(&components_dir) {
+        source_abs
+    } else {
+        copy_local_wasm_into_pack_components(&pack_dir, &source_abs)?
+    };
+    let rel = diff_paths(&selected_abs, &pack_dir).ok_or_else(|| {
+        anyhow!(
+            "failed to compute a relative component path from {} to {}",
+            pack_dir.display(),
+            selected_abs.display()
+        )
+    })?;
+    ensure_safe_pack_relative_path(&rel, "component path")?;
+    Ok((Some(selected_abs), Some(rel)))
+}
+
+fn upsert_pack_component_entry(
+    pack_dir: &Path,
+    component_id: &str,
+    wasm_rel: &Path,
+    flow_kind: &str,
+) -> Result<()> {
+    fn ystr(value: &str) -> serde_yaml_bw::Value {
+        serde_yaml_bw::Value::String(value.to_string(), None)
+    }
+    fn yseq() -> serde_yaml_bw::Value {
+        serde_yaml_bw::Value::Sequence(serde_yaml_bw::Sequence::new())
+    }
+    fn yseq_with(values: impl IntoIterator<Item = serde_yaml_bw::Value>) -> serde_yaml_bw::Value {
+        let mut seq = serde_yaml_bw::Sequence::new();
+        seq.extend(values);
+        serde_yaml_bw::Value::Sequence(seq)
+    }
+    fn ymap() -> serde_yaml_bw::Value {
+        serde_yaml_bw::Value::Mapping(serde_yaml_bw::Mapping::new())
+    }
+
+    let pack_yaml_path = pack_dir.join("pack.yaml");
+    if !pack_yaml_path.exists() {
+        return Ok(());
+    }
+    let raw = fs::read_to_string(&pack_yaml_path)
+        .with_context(|| format!("read {}", pack_yaml_path.display()))?;
+    let mut root: serde_yaml_bw::Value = serde_yaml_bw::from_str(&raw)
+        .with_context(|| format!("parse {}", pack_yaml_path.display()))?;
+    let Some(root_map) = root.as_mapping_mut() else {
+        return Ok(());
+    };
+
+    let components_key = ystr("components");
+    let components_value = root_map.entry(components_key).or_insert_with(yseq);
+    if !components_value.is_sequence() {
+        *components_value = yseq();
+    }
+    let components = components_value
+        .as_sequence_mut()
+        .ok_or_else(|| anyhow!("pack components field must be a sequence"))?;
+
+    let wasm_rel_str = wasm_rel
+        .to_string_lossy()
+        .replace(std::path::MAIN_SEPARATOR, "/");
+    let id_value = ystr(component_id);
+    let wasm_value = ystr(&wasm_rel_str);
+    let world = "greentic:component/stub".to_string();
+    let supports_label = match flow_kind {
+        "messaging" => "messaging",
+        "events" | "event" => "event",
+        "component-config" | "component_config" | "componentconfig" => "component-config",
+        "job" => "job",
+        "http" => "http",
+        other => other,
+    };
+
+    let id_key = ystr("id");
+    let wasm_key = ystr("wasm");
+    let version_key = ystr("version");
+    let world_key = ystr("world");
+    let supports_key = ystr("supports");
+    let profiles_key = ystr("profiles");
+    let capabilities_key = ystr("capabilities");
+    let operations_key = ystr("operations");
+
+    let mut found = false;
+    for entry in components.iter_mut() {
+        let Some(component_map) = entry.as_mapping_mut() else {
+            continue;
+        };
+        let matches = component_map.get(&id_key) == Some(&id_value)
+            || component_map.get(&wasm_key) == Some(&wasm_value);
+        if !matches {
+            continue;
+        }
+        component_map.insert(id_key.clone(), id_value.clone());
+        component_map.insert(version_key.clone(), ystr("0.1.0"));
+        component_map.insert(world_key.clone(), ystr(&world));
+        component_map.insert(supports_key.clone(), yseq_with([ystr(supports_label)]));
+        component_map.insert(
+            profiles_key.clone(),
+            serde_yaml_bw::Value::Mapping(serde_yaml_bw::Mapping::from_iter([
+                (ystr("default"), ystr("default")),
+                (ystr("supported"), yseq_with([ystr("default")])),
+            ])),
+        );
+        component_map.insert(
+            capabilities_key.clone(),
+            serde_yaml_bw::Value::Mapping(serde_yaml_bw::Mapping::from_iter([
+                (ystr("wasi"), ymap()),
+                (ystr("host"), ymap()),
+            ])),
+        );
+        component_map.insert(wasm_key.clone(), wasm_value.clone());
+        component_map
+            .entry(operations_key.clone())
+            .or_insert_with(yseq);
+        found = true;
+        break;
+    }
+
+    if !found {
+        let component_map = serde_yaml_bw::Mapping::from_iter([
+            (id_key, id_value),
+            (version_key, ystr("0.1.0")),
+            (world_key, ystr(&world)),
+            (supports_key, yseq_with([ystr(supports_label)])),
+            (
+                profiles_key,
+                serde_yaml_bw::Value::Mapping(serde_yaml_bw::Mapping::from_iter([
+                    (ystr("default"), ystr("default")),
+                    (ystr("supported"), yseq_with([ystr("default")])),
+                ])),
+            ),
+            (
+                capabilities_key,
+                serde_yaml_bw::Value::Mapping(serde_yaml_bw::Mapping::from_iter([
+                    (ystr("wasi"), ymap()),
+                    (ystr("host"), ymap()),
+                ])),
+            ),
+            (wasm_key, wasm_value),
+            (operations_key, yseq()),
+        ]);
+        components.push(serde_yaml_bw::Value::Mapping(component_map));
+    }
+
+    let mut rendered = serde_yaml_bw::to_string(&root)
+        .with_context(|| format!("serialize {}", pack_yaml_path.display()))?;
+    if !rendered.ends_with('\n') {
+        rendered.push('\n');
+    }
+    fs::write(&pack_yaml_path, rendered)
+        .with_context(|| format!("write {}", pack_yaml_path.display()))?;
+    Ok(())
 }
 
 fn collect_pack_component_wasms(pack_dir: &Path) -> Result<Vec<PathBuf>> {
@@ -6505,68 +6940,25 @@ fn resolve_source_to_wasm(flow_path: &Path, source: &ComponentSourceRefV1) -> Re
 }
 
 fn handle_answers(args: AnswersArgs, schema_mode: SchemaMode) -> Result<()> {
-    let manifest_path = resolve_manifest_path_for_component(&args.component)?;
-    let manifest = load_manifest_json(&manifest_path)?;
-    let requested_flow = match args.mode {
-        AnswersMode::Default => args.operation.as_str(),
-        AnswersMode::Config => "custom",
-    };
-    let (questions, used_flow) = questions_for_operation(&manifest, requested_flow)?;
-    if used_flow.as_deref() != Some(requested_flow)
-        && let Some(flow) = &used_flow
-    {
-        eprintln!(
-            "warning: dev_flows.{} not found; using dev_flows.{} for questions",
-            requested_flow, flow
-        );
+    let contract = resolve_answers_contract(
+        &args.component,
+        args.mode,
+        &args.operation,
+        args.resolver.as_ref(),
+    )?;
+    if let Some(resolution) = contract.schema_resolution.as_ref() {
+        require_schema(
+            schema_mode,
+            &resolution.component_id,
+            &resolution.operation,
+            &resolution.manifest_path,
+            "operations[].input_schema",
+            resolution.schema.as_ref(),
+        )?;
     }
 
-    let flow_name = used_flow.as_deref().unwrap_or(requested_flow);
-    let source_desc = format!("dev_flows.{flow_name}");
-    let component_id = manifest
-        .get("id")
-        .and_then(|v| v.as_str())
-        .unwrap_or("unknown")
-        .to_string();
-    let schema = schema_for_questions(&questions);
-    let use_manifest_schema = questions.is_empty() || is_effectively_empty_schema(&schema);
-    let schema_resolution = if use_manifest_schema {
-        Some(resolve_input_schema(&manifest_path, &args.operation)?)
-    } else {
-        None
-    };
-    let (schema_source_desc, schema_operation, schema_manifest_path, schema_component_id) =
-        if let Some(resolution) = &schema_resolution {
-            (
-                "operations[].input_schema".to_string(),
-                resolution.operation.clone(),
-                resolution.manifest_path.as_path(),
-                resolution.component_id.as_str(),
-            )
-        } else {
-            (
-                source_desc,
-                flow_name.to_string(),
-                manifest_path.as_path(),
-                component_id.as_str(),
-            )
-        };
-    let schema_ref = if let Some(resolution) = &schema_resolution {
-        resolution.schema.as_ref()
-    } else {
-        Some(&schema)
-    };
-    require_schema(
-        schema_mode,
-        schema_component_id,
-        &schema_operation,
-        schema_manifest_path,
-        &schema_source_desc,
-        schema_ref,
-    )?;
-
-    let example = example_for_questions(&questions);
-    validate_example_against_schema(&schema, &example)?;
+    let example = example_for_questions(&contract.questions);
+    validate_example_against_schema(&contract.schema, &example)?;
 
     let out_dir = match args.out_dir {
         Some(dir) => dir,
@@ -6576,7 +6968,7 @@ fn handle_answers(args: AnswersArgs, schema_mode: SchemaMode) -> Result<()> {
         .with_context(|| format!("create output dir {}", out_dir.display()))?;
     let schema_path = out_dir.join(format!("{}.schema.json", args.name));
     let example_path = out_dir.join(format!("{}.example.json", args.name));
-    write_json_file(&schema_path, &schema)?;
+    write_json_file(&schema_path, &contract.schema)?;
     write_json_file(&example_path, &example)?;
     println!(
         "Wrote answers schema to {} and example to {}",
@@ -6669,23 +7061,133 @@ fn split_component_schema_source(component: &str) -> (Option<PathBuf>, Option<St
     }
 }
 
-fn resolve_plan_local_wasm(pack_dir: &Path, path: PathBuf) -> PathBuf {
-    let candidate = if path.is_absolute() {
-        path
-    } else {
-        pack_dir.join(&path)
-    };
+struct AnswersContractResolution {
+    questions: Vec<Question>,
+    schema: serde_json::Value,
+    schema_resolution: Option<SchemaResolution>,
+}
+
+fn resolve_answers_contract(
+    component: &str,
+    mode: AnswersMode,
+    operation: &str,
+    resolver: Option<&String>,
+) -> Result<AnswersContractResolution> {
+    match classify_answers_component(component)? {
+        AnswersComponentInput::Manifest(manifest_path) => {
+            let manifest = load_manifest_json(&manifest_path)?;
+            let requested_flow = match mode {
+                AnswersMode::Default => operation,
+                AnswersMode::Config => "custom",
+            };
+            let (questions, used_flow) = questions_for_operation(&manifest, requested_flow)?;
+            if used_flow.as_deref() != Some(requested_flow)
+                && let Some(flow) = &used_flow
+            {
+                eprintln!(
+                    "warning: dev_flows.{} not found; using dev_flows.{} for questions",
+                    requested_flow, flow
+                );
+            }
+
+            let schema = schema_for_questions(&questions);
+            let use_manifest_schema = questions.is_empty() || is_effectively_empty_schema(&schema);
+            let schema_resolution = if use_manifest_schema {
+                Some(resolve_input_schema(&manifest_path, operation)?)
+            } else {
+                None
+            };
+            Ok(AnswersContractResolution {
+                questions,
+                schema,
+                schema_resolution,
+            })
+        }
+        AnswersComponentInput::Wizard(component) => {
+            let questions = questions_for_component_schema_at_flow(
+                &component,
+                mode.to_wizard_mode()?,
+                resolver.map(|value| value.as_str()),
+                None,
+                &answers_helper_flow_path("answers")?,
+            )?;
+            let schema = schema_for_questions(&questions);
+            Ok(AnswersContractResolution {
+                questions,
+                schema,
+                schema_resolution: None,
+            })
+        }
+    }
+}
+
+enum AnswersComponentInput {
+    Manifest(PathBuf),
+    Wizard(String),
+}
+
+fn classify_answers_component(component: &str) -> Result<AnswersComponentInput> {
+    if component.starts_with("oci://")
+        || component.starts_with("repo://")
+        || component.starts_with("store://")
+    {
+        return Ok(AnswersComponentInput::Wizard(component.to_string()));
+    }
+
+    let raw = component.strip_prefix("file://").unwrap_or(component);
+    let path = PathBuf::from(raw);
+    if !path.exists() {
+        anyhow::bail!("component path {} not found", path.display());
+    }
+    if path.is_dir() {
+        let manifest_path = path.join("component.manifest.json");
+        if !manifest_path.exists() {
+            anyhow::bail!(
+                "component.manifest.json not found at {}",
+                manifest_path.display()
+            );
+        }
+        return Ok(AnswersComponentInput::Manifest(manifest_path));
+    }
+    if path.is_file() {
+        if file_is_probably_wasm(&path)? {
+            return Ok(AnswersComponentInput::Wizard(component.to_string()));
+        }
+        return Ok(AnswersComponentInput::Manifest(path));
+    }
+    anyhow::bail!(
+        "component path {} is not a file or directory",
+        path.display()
+    )
+}
+
+fn file_is_probably_wasm(path: &Path) -> Result<bool> {
+    let bytes = fs::read(path).with_context(|| format!("read {}", path.display()))?;
+    Ok(bytes.starts_with(b"\0asm"))
+}
+
+fn answers_helper_flow_path(prefix: &str) -> Result<PathBuf> {
+    let cwd = std::env::current_dir().context("resolve current directory")?;
+    Ok(cwd.join(format!(".greentic-flow.{prefix}.ygtc")))
+}
+
+fn resolve_plan_local_wasm(pack_dir: &Path, path: PathBuf) -> Result<PathBuf> {
+    if path.is_absolute() {
+        anyhow::bail!("wizard action local wasm path must be relative to the pack root");
+    }
+    ensure_safe_pack_relative_path(&path, "wizard action local wasm path")?;
+    let candidate = pack_dir.join(&path);
     if candidate.exists() {
-        return candidate;
+        return Ok(candidate);
     }
     let Some(parent) = candidate.parent() else {
-        return candidate;
+        return Ok(candidate);
     };
     let Some(stem) = candidate.file_stem().and_then(|value| value.to_str()) else {
-        return candidate;
+        return Ok(candidate);
     };
     let Some((base, _)) = stem.split_once("-sha256:") else {
-        return candidate;
+        return Ok(candidate);
     };
     let ext = candidate
         .extension()
@@ -6693,9 +7195,9 @@ fn resolve_plan_local_wasm(pack_dir: &Path, path: PathBuf) -> PathBuf {
         .unwrap_or("wasm");
     let fallback = parent.join(format!("{base}.{ext}"));
     if fallback.exists() {
-        fallback
+        Ok(fallback)
     } else {
-        candidate
+        Ok(candidate)
     }
 }
 
@@ -6712,55 +7214,59 @@ fn execute_add_step_plan_action(pack_dir: &Path, action: &WizardPlanAction) -> R
         .mode
         .as_deref()
         .ok_or_else(|| anyhow!("add-step action missing mode"))?;
+    let flow_path = resolve_wizard_plan_flow_path(pack_dir, flow, "add-step action flow path")?;
     let (local_wasm, component_ref) = split_component_schema_source(component);
-    let local_wasm = local_wasm.map(|path| resolve_plan_local_wasm(pack_dir, path));
-    handle_add_step(
-        AddStepArgs {
-            component_id: None,
-            flow_path: pack_dir.join(flow),
-            after: action.after.clone(),
-            mode: AddStepMode::Default,
-            pack_alias: None,
-            wizard_mode: Some(wizard_mode_arg_from_record(mode)?),
-            operation: None,
-            payload: "{}".to_string(),
-            routing_out: true,
-            routing_reply: false,
-            routing_next: None,
-            routing_multi_to: None,
-            routing_json: None,
-            routing_to_anchor: false,
-            config_flow: None,
-            answers: Some(serde_json::Value::Object(action.answers.clone()).to_string()),
-            answers_file: None,
-            answers_dir: None,
-            overwrite_answers: true,
-            reask: false,
-            locale: None,
-            interactive: false,
-            allow_cycles: false,
-            dry_run: false,
-            write: false,
-            validate_only: false,
-            manifests: Vec::new(),
-            node_id: action.step_id.clone(),
-            component_ref,
-            local_wasm,
-            distributor_url: None,
-            auth_token: None,
-            tenant: None,
-            env: None,
-            pack: None,
-            component_version: None,
-            abi_version: None,
-            resolver: env::var("GREENTIC_FLOW_WIZARD_RESOLVER").ok(),
-            pin: false,
-            allow_contract_change: false,
-        },
-        SchemaMode::Strict,
-        OutputFormat::Human,
-        false,
-    )?;
+    let local_wasm = local_wasm
+        .map(|path| resolve_plan_local_wasm(pack_dir, path))
+        .transpose()?;
+    let mut args = AddStepArgs {
+        component_id: None,
+        flow_path,
+        after: action.after.clone(),
+        mode: AddStepMode::Default,
+        pack_alias: None,
+        wizard_mode: Some(wizard_mode_arg_from_record(mode)?),
+        operation: action.operation.clone(),
+        payload: "{}".to_string(),
+        routing_out: true,
+        routing_reply: false,
+        routing_next: None,
+        routing_multi_to: None,
+        routing_json: None,
+        routing_to_anchor: false,
+        config_flow: None,
+        answers: Some(serde_json::Value::Object(action.answers.clone()).to_string()),
+        answers_file: None,
+        answers_dir: None,
+        overwrite_answers: true,
+        reask: false,
+        locale: None,
+        interactive: false,
+        allow_cycles: false,
+        dry_run: false,
+        write: false,
+        validate_only: false,
+        manifests: Vec::new(),
+        node_id: action.step_id.clone(),
+        component_ref,
+        local_wasm,
+        distributor_url: None,
+        auth_token: None,
+        tenant: None,
+        env: None,
+        pack: None,
+        component_version: None,
+        abi_version: None,
+        resolver: env::var("GREENTIC_FLOW_WIZARD_RESOLVER").ok(),
+        pin: false,
+        allow_contract_change: false,
+        in_map: action.in_map.clone(),
+        out_map: action.out_map.clone(),
+        err_map: action.err_map.clone(),
+        routing_inline_json: None,
+    };
+    apply_wizard_plan_add_step_routing(&mut args, action.routing.as_ref())?;
+    handle_add_step(args, SchemaMode::Strict, OutputFormat::Human, false)?;
     sync_pack_assets_for_flow(pack_dir, flow)
 }
 
@@ -6781,47 +7287,51 @@ fn execute_update_step_plan_action(pack_dir: &Path, action: &WizardPlanAction) -
         .step_id
         .clone()
         .ok_or_else(|| anyhow!("update-step action missing step_id"))?;
+    let flow_path = resolve_wizard_plan_flow_path(pack_dir, flow, "update-step action flow path")?;
     let (local_wasm, component_ref) = split_component_schema_source(component);
-    let local_wasm = local_wasm.map(|path| resolve_plan_local_wasm(pack_dir, path));
-    handle_update_step(
-        UpdateStepArgs {
-            component_id: None,
-            flow_path: pack_dir.join(flow),
-            step: Some(step_id),
-            mode: "default".to_string(),
-            wizard_mode: Some(wizard_mode_arg_from_record(mode)?),
-            operation: None,
-            routing_out: false,
-            routing_reply: false,
-            routing_next: None,
-            routing_multi_to: None,
-            routing_json: None,
-            answers: Some(serde_json::Value::Object(action.answers.clone()).to_string()),
-            answers_file: None,
-            answers_dir: None,
-            overwrite_answers: true,
-            reask: false,
-            locale: None,
-            non_interactive: true,
-            interactive: false,
-            component: component_ref,
-            local_wasm,
-            distributor_url: None,
-            auth_token: None,
-            tenant: None,
-            env: None,
-            pack: None,
-            component_version: None,
-            abi_version: None,
-            resolver: env::var("GREENTIC_FLOW_WIZARD_RESOLVER").ok(),
-            dry_run: false,
-            write: false,
-            allow_contract_change: false,
-        },
-        SchemaMode::Strict,
-        OutputFormat::Human,
-        false,
-    )?;
+    let local_wasm = local_wasm
+        .map(|path| resolve_plan_local_wasm(pack_dir, path))
+        .transpose()?;
+    let mut args = UpdateStepArgs {
+        component_id: None,
+        flow_path,
+        step: Some(step_id),
+        mode: "default".to_string(),
+        wizard_mode: Some(wizard_mode_arg_from_record(mode)?),
+        operation: action.operation.clone(),
+        routing_out: false,
+        routing_reply: false,
+        routing_next: None,
+        routing_multi_to: None,
+        routing_json: None,
+        answers: Some(serde_json::Value::Object(action.answers.clone()).to_string()),
+        answers_file: None,
+        answers_dir: None,
+        overwrite_answers: true,
+        reask: false,
+        locale: None,
+        non_interactive: true,
+        interactive: false,
+        component: component_ref,
+        local_wasm,
+        distributor_url: None,
+        auth_token: None,
+        tenant: None,
+        env: None,
+        pack: None,
+        component_version: None,
+        abi_version: None,
+        resolver: env::var("GREENTIC_FLOW_WIZARD_RESOLVER").ok(),
+        dry_run: false,
+        write: false,
+        allow_contract_change: false,
+        in_map: action.in_map.clone(),
+        out_map: action.out_map.clone(),
+        err_map: action.err_map.clone(),
+        routing_inline_json: None,
+    };
+    apply_wizard_plan_update_step_routing(&mut args, action.routing.as_ref())?;
+    handle_update_step(args, SchemaMode::Strict, OutputFormat::Human, false)?;
     sync_pack_assets_for_flow(pack_dir, flow)
 }
 
@@ -6835,10 +7345,14 @@ fn execute_delete_step_plan_action(pack_dir: &Path, action: &WizardPlanAction) -
         .as_deref()
         .map(split_component_schema_source)
         .unwrap_or((None, None));
+    let local_wasm = local_wasm
+        .map(|path| resolve_plan_local_wasm(pack_dir, path))
+        .transpose()?;
+    let flow_path = resolve_wizard_plan_flow_path(pack_dir, flow, "delete-step action flow path")?;
     handle_delete_step(
         DeleteStepArgs {
             component_id: None,
-            flow_path: pack_dir.join(flow),
+            flow_path,
             step: action.step_id.clone(),
             wizard_mode: action
                 .mode
@@ -8619,6 +9133,90 @@ nodes: {}
     }
 
     #[test]
+    fn wizard_step_schema_includes_optional_mapping_aliases() {
+        let add = super::generic_add_step_action_schema();
+        let update = super::generic_update_step_action_schema();
+        for schema in [&add, &update] {
+            let props = schema
+                .get("properties")
+                .and_then(Value::as_object)
+                .expect("schema properties");
+            assert!(props.contains_key("operation"));
+            assert!(props.contains_key("routing"));
+            assert!(props.contains_key("in_map"));
+            assert!(props.contains_key("out_map"));
+            assert!(props.contains_key("err_map"));
+            assert!(
+                props
+                    .get("in_map")
+                    .and_then(Value::as_object)
+                    .is_some_and(|map| !map.contains_key("type"))
+            );
+        }
+    }
+
+    #[test]
+    fn wizard_plan_roundtrip_preserves_mapping_aliases() {
+        let dir = tempdir().expect("temp dir");
+        let path = dir.path().join("answers/replay.json");
+        let plan = super::WizardPlan {
+            schema_id: "greentic-flow.wizard.plan".to_string(),
+            schema_version: "2.0.0".to_string(),
+            actions: vec![super::WizardPlanAction {
+                action: "add-step".to_string(),
+                flow: Some("flows/global/messaging/main.ygtc".to_string()),
+                component: Some("components/widget.wasm".to_string()),
+                mode: Some("default".to_string()),
+                operation: Some("run".to_string()),
+                answers: serde_json::Map::from_iter([("answer".to_string(), json!("value"))]),
+                routing: Some(json!([{ "to": "next" }])),
+                in_map: Some(json!({ "source": "$.input" })),
+                out_map: Some(json!({ "target": "$.output" })),
+                err_map: Some(json!({ "target": "$.error" })),
+                ..super::WizardPlanAction::default()
+            }],
+        };
+
+        super::write_wizard_plan_file(&path, &plan).expect("write wizard plan");
+        let loaded = super::load_wizard_plan(&path).expect("load wizard plan");
+
+        assert_eq!(loaded, plan);
+    }
+
+    #[test]
+    fn wizard_plan_flow_path_rejects_traversal() {
+        let dir = tempdir().expect("temp dir");
+        let err =
+            super::resolve_wizard_plan_flow_path(dir.path(), "../outside.ygtc", "test flow path")
+                .expect_err("expected traversal to be rejected");
+        assert!(err.to_string().contains("must not escape the pack root"));
+    }
+
+    #[test]
+    fn wizard_plan_flow_path_requires_flows_prefix_and_ygtc_extension() {
+        let dir = tempdir().expect("temp dir");
+        let err = super::resolve_wizard_plan_flow_path(
+            dir.path(),
+            "assets/not-a-flow.json",
+            "test flow path",
+        )
+        .expect_err("expected non-flow path to be rejected");
+        let msg = err.to_string();
+        assert!(msg.contains("must start with flows/") || msg.contains(".ygtc"));
+    }
+
+    #[test]
+    fn resolve_plan_local_wasm_rejects_absolute_paths() {
+        let dir = tempdir().expect("temp dir");
+        let err = super::resolve_plan_local_wasm(dir.path(), PathBuf::from("/tmp/evil.wasm"))
+            .expect_err("expected absolute path to be rejected");
+        assert!(
+            err.to_string()
+                .contains("must be relative to the pack root")
+        );
+    }
+
+    #[test]
     fn wizard_answers_flow_actions_keep_pack_yaml_in_sync() {
         let dir = tempdir().expect("temp dir");
         let pack_dir = dir.path();
@@ -9221,6 +9819,10 @@ nodes:
                 resolver: Some(resolver),
                 pin: false,
                 allow_contract_change: false,
+                in_map: None,
+                out_map: None,
+                err_map: None,
+                routing_inline_json: None,
             },
             SchemaMode::Strict,
             OutputFormat::Human,
@@ -9303,6 +9905,10 @@ nodes:
                 resolver: Some(resolver),
                 pin: false,
                 allow_contract_change: false,
+                in_map: None,
+                out_map: None,
+                err_map: None,
+                routing_inline_json: None,
             },
             SchemaMode::Strict,
             OutputFormat::Human,
@@ -9385,6 +9991,10 @@ nodes:
                 resolver: Some(resolver),
                 pin: false,
                 allow_contract_change: false,
+                in_map: None,
+                out_map: None,
+                err_map: None,
+                routing_inline_json: None,
             },
             SchemaMode::Strict,
             OutputFormat::Human,
@@ -9477,6 +10087,10 @@ nodes:
                 resolver: Some(fixture_registry_resolver()),
                 pin: false,
                 allow_contract_change: false,
+                in_map: None,
+                out_map: None,
+                err_map: None,
+                routing_inline_json: None,
             },
             SchemaMode::Strict,
             OutputFormat::Human,
@@ -9845,6 +10459,10 @@ nodes:
                 resolver: Some(format!("fixture://{}", fixture_root.display())),
                 pin: false,
                 allow_contract_change: false,
+                in_map: None,
+                out_map: None,
+                err_map: None,
+                routing_inline_json: None,
             },
             SchemaMode::Strict,
             OutputFormat::Human,
@@ -10110,6 +10728,10 @@ nodes:
             resolver: Some(resolver),
             pin: false,
             allow_contract_change: false,
+            in_map: None,
+            out_map: None,
+            err_map: None,
+            routing_inline_json: None,
         };
         handle_add_step(args, SchemaMode::Strict, OutputFormat::Human, false).expect("add step");
 
@@ -10324,6 +10946,10 @@ nodes:
                 resolver: Some(resolver.clone()),
                 pin: false,
                 allow_contract_change: false,
+                in_map: None,
+                out_map: None,
+                err_map: None,
+                routing_inline_json: None,
             },
             SchemaMode::Strict,
             OutputFormat::Human,
@@ -10365,6 +10991,10 @@ nodes:
                 dry_run: false,
                 write: false,
                 allow_contract_change: false,
+                in_map: None,
+                out_map: None,
+                err_map: None,
+                routing_inline_json: None,
             },
             SchemaMode::Strict,
             OutputFormat::Human,
@@ -10514,6 +11144,10 @@ nodes:
                 resolver: Some(resolver.clone()),
                 pin: false,
                 allow_contract_change: false,
+                in_map: None,
+                out_map: None,
+                err_map: None,
+                routing_inline_json: None,
             },
             SchemaMode::Strict,
             OutputFormat::Human,
@@ -10574,6 +11208,10 @@ nodes:
                 dry_run: false,
                 write: false,
                 allow_contract_change: false,
+                in_map: None,
+                out_map: None,
+                err_map: None,
+                routing_inline_json: None,
             },
             SchemaMode::Strict,
             OutputFormat::Human,
@@ -10646,6 +11284,10 @@ nodes:
                 resolver: Some(resolver),
                 pin: false,
                 allow_contract_change: false,
+                in_map: None,
+                out_map: None,
+                err_map: None,
+                routing_inline_json: None,
             },
             SchemaMode::Strict,
             OutputFormat::Human,
@@ -10745,40 +11387,6 @@ fn load_manifest_json(path: &Path) -> Result<serde_json::Value> {
     let text =
         fs::read_to_string(path).with_context(|| format!("read manifest {}", path.display()))?;
     serde_json::from_str(&text).context("parse manifest JSON")
-}
-
-fn resolve_manifest_path_for_component(component: &str) -> Result<PathBuf> {
-    if component.starts_with("oci://")
-        || component.starts_with("repo://")
-        || component.starts_with("store://")
-    {
-        validate_component_ref(component)?;
-        let source = classify_remote_source(component, None);
-        return resolve_component_manifest_path(&source, Path::new("."));
-    }
-
-    let raw = component.strip_prefix("file://").unwrap_or(component);
-    let path = PathBuf::from(raw);
-    if !path.exists() {
-        anyhow::bail!("component path {} not found", path.display());
-    }
-    if path.is_dir() {
-        let manifest_path = path.join("component.manifest.json");
-        if !manifest_path.exists() {
-            anyhow::bail!(
-                "component.manifest.json not found at {}",
-                manifest_path.display()
-            );
-        }
-        return Ok(manifest_path);
-    }
-    if path.is_file() {
-        return Ok(path);
-    }
-    anyhow::bail!(
-        "component path {} is not a file or directory",
-        path.display()
-    )
 }
 
 fn questions_for_operation(
@@ -11029,6 +11637,12 @@ fn ensure_wizard_config_not_error(
     );
 }
 
+fn is_denied_host_ref_error(err: &anyhow::Error) -> bool {
+    let lower = err.to_string().to_ascii_lowercase();
+    lower.contains("denied host ref")
+        || (lower.contains("requested capability") && lower.contains("host:"))
+}
+
 fn wizard_answers_json_path(
     base_dir: &Path,
     flow_id: &str,
@@ -11063,6 +11677,10 @@ fn warn_unknown_keys(answers: &QuestionAnswers, questions: &[Question]) {
         }
     }
     if !unknown.is_empty() {
+        let unknown = unknown
+            .iter()
+            .map(|key| sanitize_for_log(key))
+            .collect::<Vec<_>>();
         eprintln!("warning: unknown answer keys: {}", unknown.join(", "));
     }
 }
@@ -11241,6 +11859,18 @@ struct AddStepArgs {
     /// Allow contract drift when describe_hash changes.
     #[arg(long = "allow-contract-change")]
     allow_contract_change: bool,
+    /// Optional flow authoring input mapping applied after QA.
+    #[arg(skip)]
+    in_map: Option<serde_json::Value>,
+    /// Optional flow authoring success-output mapping applied after QA.
+    #[arg(skip)]
+    out_map: Option<serde_json::Value>,
+    /// Optional flow authoring error-output mapping applied after QA.
+    #[arg(skip)]
+    err_map: Option<serde_json::Value>,
+    /// Optional inline routing JSON for internal wizard-plan execution.
+    #[arg(skip)]
+    routing_inline_json: Option<serde_json::Value>,
 }
 
 #[derive(Args, Debug)]
@@ -11266,6 +11896,9 @@ struct BindComponentArgs {
 }
 
 fn build_routing_value(args: &AddStepArgs) -> Result<(Option<serde_json::Value>, bool)> {
+    if let Some(value) = &args.routing_inline_json {
+        return Ok((Some(value.clone()), false));
+    }
     if let Some(path) = &args.routing_json {
         let text = fs::read_to_string(path)
             .with_context(|| format!("read routing json {}", path.display()))?;
@@ -11302,6 +11935,11 @@ fn build_routing_value(args: &AddStepArgs) -> Result<(Option<serde_json::Value>,
 fn build_update_routing(
     args: &UpdateStepArgs,
 ) -> Result<Option<Vec<greentic_flow::flow_ir::Route>>> {
+    if let Some(value) = &args.routing_inline_json {
+        let raw = serde_json::to_string(value).context("serialize inline routing JSON")?;
+        let routes = parse_routing_arg(&raw)?;
+        return Ok(Some(routes));
+    }
     if let Some(path) = &args.routing_json {
         let text = fs::read_to_string(path)
             .with_context(|| format!("read routing json {}", path.display()))?;
@@ -11400,6 +12038,23 @@ fn should_overwrite_wizard_answers(existing_flag: bool, interactive: bool) -> bo
     existing_flag || interactive
 }
 
+fn apply_mapping_aliases_to_node(
+    node: &mut greentic_flow::flow_ir::NodeIr,
+    in_map: Option<&serde_json::Value>,
+    out_map: Option<&serde_json::Value>,
+    err_map: Option<&serde_json::Value>,
+) {
+    if let Some(in_map) = in_map {
+        node.in_map = Some(in_map.clone());
+    }
+    if let Some(out_map) = out_map {
+        node.out_map = Some(out_map.clone());
+    }
+    if let Some(err_map) = err_map {
+        node.err_map = Some(err_map.clone());
+    }
+}
+
 fn handle_add_step_with_qa_io(
     args: AddStepArgs,
     schema_mode: SchemaMode,
@@ -11409,6 +12064,8 @@ fn handle_add_step_with_qa_io(
     mut captured_answers: Option<&mut serde_json::Map<String, serde_json::Value>>,
 ) -> Result<()> {
     let (routing_value, require_placeholder) = build_routing_value(&args)?;
+    let (local_wasm_for_flow, pack_component_rel) =
+        maybe_vendor_local_wasm_for_pack(&args.flow_path, args.local_wasm.as_ref())?;
     let component_identity = args
         .component_id
         .clone()
@@ -11432,7 +12089,7 @@ fn handle_add_step_with_qa_io(
         let resolved = resolve_wizard_component(
             &args.flow_path,
             wizard_mode,
-            args.local_wasm.as_ref(),
+            local_wasm_for_flow.as_ref(),
             args.component_ref.as_ref(),
             args.component_id.as_ref(),
             args.resolver.as_ref(),
@@ -11443,79 +12100,140 @@ fn handle_add_step_with_qa_io(
             args.pack.as_ref(),
             args.component_version.as_ref(),
         )?;
-        let spec = if let Some(fixture) = resolved.fixture.as_ref() {
-            wizard_ops::WizardSpecOutput {
+        let (mut catalog, locale) = default_i18n_catalog(args.locale.as_deref());
+        let mut answers = parse_answers_map(args.answers.as_deref(), args.answers_file.as_deref())?;
+
+        let mut wizard_fallback = false;
+        let mut abi = wizard_ops::WizardAbi::V6;
+        let mut contract_meta: Option<flow_meta::ComponentContractMeta> = None;
+        let mut config_json = serde_json::from_str::<serde_json::Value>(&args.payload)
+            .context("parse --payload as JSON")?;
+        let mut spec: Option<wizard_ops::WizardSpecOutput> = None;
+
+        if let Some(fixture) = resolved.fixture.as_ref() {
+            abi = fixture.abi;
+            spec = Some(wizard_ops::WizardSpecOutput {
                 abi: fixture.abi,
                 describe_cbor: fixture.describe_cbor.clone(),
                 descriptor: None,
                 qa_spec_cbor: fixture.qa_spec_cbor.clone(),
                 answers_schema_cbor: None,
-            }
+            });
         } else {
-            wizard_ops::fetch_wizard_spec(&resolved.wasm_bytes, wizard_mode)
-                .map_err(|err| wrap_wizard_error(err, &component_identity, "describe", None))?
-        };
-        let qa_spec = wizard_ops::decode_component_qa_spec(&spec.qa_spec_cbor, wizard_mode)?;
-        let (mut catalog, locale) = default_i18n_catalog(args.locale.as_deref());
-        merge_component_i18n_catalog(&mut catalog, &locale, &args.flow_path, &resolved.source);
+            match wizard_ops::fetch_wizard_spec(&resolved.wasm_bytes, wizard_mode) {
+                Ok(fetched_spec) => {
+                    abi = fetched_spec.abi;
+                    spec = Some(fetched_spec);
+                }
+                Err(err) => {
+                    if !is_denied_host_ref_error(&err) {
+                        return Err(wrap_wizard_error(
+                            err,
+                            &component_identity,
+                            "describe",
+                            None,
+                        ));
+                    }
+                    wizard_fallback = true;
+                    eprintln!(
+                        "warning: wizard describe for component '{}' requires host capabilities that are not granted in greentic-flow setup mode. Falling back to manifest-free add-step with --payload/--answers only.",
+                        component_identity
+                    );
+                    config_json = merge_payload(config_json, answers_to_value(&answers));
+                }
+            }
+        }
 
-        let mut answers = parse_answers_map(args.answers.as_deref(), args.answers_file.as_deref())?;
-        wizard_ops::merge_default_answers(&qa_spec, &mut answers);
-        if args.interactive && matches!(wizard_mode, wizard_ops::WizardMode::Default) {
-            seed_optional_answers_for_default_setup(&qa_spec, &mut answers);
-        }
-        if !qa_spec.questions.is_empty() {
-            qa_runner::warn_unknown_keys(&answers, &qa_spec, &catalog, &locale);
-            println!(
-                "{}",
-                wizard_header(&component_identity, wizard_mode.as_str())
-            );
-            answers = run_component_qa_with_qa_lib(
-                &qa_spec,
-                &catalog,
-                &locale,
-                answers,
+        if let Some(spec) = spec.as_ref() {
+            let qa_spec = wizard_ops::decode_component_qa_spec(&spec.qa_spec_cbor, wizard_mode)?;
+            merge_component_i18n_catalog(&mut catalog, &locale, &args.flow_path, &resolved.source);
+            wizard_ops::merge_default_answers(&qa_spec, &mut answers);
+            if args.interactive && matches!(wizard_mode, wizard_ops::WizardMode::Default) {
+                seed_optional_answers_for_default_setup(&qa_spec, &mut answers);
+            }
+            if !qa_spec.questions.is_empty() {
+                qa_runner::warn_unknown_keys(&answers, &qa_spec, &catalog, &locale);
+                println!(
+                    "{}",
+                    wizard_header(&component_identity, wizard_mode.as_str())
+                );
+                answers = run_component_qa_with_qa_lib(
+                    &qa_spec,
+                    &catalog,
+                    &locale,
+                    answers,
+                    args.interactive,
+                    qa_io.as_deref_mut(),
+                )?;
+            }
+            if let Some(captured_answers) = captured_answers.as_mut() {
+                captured_answers.clear();
+                captured_answers.extend(answers.clone());
+            }
+            materialize_remote_asset_answers(
+                &spec.qa_spec_cbor,
+                &mut answers,
+                &args.flow_path,
                 args.interactive,
-                qa_io.as_deref_mut(),
+                qa_io,
             )?;
-        }
-        if let Some(captured_answers) = captured_answers.as_mut() {
+
+            let answers_cbor = wizard_ops::answers_to_cbor(&answers)?;
+            let current_config = wizard_ops::empty_cbor_map();
+            let config_cbor = if let Some(fixture) = resolved.fixture.as_ref() {
+                fixture.apply_answers_cbor.clone()
+            } else {
+                wizard_ops::apply_wizard_answers(
+                    &resolved.wasm_bytes,
+                    spec.abi,
+                    wizard_mode,
+                    &current_config,
+                    &answers_cbor,
+                )
+                .map_err(|err| wrap_wizard_error(err, &component_identity, "apply-answers", None))?
+            };
+            config_json = wizard_ops::cbor_to_json(&config_cbor)?;
+            ensure_wizard_config_not_error(&component_identity, wizard_mode, &config_json)?;
+            contract_meta = spec
+                .descriptor
+                .as_ref()
+                .map(|descriptor| {
+                    derive_contract_meta_from_descriptor(
+                        descriptor,
+                        args.operation.as_deref().unwrap_or("run"),
+                    )
+                })
+                .transpose()?
+                .map(|(_, meta)| meta);
+        } else if let Some(captured_answers) = captured_answers.as_mut() {
             captured_answers.clear();
             captured_answers.extend(answers.clone());
         }
-        materialize_remote_asset_answers(
-            &spec.qa_spec_cbor,
-            &mut answers,
-            &args.flow_path,
-            args.interactive,
-            qa_io,
-        )?;
 
-        let answers_cbor = wizard_ops::answers_to_cbor(&answers)?;
-        let current_config = wizard_ops::empty_cbor_map();
-        let config_cbor = if let Some(fixture) = resolved.fixture.as_ref() {
-            fixture.apply_answers_cbor.clone()
-        } else {
-            wizard_ops::apply_wizard_answers(
-                &resolved.wasm_bytes,
-                spec.abi,
+        if !config_json.is_object() {
+            anyhow::bail!("wizard config payload must be a JSON object");
+        }
+
+        let operation = args.operation.clone().unwrap_or_else(|| "run".to_string());
+        if let Some(meta) = contract_meta.as_ref()
+            && meta.operation_id != operation
+        {
+            contract_meta = None;
+        }
+        if args.operation.is_some()
+            && let Some(spec) = spec.as_ref()
+        {
+            let generated_payload = json!({ "config": config_json.clone() });
+            validate_wizard_generated_payload_against_contract(
+                &component_identity,
+                &operation,
                 wizard_mode,
-                &current_config,
-                &answers_cbor,
-            )
-            .map_err(|err| wrap_wizard_error(err, &component_identity, "apply-answers", None))?
-        };
-        let operation_id = args.operation.clone().unwrap_or_else(|| "run".to_string());
-        let config_json = wizard_ops::cbor_to_json(&config_cbor)?;
-        ensure_wizard_config_not_error(&component_identity, wizard_mode, &config_json)?;
+                &spec.describe_cbor,
+                spec.descriptor.as_ref(),
+                &generated_payload,
+            )?;
+        }
 
-        let operation = operation_id;
-        let contract_meta = spec
-            .descriptor
-            .as_ref()
-            .map(|descriptor| derive_contract_meta_from_descriptor(descriptor, &operation))
-            .transpose()?
-            .map(|(_, meta)| meta);
         let routing_json = routing_value
             .clone()
             .unwrap_or(serde_json::Value::Array(Vec::new()));
@@ -11549,18 +12267,26 @@ fn handle_add_step_with_qa_io(
             .map_err(|diags| anyhow::anyhow!("planning failed: {:?}", diags))?;
         let inserted_id = plan.new_node.id.clone();
         let mut updated = apply_and_validate(&flow_ir, plan, &empty_catalog, args.allow_cycles)?;
+        if let Some(node) = updated.nodes.get_mut(&inserted_id) {
+            apply_mapping_aliases_to_node(
+                node,
+                args.in_map.as_ref(),
+                args.out_map.as_ref(),
+                args.err_map.as_ref(),
+            );
+        }
 
         let abi_version = args
             .abi_version
             .clone()
-            .unwrap_or_else(|| wizard_ops::abi_version_from_abi(spec.abi));
+            .unwrap_or_else(|| wizard_ops::abi_version_from_abi(abi));
         flow_meta::set_component_entry(
             &mut updated.meta,
             &inserted_id,
             &component_identity,
             &abi_version,
             resolved.digest.as_deref(),
-            &wizard_ops::describe_exports_for_meta(spec.abi),
+            &wizard_ops::describe_exports_for_meta(abi),
             contract_meta.as_ref(),
         );
         flow_meta::ensure_hints_empty(&mut updated.meta, &inserted_id);
@@ -11585,26 +12311,28 @@ fn handle_add_step_with_qa_io(
         }
 
         if !args.dry_run {
-            let mut sorted = std::collections::BTreeMap::new();
-            for (key, value) in &answers {
-                sorted.insert(key.clone(), value.clone());
+            if !wizard_fallback {
+                let mut sorted = std::collections::BTreeMap::new();
+                for (key, value) in &answers {
+                    sorted.insert(key.clone(), value.clone());
+                }
+                let base_dir = answers_base_dir(&args.flow_path, args.answers_dir.as_deref());
+                let _paths = answers::write_answers(
+                    &base_dir,
+                    &flow_ir.id,
+                    &inserted_id,
+                    wizard_mode.as_str(),
+                    &sorted,
+                    should_overwrite_wizard_answers(args.overwrite_answers, args.interactive),
+                )?;
+                wizard_state::update_wizard_state(
+                    &args.flow_path,
+                    &flow_ir.id,
+                    &inserted_id,
+                    wizard_mode.as_str(),
+                    &locale,
+                )?;
             }
-            let base_dir = answers_base_dir(&args.flow_path, args.answers_dir.as_deref());
-            let _paths = answers::write_answers(
-                &base_dir,
-                &flow_ir.id,
-                &inserted_id,
-                wizard_mode.as_str(),
-                &sorted,
-                should_overwrite_wizard_answers(args.overwrite_answers, args.interactive),
-            )?;
-            wizard_state::update_wizard_state(
-                &args.flow_path,
-                &flow_ir.id,
-                &inserted_id,
-                wizard_mode.as_str(),
-                &locale,
-            )?;
             write_flow_file(&args.flow_path, &output, true, backup)?;
             sidecar.nodes.insert(
                 inserted_id.clone(),
@@ -11614,6 +12342,16 @@ fn handle_add_step_with_qa_io(
                 },
             );
             write_sidecar(&sidecar_path, &sidecar)?;
+            if let Some(wasm_rel) = pack_component_rel.as_ref()
+                && let Ok(pack_dir) = infer_pack_root_from_flow_path(&args.flow_path)
+            {
+                upsert_pack_component_entry(
+                    &pack_dir,
+                    &component_identity,
+                    wasm_rel,
+                    &flow_ir.kind,
+                )?;
+            }
             if let Err(err) =
                 write_flow_resolve_summary_for_node(&args.flow_path, &inserted_id, &sidecar)
                     .with_context(|| {
@@ -11652,7 +12390,7 @@ fn handle_add_step_with_qa_io(
     }
     let (sidecar_path, mut sidecar) = ensure_sidecar(&args.flow_path)?;
     let (component_source, resolve_mode) = resolve_component_source_inputs(
-        args.local_wasm.as_ref(),
+        local_wasm_for_flow.as_ref(),
         args.component_ref.as_ref(),
         args.pin,
         &args.flow_path,
@@ -11785,7 +12523,15 @@ fn handle_add_step_with_qa_io(
     let plan = plan_add_step(&flow_ir, spec, &catalog)
         .map_err(|diags| anyhow::anyhow!("planning failed: {:?}", diags))?;
     let inserted_id = plan.new_node.id.clone();
-    let updated = apply_and_validate(&flow_ir, plan, &catalog, args.allow_cycles)?;
+    let mut updated = apply_and_validate(&flow_ir, plan, &catalog, args.allow_cycles)?;
+    if let Some(node) = updated.nodes.get_mut(&inserted_id) {
+        apply_mapping_aliases_to_node(
+            node,
+            args.in_map.as_ref(),
+            args.out_map.as_ref(),
+            args.err_map.as_ref(),
+        );
+    }
     let updated_doc = updated.to_doc()?;
     let mut output = serde_yaml_bw::to_string(&updated_doc)?;
     if !output.ends_with('\n') {
@@ -11812,6 +12558,11 @@ fn handle_add_step_with_qa_io(
             },
         );
         write_sidecar(&sidecar_path, &sidecar)?;
+        if let Some(wasm_rel) = pack_component_rel.as_ref()
+            && let Ok(pack_dir) = infer_pack_root_from_flow_path(&args.flow_path)
+        {
+            upsert_pack_component_entry(&pack_dir, &component_identity, wasm_rel, &flow_ir.kind)?;
+        }
         if let Err(err) =
             write_flow_resolve_summary_for_node(&args.flow_path, &inserted_id, &sidecar)
                 .with_context(|| format!("update resolve summary for {}", args.flow_path.display()))
@@ -11983,6 +12734,12 @@ fn handle_update_step_with_qa_io(
         ensure_wizard_config_not_error(&component_identity, wizard_mode, &config_json)?;
         node.payload = config_json;
         node.operation = new_operation.clone();
+        apply_mapping_aliases_to_node(
+            &mut node,
+            args.in_map.as_ref(),
+            args.out_map.as_ref(),
+            args.err_map.as_ref(),
+        );
         if let Some(routing) = build_update_routing(&args)? {
             node.routing = routing;
         }
@@ -12202,6 +12959,12 @@ fn handle_update_step_with_qa_io(
 
     node.operation = new_operation;
     node.payload = new_payload;
+    apply_mapping_aliases_to_node(
+        &mut node,
+        args.in_map.as_ref(),
+        args.out_map.as_ref(),
+        args.err_map.as_ref(),
+    );
     node.routing = new_routing;
     flow_ir.nodes.insert(step_id.clone(), node);
 
@@ -12861,7 +13624,14 @@ fn compute_local_digest(path: &Path) -> Result<String> {
     let data = fs::read(path).with_context(|| format!("read wasm at {}", path.display()))?;
     let mut hasher = Sha256::new();
     hasher.update(data);
-    let digest = format!("sha256:{:x}", hasher.finalize());
+    let digest_bytes = hasher.finalize();
+    let digest = format!(
+        "sha256:{}",
+        digest_bytes
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+    );
     Ok(digest)
 }
 
@@ -13427,12 +14197,37 @@ fn resolve_component_id_reference(
         )
         .map_err(|err| anyhow::anyhow!("resolve component via distributor: {err}"))?;
 
-    match resp.artifact {
-        greentic_types::ArtifactLocation::FilePath { path } => Ok(format!("file://{path}")),
-        greentic_types::ArtifactLocation::OciReference { reference } => Ok(reference),
-        greentic_types::ArtifactLocation::DistributorInternal { handle } => Err(anyhow!(
-            "distributor returned internal handle {handle}; cannot resolve artifact"
-        )),
+    let artifact =
+        serde_json::to_value(&resp.artifact).context("serialize distributor artifact location")?;
+    let kind = artifact
+        .get("kind")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| anyhow!("distributor artifact missing kind"))?;
+    match kind {
+        "file_path" => {
+            let path = artifact
+                .get("path")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| anyhow!("distributor file artifact missing path"))?;
+            Ok(format!("file://{path}"))
+        }
+        "oci_reference" => {
+            let reference = artifact
+                .get("reference")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| anyhow!("distributor OCI artifact missing reference"))?;
+            Ok(reference.to_string())
+        }
+        "distributor_internal" => {
+            let handle = artifact
+                .get("handle")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| anyhow!("distributor internal artifact missing handle"))?;
+            Err(anyhow!(
+                "distributor returned internal handle {handle}; cannot resolve artifact"
+            ))
+        }
+        other => Err(anyhow!("unsupported distributor artifact kind {other}")),
     }
 }
 

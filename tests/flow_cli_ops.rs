@@ -56,6 +56,89 @@ assets: []
     .unwrap();
 }
 
+fn write_fixture_wizard_component(
+    fixture_dir: &Path,
+    reference: &str,
+    operations: &[&str],
+    applied_config: serde_json::Value,
+) {
+    fs::create_dir_all(fixture_dir).unwrap();
+    let key = reference
+        .trim_start_matches("oci://")
+        .trim_start_matches("repo://")
+        .trim_start_matches("store://")
+        .trim_start_matches("file://")
+        .replace(['/', ':', '@'], "_");
+
+    let config_schema = SchemaIr::Object {
+        properties: BTreeMap::new(),
+        required: Vec::new(),
+        additional: AdditionalProperties::Allow,
+    };
+    let op_schema = SchemaIr::Object {
+        properties: BTreeMap::new(),
+        required: Vec::new(),
+        additional: AdditionalProperties::Allow,
+    };
+    let op_schema_hash = schema_hash(&op_schema, &op_schema, &config_schema).unwrap();
+    let describe = ComponentDescribe {
+        info: ComponentInfo {
+            id: "acme.widget".to_string(),
+            version: "0.1.0".to_string(),
+            role: "tool".to_string(),
+            display_name: None,
+        },
+        provided_capabilities: Vec::new(),
+        required_capabilities: Vec::new(),
+        metadata: BTreeMap::new(),
+        operations: operations
+            .iter()
+            .map(|id| ComponentOperation {
+                id: (*id).to_string(),
+                display_name: None,
+                input: ComponentRunInput {
+                    schema: op_schema.clone(),
+                },
+                output: ComponentRunOutput {
+                    schema: op_schema.clone(),
+                },
+                defaults: BTreeMap::new(),
+                redactions: Vec::new(),
+                constraints: BTreeMap::new(),
+                schema_hash: op_schema_hash.clone(),
+            })
+            .collect(),
+        config_schema,
+    };
+    let describe_cbor = canonical::to_canonical_cbor_allow_floats(&describe).unwrap();
+    fs::write(
+        fixture_dir.join(format!("{key}.describe.cbor")),
+        describe_cbor,
+    )
+    .unwrap();
+
+    let spec = ComponentQaSpec {
+        mode: QaMode::Default,
+        title: I18nText::new("title", Some("Fixture Wizard".to_string())),
+        description: None,
+        questions: Vec::new(),
+        defaults: BTreeMap::new(),
+    };
+    let qa_spec_cbor = canonical::to_canonical_cbor(&spec).unwrap();
+    fs::write(
+        fixture_dir.join(format!("{key}.qa-spec.cbor")),
+        qa_spec_cbor,
+    )
+    .unwrap();
+    let apply_cbor = canonical::to_canonical_cbor(&applied_config).unwrap();
+    fs::write(
+        fixture_dir.join(format!("{key}.apply-answers.cbor")),
+        apply_cbor,
+    )
+    .unwrap();
+    fs::write(fixture_dir.join(format!("{key}.abi")), "0.6.0").unwrap();
+}
+
 #[test]
 fn version_flag_prints_version() {
     let expected = format!("greentic-flow {}", env!("CARGO_PKG_VERSION"));
@@ -482,6 +565,167 @@ fn add_step_wizard_uses_fixture_resolver() {
         serde_json::to_value(component_exec.get(Value::from("config")).unwrap()).unwrap(),
         json!({"foo":"bar"})
     );
+}
+
+#[test]
+fn add_step_setup_rejects_component_when_required_input_is_missing() {
+    let dir = tempdir().unwrap();
+    let flow_path = dir.path().join("flow.ygtc");
+    Command::new(assert_cmd::cargo::cargo_bin!("greentic-flow"))
+        .arg("new")
+        .arg("--flow")
+        .arg(&flow_path)
+        .arg("--id")
+        .arg("main")
+        .arg("--type")
+        .arg("messaging")
+        .assert()
+        .success();
+
+    let fixture_dir = dir.path().join("fixtures");
+    fs::create_dir_all(&fixture_dir).unwrap();
+    let reference = "oci://acme/llm-openai:1";
+    let key = reference
+        .trim_start_matches("oci://")
+        .trim_start_matches("repo://")
+        .trim_start_matches("store://")
+        .trim_start_matches("file://")
+        .replace(['/', ':', '@'], "_");
+
+    let config_schema = SchemaIr::Object {
+        properties: BTreeMap::new(),
+        required: Vec::new(),
+        additional: AdditionalProperties::Allow,
+    };
+    let input_schema = SchemaIr::Object {
+        properties: BTreeMap::from([
+            ("config".to_string(), config_schema.clone()),
+            (
+                "input".to_string(),
+                SchemaIr::Object {
+                    properties: BTreeMap::from([(
+                        "messages".to_string(),
+                        SchemaIr::Array {
+                            items: Box::new(SchemaIr::Object {
+                                properties: BTreeMap::from([
+                                    (
+                                        "role".to_string(),
+                                        SchemaIr::String {
+                                            min_len: Some(1),
+                                            max_len: None,
+                                            regex: None,
+                                            format: None,
+                                        },
+                                    ),
+                                    (
+                                        "content".to_string(),
+                                        SchemaIr::String {
+                                            min_len: Some(1),
+                                            max_len: None,
+                                            regex: None,
+                                            format: None,
+                                        },
+                                    ),
+                                ]),
+                                required: vec!["role".to_string(), "content".to_string()],
+                                additional: AdditionalProperties::Forbid,
+                            }),
+                            min_items: Some(1),
+                            max_items: None,
+                        },
+                    )]),
+                    required: vec!["messages".to_string()],
+                    additional: AdditionalProperties::Forbid,
+                },
+            ),
+        ]),
+        required: vec!["input".to_string()],
+        additional: AdditionalProperties::Forbid,
+    };
+    let output_schema = SchemaIr::Object {
+        properties: BTreeMap::new(),
+        required: Vec::new(),
+        additional: AdditionalProperties::Allow,
+    };
+    let op_schema_hash = schema_hash(&input_schema, &output_schema, &config_schema).unwrap();
+    let describe = ComponentDescribe {
+        info: ComponentInfo {
+            id: "component-llm-openai".to_string(),
+            version: "0.1.0".to_string(),
+            role: "tool".to_string(),
+            display_name: None,
+        },
+        provided_capabilities: Vec::new(),
+        required_capabilities: Vec::new(),
+        metadata: BTreeMap::new(),
+        operations: vec![ComponentOperation {
+            id: "handle_message".to_string(),
+            display_name: None,
+            input: ComponentRunInput {
+                schema: input_schema.clone(),
+            },
+            output: ComponentRunOutput {
+                schema: output_schema,
+            },
+            defaults: BTreeMap::new(),
+            redactions: Vec::new(),
+            constraints: BTreeMap::new(),
+            schema_hash: op_schema_hash,
+        }],
+        config_schema,
+    };
+    let describe_cbor = canonical::to_canonical_cbor_allow_floats(&describe).unwrap();
+    fs::write(
+        fixture_dir.join(format!("{key}.describe.cbor")),
+        describe_cbor,
+    )
+    .unwrap();
+
+    let qa_spec = ComponentQaSpec {
+        mode: QaMode::Setup,
+        title: I18nText::new("title", Some("Setup".to_string())),
+        description: None,
+        questions: Vec::new(),
+        defaults: BTreeMap::new(),
+    };
+    let qa_spec_cbor = canonical::to_canonical_cbor(&qa_spec).unwrap();
+    fs::write(
+        fixture_dir.join(format!("{key}.qa-setup.cbor")),
+        qa_spec_cbor,
+    )
+    .unwrap();
+
+    let config = json!({"provider":"ollama"});
+    let apply_cbor = canonical::to_canonical_cbor_allow_floats(&config).unwrap();
+    fs::write(
+        fixture_dir.join(format!("{key}.apply-setup-config.cbor")),
+        apply_cbor,
+    )
+    .unwrap();
+    fs::write(fixture_dir.join(format!("{key}.abi")), "0.6.0").unwrap();
+
+    cargo_bin_cmd!("greentic-flow")
+        .current_dir(dir.path())
+        .arg("add-step")
+        .arg("component-llm-openai")
+        .arg("--flow")
+        .arg(&flow_path)
+        .arg("--node-id")
+        .arg("llm")
+        .arg("--component")
+        .arg(reference)
+        .arg("--operation")
+        .arg("handle_message")
+        .arg("--wizard-mode")
+        .arg("setup")
+        .arg("--routing-out")
+        .arg("--resolver")
+        .arg(format!("fixture://{}", fixture_dir.display()))
+        .assert()
+        .failure()
+        .stderr(contains("requires invocation input"))
+        .stderr(contains("handle_message"))
+        .stderr(contains("input"));
 }
 
 #[test]
@@ -2450,6 +2694,926 @@ fn wizard_answers_plan_registers_referenced_asset_in_pack_yaml() {
     assert!(
         has_asset_entry,
         "pack.yaml assets should include assets/cards/welcome_card.json"
+    );
+}
+
+#[test]
+fn add_step_local_wasm_setup_rejects_required_runtime_input() {
+    let wasm_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("workspace parent")
+        .join("component-llm-openai")
+        .join("target")
+        .join("wasm32-wasip2")
+        .join("release")
+        .join("component_llm_openai.wasm");
+    if !wasm_path.exists() {
+        return;
+    }
+
+    let dir = tempdir().unwrap();
+    let pack_dir = dir.path().join("pack");
+    fs::create_dir_all(pack_dir.join("flows")).unwrap();
+    write_minimal_pack_yaml(&pack_dir);
+    fs::write(
+        pack_dir.join("flows/main.ygtc"),
+        "id: main\ntype: messaging\nschema_version: 2\nnodes: {}\n",
+    )
+    .unwrap();
+
+    let answers_dir = dir.path().join("answers");
+    let answers_file = dir.path().join("setup.answers.json");
+    fs::write(
+        &answers_file,
+        serde_json::to_string_pretty(&json!({
+            "provider": "ollama",
+            "base_url": "http://127.0.0.1:11434/v1",
+            "default_model": "llama3.2",
+            "endpoint_requires_api_key": false,
+            "api_key_secret": "dummy_ollama_key"
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    cargo_bin_cmd!("greentic-flow")
+        .arg("add-step")
+        .arg("component-llm-openai")
+        .arg("--flow")
+        .arg(pack_dir.join("flows/main.ygtc"))
+        .arg("--node-id")
+        .arg("llm")
+        .arg("--local-wasm")
+        .arg(&wasm_path)
+        .arg("--operation")
+        .arg("handle_message")
+        .arg("--wizard-mode")
+        .arg("setup")
+        .arg("--answers-file")
+        .arg(&answers_file)
+        .arg("--answers-dir")
+        .arg(&answers_dir)
+        .arg("--overwrite-answers")
+        .arg("--routing-out")
+        .arg("--format")
+        .arg("json")
+        .assert()
+        .failure()
+        .stderr(contains("requires invocation input"))
+        .stderr(contains("handle_message"))
+        .stderr(contains("input"));
+}
+
+#[test]
+fn wizard_answers_plan_registers_local_wasm_component_in_pack_yaml() {
+    let source_wasm = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("workspace parent")
+        .join("component-llm-openai")
+        .join("target")
+        .join("wasm32-wasip2")
+        .join("release")
+        .join("component_llm_openai.wasm");
+    if !source_wasm.exists() {
+        return;
+    }
+
+    let dir = tempdir().unwrap();
+    let pack_dir = dir.path().join("pack");
+    fs::create_dir_all(pack_dir.join("flows")).unwrap();
+    fs::create_dir_all(pack_dir.join("components")).unwrap();
+    write_minimal_pack_yaml(&pack_dir);
+    fs::write(
+        pack_dir.join("flows/main.ygtc"),
+        "id: main\ntype: messaging\nschema_version: 2\nnodes: {}\n",
+    )
+    .unwrap();
+
+    let pack_wasm = pack_dir.join("components/component_llm_openai.wasm");
+    fs::copy(&source_wasm, &pack_wasm).unwrap();
+
+    let answers_path = pack_dir.join("answers.json");
+    fs::write(
+        &answers_path,
+        serde_json::to_string_pretty(&json!({
+            "schema_id": "greentic-flow.wizard.plan",
+            "schema_version": "2.0.0",
+            "actions": [{
+                "action": "add-step",
+                "flow": "flows/main.ygtc",
+                "step_id": "llm",
+                "component": "components/component_llm_openai.wasm",
+                "mode": "setup",
+                "answers": {
+                    "provider": "ollama",
+                    "base_url": "http://127.0.0.1:11434/v1",
+                    "default_model": "llama3.2",
+                    "endpoint_requires_api_key": false,
+                    "api_key_secret": "dummy_ollama_key"
+                }
+            }]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    cargo_bin_cmd!("greentic-flow")
+        .arg("wizard")
+        .arg(&pack_dir)
+        .arg("--answers")
+        .arg(&answers_path)
+        .arg("--format")
+        .arg("json")
+        .assert()
+        .success();
+
+    let pack_yaml = read_yaml(&pack_dir.join("pack.yaml"));
+    let components = pack_yaml
+        .get(Value::from("components"))
+        .and_then(Value::as_sequence)
+        .expect("pack.yaml components sequence");
+    let component_entry = components.iter().find_map(|entry| {
+        let map = entry.as_mapping()?;
+        let wasm = map.get(Value::from("wasm")).and_then(Value::as_str)?;
+        if wasm == "components/component_llm_openai.wasm" {
+            Some(map)
+        } else {
+            None
+        }
+    });
+    let component_entry = component_entry.expect("pack.yaml component entry");
+    assert_eq!(
+        component_entry
+            .get(Value::from("id"))
+            .and_then(Value::as_str),
+        Some("component_llm_openai")
+    );
+}
+
+#[test]
+fn wizard_answers_plan_add_step_persists_mapping_aliases() {
+    let wasm_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("workspace parent")
+        .join("component-adaptive-card")
+        .join("dist")
+        .join("component_adaptive_card__0_6_0.wasm");
+    if !wasm_path.exists() {
+        return;
+    }
+
+    let dir = tempdir().unwrap();
+    let pack_dir = dir.path().join("pack");
+    seed_wizard_pack(&pack_dir, &wasm_path);
+
+    let answers_path = pack_dir.join("answers.json");
+    fs::write(
+        &answers_path,
+        serde_json::to_string_pretty(&json!({
+            "schema_id": "greentic-flow.wizard.plan",
+            "schema_version": "2.0.0",
+            "actions": [{
+                "action": "add-step",
+                "flow": "flows/main.ygtc",
+                "step_id": "adaptive_mapped",
+                "component": "components/component_adaptive_card__0_6_0.wasm",
+                "mode": "default",
+                "answers": {
+                    "card_source": "inline",
+                    "default_card_inline": "{\"type\":\"AdaptiveCard\",\"version\":\"1.6\",\"body\":[{\"type\":\"TextBlock\",\"text\":\"Mapped\"}]}",
+                    "multilingual": false
+                },
+                "in_map": {
+                    "source": "$.input"
+                },
+                "out_map": {
+                    "target": "$.output"
+                },
+                "err_map": {
+                    "target": "$.error"
+                }
+            }]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    cargo_bin_cmd!("greentic-flow")
+        .arg("wizard")
+        .arg(&pack_dir)
+        .arg("--answers")
+        .arg(&answers_path)
+        .assert()
+        .success();
+
+    let doc = load_ygtc_from_path(&pack_dir.join("flows/main.ygtc")).expect("load flow");
+    let raw = &doc.nodes.get("adaptive_mapped").expect("added node").raw;
+    assert_eq!(raw.get("in_map"), Some(&json!({ "source": "$.input" })));
+    assert_eq!(raw.get("out_map"), Some(&json!({ "target": "$.output" })));
+    assert_eq!(raw.get("err_map"), Some(&json!({ "target": "$.error" })));
+}
+
+#[test]
+fn wizard_answers_plan_update_step_persists_mapping_aliases() {
+    let wasm_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("workspace parent")
+        .join("component-adaptive-card")
+        .join("dist")
+        .join("component_adaptive_card__0_6_0.wasm");
+    if !wasm_path.exists() {
+        return;
+    }
+
+    let dir = tempdir().unwrap();
+    let pack_dir = dir.path().join("pack");
+    seed_wizard_pack(&pack_dir, &wasm_path);
+
+    let add_answers_path = pack_dir.join("add-answers.json");
+    fs::write(
+        &add_answers_path,
+        serde_json::to_string_pretty(&json!({
+            "schema_id": "greentic-flow.wizard.plan",
+            "schema_version": "2.0.0",
+            "actions": [{
+                "action": "add-step",
+                "flow": "flows/main.ygtc",
+                "step_id": "adaptive_update_mapped",
+                "component": "components/component_adaptive_card__0_6_0.wasm",
+                "mode": "default",
+                "answers": {
+                    "card_source": "inline",
+                    "default_card_inline": "{\"type\":\"AdaptiveCard\",\"version\":\"1.6\",\"body\":[{\"type\":\"TextBlock\",\"text\":\"Before update\"}]}",
+                    "multilingual": false
+                }
+            }]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    cargo_bin_cmd!("greentic-flow")
+        .arg("wizard")
+        .arg(&pack_dir)
+        .arg("--answers")
+        .arg(&add_answers_path)
+        .assert()
+        .success();
+
+    let update_answers_path = pack_dir.join("update-answers.json");
+    fs::write(
+        &update_answers_path,
+        serde_json::to_string_pretty(&json!({
+            "schema_id": "greentic-flow.wizard.plan",
+            "schema_version": "2.0.0",
+            "actions": [{
+                "action": "update-step",
+                "flow": "flows/main.ygtc",
+                "step_id": "adaptive_update_mapped",
+                "component": "components/component_adaptive_card__0_6_0.wasm",
+                "mode": "default",
+                "answers": {
+                    "card_source": "inline",
+                    "default_card_inline": "{\"type\":\"AdaptiveCard\",\"version\":\"1.6\",\"body\":[{\"type\":\"TextBlock\",\"text\":\"After update\"}]}",
+                    "multilingual": false
+                },
+                "in_map": {
+                    "source": "$.session.input"
+                },
+                "out_map": {
+                    "target": "$.session.output"
+                },
+                "err_map": {
+                    "target": "$.session.error"
+                }
+            }]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    cargo_bin_cmd!("greentic-flow")
+        .arg("wizard")
+        .arg(&pack_dir)
+        .arg("--answers")
+        .arg(&update_answers_path)
+        .assert()
+        .success();
+
+    let doc = load_ygtc_from_path(&pack_dir.join("flows/main.ygtc")).expect("load flow");
+    let raw = &doc
+        .nodes
+        .get("adaptive_update_mapped")
+        .expect("updated node")
+        .raw;
+    assert_eq!(
+        raw.get("in_map"),
+        Some(&json!({ "source": "$.session.input" }))
+    );
+    assert_eq!(
+        raw.get("out_map"),
+        Some(&json!({ "target": "$.session.output" }))
+    );
+    assert_eq!(
+        raw.get("err_map"),
+        Some(&json!({ "target": "$.session.error" }))
+    );
+}
+
+#[test]
+fn wizard_answers_plan_add_step_preserves_operation_and_routing() {
+    let dir = tempdir().unwrap();
+    let pack_dir = dir.path().join("pack");
+    fs::create_dir_all(pack_dir.join("flows")).unwrap();
+    fs::write(
+        pack_dir.join("flows/main.ygtc"),
+        r#"id: main
+type: messaging
+schema_version: 2
+nodes:
+  start:
+    begin: {}
+    routing:
+      - to: done
+  done:
+    finish: {}
+    routing: out
+"#,
+    )
+    .unwrap();
+
+    let fixture_dir = dir.path().join("fixtures");
+    let reference = "oci://acme/widget:1";
+    write_fixture_wizard_component(
+        &fixture_dir,
+        reference,
+        &["run", "send"],
+        json!({"foo":"bar"}),
+    );
+
+    let answers_path = pack_dir.join("answers.json");
+    fs::write(
+        &answers_path,
+        serde_json::to_string_pretty(&json!({
+            "schema_id": "greentic-flow.wizard.plan",
+            "schema_version": "2.0.0",
+            "actions": [{
+                "action": "add-step",
+                "flow": "flows/main.ygtc",
+                "after": "start",
+                "step_id": "widget",
+                "component": reference,
+                "mode": "default",
+                "operation": "send",
+                "routing": [{ "to": "done" }],
+                "answers": {}
+            }]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    cargo_bin_cmd!("greentic-flow")
+        .arg("wizard")
+        .arg(&pack_dir)
+        .arg("--answers")
+        .arg(&answers_path)
+        .env(
+            "GREENTIC_FLOW_WIZARD_RESOLVER",
+            format!("fixture://{}", fixture_dir.display()),
+        )
+        .assert()
+        .success();
+
+    let yaml = read_yaml(&pack_dir.join("flows/main.ygtc"));
+    let widget = yaml
+        .get("nodes")
+        .and_then(Value::as_mapping)
+        .and_then(|nodes| nodes.get(Value::from("widget")))
+        .and_then(Value::as_mapping)
+        .expect("widget node");
+    assert!(widget.contains_key(Value::from("send")));
+    assert_eq!(
+        serde_json::to_value(widget.get(Value::from("routing")).unwrap()).unwrap(),
+        json!([{ "to": "done" }])
+    );
+}
+
+#[test]
+fn wizard_answers_plan_add_step_preserves_route_conditions() {
+    let dir = tempdir().unwrap();
+    let pack_dir = dir.path().join("pack");
+    fs::create_dir_all(pack_dir.join("flows")).unwrap();
+    fs::write(
+        pack_dir.join("flows/main.ygtc"),
+        r#"id: main
+type: messaging
+schema_version: 2
+nodes:
+  start:
+    begin: {}
+    routing:
+      - to: third
+  third:
+    finish: {}
+    routing: out
+"#,
+    )
+    .unwrap();
+
+    let fixture_dir = dir.path().join("fixtures");
+    let reference = "oci://acme/widget:1";
+    write_fixture_wizard_component(
+        &fixture_dir,
+        reference,
+        &["run", "send"],
+        json!({"foo":"bar"}),
+    );
+
+    let answers_path = pack_dir.join("answers.json");
+    fs::write(
+        &answers_path,
+        serde_json::to_string_pretty(&json!({
+            "schema_id": "greentic-flow.wizard.plan",
+            "schema_version": "2.0.0",
+            "actions": [{
+                "action": "add-step",
+                "flow": "flows/main.ygtc",
+                "after": "start",
+                "step_id": "widget",
+                "component": reference,
+                "mode": "default",
+                "operation": "send",
+                "routing": [
+                    { "condition": "response.action == \"go\"", "to": "third" },
+                    { "out": true }
+                ],
+                "answers": {}
+            }]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    cargo_bin_cmd!("greentic-flow")
+        .arg("wizard")
+        .arg(&pack_dir)
+        .arg("--answers")
+        .arg(&answers_path)
+        .env(
+            "GREENTIC_FLOW_WIZARD_RESOLVER",
+            format!("fixture://{}", fixture_dir.display()),
+        )
+        .assert()
+        .success();
+
+    let yaml = read_yaml(&pack_dir.join("flows/main.ygtc"));
+    let widget = yaml
+        .get("nodes")
+        .and_then(Value::as_mapping)
+        .and_then(|nodes| nodes.get(Value::from("widget")))
+        .and_then(Value::as_mapping)
+        .expect("widget node");
+    let routing = serde_json::to_value(widget.get(Value::from("routing")).unwrap()).unwrap();
+    assert_eq!(
+        routing,
+        json!([
+            { "condition": "response.action == \"go\"", "to": "third" },
+            { "out": true }
+        ])
+    );
+}
+
+#[test]
+fn wizard_answers_plan_update_step_preserves_operation_and_route_array() {
+    let dir = tempdir().unwrap();
+    let pack_dir = dir.path().join("pack");
+    fs::create_dir_all(pack_dir.join("flows")).unwrap();
+    fs::write(
+        pack_dir.join("flows/main.ygtc"),
+        r#"id: main
+type: messaging
+schema_version: 2
+nodes:
+  widget:
+    run:
+      component: oci://acme/widget:1
+      config: {}
+    routing: out
+"#,
+    )
+    .unwrap();
+
+    let fixture_dir = dir.path().join("fixtures");
+    let reference = "oci://acme/widget:1";
+    write_fixture_wizard_component(
+        &fixture_dir,
+        reference,
+        &["run", "send"],
+        json!({"foo":"bar"}),
+    );
+
+    let answers_path = pack_dir.join("update-answers.json");
+    fs::write(
+        &answers_path,
+        serde_json::to_string_pretty(&json!({
+            "schema_id": "greentic-flow.wizard.plan",
+            "schema_version": "2.0.0",
+            "actions": [{
+                "action": "update-step",
+                "flow": "flows/main.ygtc",
+                "step_id": "widget",
+                "component": reference,
+                "mode": "default",
+                "operation": "send",
+                "routing": "reply",
+                "answers": {}
+            }]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    cargo_bin_cmd!("greentic-flow")
+        .arg("wizard")
+        .arg(&pack_dir)
+        .arg("--answers")
+        .arg(&answers_path)
+        .env(
+            "GREENTIC_FLOW_WIZARD_RESOLVER",
+            format!("fixture://{}", fixture_dir.display()),
+        )
+        .assert()
+        .success();
+
+    let yaml = read_yaml(&pack_dir.join("flows/main.ygtc"));
+    let widget = yaml
+        .get("nodes")
+        .and_then(Value::as_mapping)
+        .and_then(|nodes| nodes.get(Value::from("widget")))
+        .and_then(Value::as_mapping)
+        .expect("widget node");
+    assert!(widget.contains_key(Value::from("send")));
+    assert_eq!(
+        widget.get(Value::from("routing")).and_then(Value::as_str),
+        Some("reply")
+    );
+}
+
+#[test]
+fn wizard_answers_plan_update_step_preserves_route_conditions() {
+    let dir = tempdir().unwrap();
+    let pack_dir = dir.path().join("pack");
+    fs::create_dir_all(pack_dir.join("flows")).unwrap();
+    fs::write(
+        pack_dir.join("flows/main.ygtc"),
+        r#"id: main
+type: messaging
+schema_version: 2
+nodes:
+  widget:
+    run:
+      component: oci://acme/widget:1
+      config: {}
+    routing: out
+  third:
+    finish: {}
+    routing: out
+"#,
+    )
+    .unwrap();
+
+    let fixture_dir = dir.path().join("fixtures");
+    let reference = "oci://acme/widget:1";
+    write_fixture_wizard_component(
+        &fixture_dir,
+        reference,
+        &["run", "send"],
+        json!({"foo":"bar"}),
+    );
+
+    let answers_path = pack_dir.join("update-answers.json");
+    fs::write(
+        &answers_path,
+        serde_json::to_string_pretty(&json!({
+            "schema_id": "greentic-flow.wizard.plan",
+            "schema_version": "2.0.0",
+            "actions": [{
+                "action": "update-step",
+                "flow": "flows/main.ygtc",
+                "step_id": "widget",
+                "component": reference,
+                "mode": "default",
+                "operation": "send",
+                "routing": [
+                    { "condition": "response.action == \"go\"", "to": "third" },
+                    { "out": true }
+                ],
+                "answers": {}
+            }]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    cargo_bin_cmd!("greentic-flow")
+        .arg("wizard")
+        .arg(&pack_dir)
+        .arg("--answers")
+        .arg(&answers_path)
+        .env(
+            "GREENTIC_FLOW_WIZARD_RESOLVER",
+            format!("fixture://{}", fixture_dir.display()),
+        )
+        .assert()
+        .success();
+
+    let yaml = read_yaml(&pack_dir.join("flows/main.ygtc"));
+    let widget = yaml
+        .get("nodes")
+        .and_then(Value::as_mapping)
+        .and_then(|nodes| nodes.get(Value::from("widget")))
+        .and_then(Value::as_mapping)
+        .expect("widget node");
+    let routing = serde_json::to_value(widget.get(Value::from("routing")).unwrap()).unwrap();
+    assert_eq!(
+        routing,
+        json!([
+            { "condition": "response.action == \"go\"", "to": "third" },
+            { "out": true }
+        ])
+    );
+}
+
+#[test]
+fn wizard_answers_plan_two_phase_llm_handle_message_authoring() {
+    let source_wasm = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("workspace parent")
+        .join("component-llm-openai")
+        .join("target")
+        .join("wasm32-wasip2")
+        .join("release")
+        .join("component_llm_openai.wasm");
+    if !source_wasm.exists() {
+        return;
+    }
+
+    let dir = tempdir().unwrap();
+    let pack_dir = dir.path().join("pack");
+    fs::create_dir_all(pack_dir.join("flows")).unwrap();
+    fs::create_dir_all(pack_dir.join("components")).unwrap();
+    fs::write(
+        pack_dir.join("flows/main.ygtc"),
+        "id: main\ntype: messaging\nschema_version: 2\nnodes: {}\n",
+    )
+    .unwrap();
+    fs::copy(
+        &source_wasm,
+        pack_dir.join("components/component_llm_openai.wasm"),
+    )
+    .unwrap();
+
+    let answers_path = pack_dir.join("answers.json");
+    fs::write(
+        &answers_path,
+        serde_json::to_string_pretty(&json!({
+            "schema_id": "greentic-flow.wizard.plan",
+            "schema_version": "2.0.0",
+            "actions": [
+                {
+                    "action": "add-step",
+                    "flow": "flows/main.ygtc",
+                    "step_id": "research_planner",
+                    "component": "components/component_llm_openai.wasm",
+                    "mode": "setup",
+                    "answers": {
+                        "provider": "ollama",
+                        "base_url": "http://127.0.0.1:11434/v1",
+                        "default_model": "llama3.2",
+                        "endpoint_requires_api_key": false
+                    }
+                },
+                {
+                    "action": "update-step",
+                    "flow": "flows/main.ygtc",
+                    "step_id": "research_planner",
+                    "component": "components/component_llm_openai.wasm",
+                    "mode": "setup",
+                    "operation": "handle_message",
+                    "answers": {
+                        "provider": "ollama",
+                        "base_url": "http://127.0.0.1:11434/v1",
+                        "default_model": "llama3.2",
+                        "endpoint_requires_api_key": false
+                    },
+                    "in_map": {
+                        "config": "$.config.llm",
+                        "input": {
+                            "messages": "$.input.messages"
+                        }
+                    },
+                    "routing": "out"
+                }
+            ]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    cargo_bin_cmd!("greentic-flow")
+        .arg("wizard")
+        .arg(&pack_dir)
+        .arg("--answers")
+        .arg(&answers_path)
+        .assert()
+        .success();
+
+    let yaml = read_yaml(&pack_dir.join("flows/main.ygtc"));
+    let llm = yaml
+        .get("nodes")
+        .and_then(Value::as_mapping)
+        .and_then(|nodes| nodes.get(Value::from("research_planner")))
+        .and_then(Value::as_mapping)
+        .expect("research_planner node");
+    assert!(llm.contains_key(Value::from("handle_message")));
+    assert_eq!(
+        serde_json::to_value(llm.get(Value::from("in_map")).unwrap()).unwrap(),
+        json!({
+            "config": "$.config.llm",
+            "input": {
+                "messages": "$.input.messages"
+            }
+        })
+    );
+}
+
+#[test]
+fn wizard_answers_plan_deep_research_slice_preserves_orchestration() {
+    let adaptive_card_wasm = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("workspace parent")
+        .join("component-adaptive-card")
+        .join("dist")
+        .join("component_adaptive_card__0_6_0.wasm");
+    let llm_wasm = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("workspace parent")
+        .join("component-llm-openai")
+        .join("target")
+        .join("wasm32-wasip2")
+        .join("release")
+        .join("component_llm_openai.wasm");
+    if !adaptive_card_wasm.exists() || !llm_wasm.exists() {
+        return;
+    }
+
+    let dir = tempdir().unwrap();
+    let pack_dir = dir.path().join("pack");
+    fs::create_dir_all(pack_dir.join("flows")).unwrap();
+    fs::create_dir_all(pack_dir.join("components")).unwrap();
+    fs::write(
+        pack_dir.join("flows/main.ygtc"),
+        "id: main\ntype: messaging\nschema_version: 2\nnodes: {}\n",
+    )
+    .unwrap();
+    fs::copy(
+        &adaptive_card_wasm,
+        pack_dir.join("components/component_adaptive_card__0_6_0.wasm"),
+    )
+    .unwrap();
+    fs::copy(
+        &llm_wasm,
+        pack_dir.join("components/component_llm_openai.wasm"),
+    )
+    .unwrap();
+
+    let answers_path = pack_dir.join("answers.json");
+    fs::write(
+        &answers_path,
+        serde_json::to_string_pretty(&json!({
+            "schema_id": "greentic-flow.wizard.plan",
+            "schema_version": "2.0.0",
+            "actions": [
+                {
+                    "action": "add-step",
+                    "flow": "flows/main.ygtc",
+                    "step_id": "main_menu",
+                    "component": "components/component_adaptive_card__0_6_0.wasm",
+                    "mode": "default",
+                    "answers": {
+                        "card_source": "inline",
+                        "default_card_inline": "{\"type\":\"AdaptiveCard\",\"version\":\"1.6\",\"body\":[{\"type\":\"TextBlock\",\"text\":\"Menu\"}]}",
+                        "multilingual": false
+                    }
+                },
+                {
+                    "action": "add-step",
+                    "flow": "flows/main.ygtc",
+                    "step_id": "research_planner",
+                    "component": "components/component_llm_openai.wasm",
+                    "mode": "setup",
+                    "answers": {
+                        "provider": "ollama",
+                        "base_url": "http://127.0.0.1:11434/v1",
+                        "default_model": "llama3.2",
+                        "endpoint_requires_api_key": false
+                    }
+                },
+                {
+                    "action": "add-step",
+                    "flow": "flows/main.ygtc",
+                    "step_id": "show_final_report",
+                    "component": "components/component_adaptive_card__0_6_0.wasm",
+                    "mode": "default",
+                    "answers": {
+                        "card_source": "inline",
+                        "default_card_inline": "{\"type\":\"AdaptiveCard\",\"version\":\"1.6\",\"body\":[{\"type\":\"TextBlock\",\"text\":\"Report\"}]}",
+                        "multilingual": false
+                    }
+                },
+                {
+                    "action": "update-step",
+                    "flow": "flows/main.ygtc",
+                    "step_id": "main_menu",
+                    "component": "components/component_adaptive_card__0_6_0.wasm",
+                    "mode": "default",
+                    "answers": {
+                        "card_source": "inline",
+                        "default_card_inline": "{\"type\":\"AdaptiveCard\",\"version\":\"1.6\",\"body\":[{\"type\":\"TextBlock\",\"text\":\"Menu\"}]}",
+                        "multilingual": false
+                    },
+                    "routing": [
+                        { "condition": "response.action == \"create_research_plan\"", "to": "research_planner" },
+                        { "out": true }
+                    ]
+                },
+                {
+                    "action": "update-step",
+                    "flow": "flows/main.ygtc",
+                    "step_id": "research_planner",
+                    "component": "components/component_llm_openai.wasm",
+                    "mode": "setup",
+                    "operation": "handle_message",
+                    "answers": {
+                        "provider": "ollama",
+                        "base_url": "http://127.0.0.1:11434/v1",
+                        "default_model": "llama3.2",
+                        "endpoint_requires_api_key": false
+                    },
+                    "in_map": {
+                        "config": "$.config.llm",
+                        "input": {
+                            "messages": "$.input.messages"
+                        }
+                    },
+                    "routing": [{ "to": "show_final_report" }]
+                }
+            ]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    cargo_bin_cmd!("greentic-flow")
+        .arg("wizard")
+        .arg(&pack_dir)
+        .arg("--answers")
+        .arg(&answers_path)
+        .assert()
+        .success();
+
+    let yaml = read_yaml(&pack_dir.join("flows/main.ygtc"));
+    let nodes = yaml
+        .get("nodes")
+        .and_then(Value::as_mapping)
+        .expect("nodes mapping");
+
+    let main_menu = nodes
+        .get(Value::from("main_menu"))
+        .and_then(Value::as_mapping)
+        .expect("main_menu node");
+    assert_eq!(
+        serde_json::to_value(main_menu.get(Value::from("routing")).unwrap()).unwrap(),
+        json!([
+            { "condition": "response.action == \"create_research_plan\"", "to": "research_planner" },
+            { "out": true }
+        ])
+    );
+
+    let planner = nodes
+        .get(Value::from("research_planner"))
+        .and_then(Value::as_mapping)
+        .expect("research_planner node");
+    assert!(planner.contains_key(Value::from("handle_message")));
+    assert_eq!(
+        serde_json::to_value(planner.get(Value::from("in_map")).unwrap()).unwrap(),
+        json!({
+            "config": "$.config.llm",
+            "input": {
+                "messages": "$.input.messages"
+            }
+        })
     );
 }
 

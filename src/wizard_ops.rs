@@ -330,7 +330,14 @@ mod host {
 
         let mut hasher = sha2::Sha256::new();
         hasher.update(bytes);
-        format!("sha256:{:x}", hasher.finalize())
+        let digest = hasher.finalize();
+        format!(
+            "sha256:{}",
+            digest
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>()
+        )
     }
 
     fn load_component_cached(wasm_bytes: &[u8]) -> Result<Arc<Component>> {

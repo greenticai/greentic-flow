@@ -32,13 +32,6 @@ pub fn write_flow_resolve_summary_for_node(
             node_id
         )
     })?;
-    let expected_source = summary_source_ref(&entry.source);
-    if let Some(existing) = summary.nodes.get(node_id)
-        && existing.source == expected_source
-    {
-        write_flow_resolve_summary(&summary_path, &summary).map_err(|e| anyhow!(e.to_string()))?;
-        return Ok(summary_path);
-    }
     let node_summary = summarize_node(flow_path, node_id, &entry.source)?;
     summary.nodes.insert(node_id.to_string(), node_summary);
     write_flow_resolve_summary(&summary_path, &summary).map_err(|e| anyhow!(e.to_string()))?;
@@ -111,6 +104,22 @@ fn summarize_node(
             })
         }
         Err(_) if !matches!(source, ComponentSourceRefV1::Local { .. }) => {
+            if let Some((component_id, manifest)) = read_cached_remote_manifest_metadata(&wasm_path)
+                .with_context(|| {
+                    format!(
+                        "failed to read cached component.manifest.json for node '{}' ({})",
+                        node_id,
+                        wasm_path.display()
+                    )
+                })?
+            {
+                return Ok(NodeResolveSummaryV1 {
+                    component_id,
+                    source: source_ref,
+                    digest,
+                    manifest,
+                });
+            }
             let component_id = component_id_from_source(source)
                 .or_else(|| ComponentId::from_str(node_id).ok())
                 .unwrap_or_else(|| ComponentId::from_str("unknown").expect("valid component id"));
@@ -356,6 +365,19 @@ fn read_manifest_metadata(
     Ok((component_id, manifest))
 }
 
+fn read_cached_remote_manifest_metadata(
+    wasm_path: &Path,
+) -> Result<Option<(ComponentId, Option<FlowResolveSummaryManifestV1>)>> {
+    let Some(parent) = wasm_path.parent() else {
+        return Ok(None);
+    };
+    let manifest_path = parent.join("component.manifest.json");
+    if !manifest_path.exists() {
+        return Ok(None);
+    }
+    Ok(Some(read_manifest_metadata(&manifest_path)?))
+}
+
 fn flow_name_from_path(flow_path: &Path) -> String {
     flow_path
         .file_name()
@@ -384,7 +406,14 @@ fn compute_sha256(path: &Path) -> Result<String> {
     let bytes = fs::read(path).with_context(|| format!("read wasm at {}", path.display()))?;
     let mut sha = Sha256::new();
     sha.update(bytes);
-    Ok(format!("sha256:{:x}", sha.finalize()))
+    let digest = sha.finalize();
+    Ok(format!(
+        "sha256:{}",
+        digest
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+    ))
 }
 
 #[cfg(test)]
@@ -490,5 +519,117 @@ mod tests {
         )
         .unwrap();
         assert_eq!(manifest_wasm_from_dir(dir.path()).unwrap(), None);
+    }
+
+    #[test]
+    fn cached_remote_manifest_metadata_is_accepted_even_when_artifact_path_is_stale() {
+        let dir = tempdir().unwrap();
+        let cache_dir = dir.path().join("artifact");
+        fs::create_dir_all(&cache_dir).unwrap();
+        let wasm_path = cache_dir.join("blob");
+        fs::write(&wasm_path, b"cached-wasm").unwrap();
+        fs::write(
+            cache_dir.join("component.manifest.json"),
+            serde_json::json!({
+                "id": "component-llm-openai",
+                "version": "0.1.0",
+                "world": "greentic:component/component@0.6.0",
+                "artifacts": { "component_wasm": "../../../component-llm-openai/target/wasm32-wasip2/release/component_llm_openai.wasm" }
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        assert!(find_manifest_for_wasm(&wasm_path).is_err());
+
+        let (component_id, manifest) = read_cached_remote_manifest_metadata(&wasm_path)
+            .unwrap()
+            .expect("cached metadata");
+        assert_eq!(component_id.as_str(), "component-llm-openai");
+        assert_eq!(
+            manifest,
+            Some(FlowResolveSummaryManifestV1 {
+                world: "greentic:component/component@0.6.0".to_string(),
+                version: Version::parse("0.1.0").unwrap(),
+            })
+        );
+    }
+
+    #[test]
+    fn write_flow_resolve_summary_for_node_refreshes_stale_manifest_metadata() {
+        let dir = tempdir().unwrap();
+        let flow_dir = dir.path().join("flows");
+        fs::create_dir_all(&flow_dir).unwrap();
+        let flow_path = flow_dir.join("main.ygtc");
+        fs::write(
+            &flow_path,
+            "id: main\ntype: messaging\nschema_version: 2\nnodes: {}\n",
+        )
+        .unwrap();
+
+        let component_dir = dir.path().join("component");
+        fs::create_dir_all(&component_dir).unwrap();
+        let wasm_path = component_dir.join("component.wasm");
+        fs::write(&wasm_path, b"cached-wasm").unwrap();
+        let digest = compute_sha256(&wasm_path).unwrap();
+        fs::write(
+            component_dir.join("component.manifest.json"),
+            serde_json::json!({
+                "id": "component-llm-openai",
+                "version": "0.1.0",
+                "world": "greentic:component/component@0.6.0",
+                "artifacts": { "component_wasm": "component.wasm" }
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let source = ComponentSourceRefV1::Local {
+            path: "file://../component/component.wasm".to_string(),
+            digest: Some(digest.clone()),
+        };
+        let sidecar = FlowResolveV1 {
+            schema_version: 1,
+            flow: "main.ygtc".to_string(),
+            nodes: BTreeMap::from([(
+                "llm".to_string(),
+                greentic_types::flow_resolve::NodeResolveV1 {
+                    source: source.clone(),
+                    mode: None,
+                },
+            )]),
+        };
+
+        let summary_path = resolve_summary_path_for_flow(&flow_path);
+        let stale_summary = FlowResolveSummaryV1 {
+            schema_version: FLOW_RESOLVE_SUMMARY_SCHEMA_VERSION,
+            flow: "main.ygtc".to_string(),
+            nodes: BTreeMap::from([(
+                "llm".to_string(),
+                NodeResolveSummaryV1 {
+                    component_id: ComponentId::from_str("component-llm-openai").unwrap(),
+                    source: summary_source_ref(&source),
+                    digest,
+                    manifest: None,
+                },
+            )]),
+        };
+        write_flow_resolve_summary(&summary_path, &stale_summary).unwrap();
+
+        write_flow_resolve_summary_for_node(&flow_path, "llm", &sidecar).unwrap();
+
+        let refreshed = read_flow_resolve_summary(&summary_path)
+            .map_err(|e| anyhow!(e.to_string()))
+            .unwrap();
+        assert_eq!(
+            refreshed
+                .nodes
+                .get("llm")
+                .and_then(|node| node.manifest.as_ref()),
+            Some(&FlowResolveSummaryManifestV1 {
+                world: "greentic:component/component@0.6.0".to_string(),
+                version: Version::parse("0.1.0").unwrap(),
+            })
+        );
     }
 }

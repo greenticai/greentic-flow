@@ -135,3 +135,35 @@ nodes:
         Some("templating.handlebars")
     );
 }
+
+#[test]
+fn compile_flow_prefers_alias_maps_when_present() {
+    let yaml = r#"
+id: alias_maps
+type: messaging
+schema_version: 2
+nodes:
+  start:
+    component.exec:
+      component: repo://demo/component
+      config:
+        greeting: hi
+    operation: run
+    in_map:
+      source: "$.input"
+    out_map:
+      target: "$.output"
+    err_map:
+      target: "$.error"
+    routing: out
+"#;
+    let doc = load_ygtc_from_str(yaml).unwrap();
+    let flow = compile_flow(doc).unwrap();
+    let node = flow.nodes.get(&NodeId::new("start").unwrap()).unwrap();
+    assert_eq!(node.input.mapping, json!({ "source": "$.input" }));
+    assert_eq!(node.output.mapping, json!({ "target": "$.output" }));
+    assert_eq!(
+        node.err_map.as_ref().map(|mapping| mapping.mapping.clone()),
+        Some(json!({ "target": "$.error" }))
+    );
+}

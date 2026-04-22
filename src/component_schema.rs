@@ -224,7 +224,7 @@ pub fn validate_payload_against_schema(ctx: &SchemaResolution, payload: &Value) 
     }
 }
 
-pub fn jsonschema_options_with_base(base_path: Option<&Path>) -> jsonschema::ValidationOptions {
+pub fn jsonschema_options_with_base(base_path: Option<&Path>) -> jsonschema::ValidationOptions<'_> {
     let mut options = jsonschema::options().with_draft(Draft::Draft202012);
     if let Some(base_uri) = base_uri_for_path(base_path) {
         options = options.with_base_uri(base_uri);
