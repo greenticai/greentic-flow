@@ -651,6 +651,8 @@ enum Commands {
     DeleteStep(DeleteStepArgs),
     /// Validate flows.
     Doctor(DoctorArgs),
+    /// Describe a .ygtc flow file.
+    Info(InfoArgs),
     /// Validate answers JSON against a schema.
     DoctorAnswers(DoctorAnswersArgs),
     /// Emit JSON schema + example answers for a component operation.
@@ -844,6 +846,17 @@ struct DoctorArgs {
     /// Flow files or directories to lint.
     #[arg(required_unless_present = "stdin")]
     targets: Vec<PathBuf>,
+}
+
+#[derive(Args, Debug)]
+struct InfoArgs {
+    /// Path to a .ygtc file.
+    #[arg(value_name = "PATH")]
+    path: PathBuf,
+
+    /// Emit the report as JSON.
+    #[arg(long, default_value_t = false)]
+    json: bool,
 }
 
 #[derive(Args, Debug)]
@@ -1128,6 +1141,12 @@ fn main() -> Result<()> {
                 args.json = true;
             }
             handle_doctor(args, schema_mode)
+        }
+        Commands::Info(mut args) => {
+            if matches!(cli.format, OutputFormat::Json) {
+                args.json = true;
+            }
+            handle_info(args)
         }
         Commands::DoctorAnswers(args) => handle_doctor_answers(args),
         Commands::Answers(args) => handle_answers(args, schema_mode),
@@ -6629,6 +6648,41 @@ fn handle_doctor(args: DoctorArgs, schema_mode: SchemaMode) -> Result<()> {
     } else {
         Err(anyhow::anyhow!("{failures} flow(s) failed validation"))
     }
+}
+
+fn handle_info(args: InfoArgs) -> Result<()> {
+    let path = &args.path;
+
+    if !path.exists() {
+        eprintln!("{}: not a valid .ygtc file: file not found", path.display());
+        std::process::exit(2);
+    }
+    if path.is_dir() || path.extension().and_then(|s| s.to_str()) != Some("ygtc") {
+        eprintln!(
+            "{}: not a valid .ygtc file: wrong extension",
+            path.display()
+        );
+        std::process::exit(2);
+    }
+
+    let flow = match greentic_flow::compile_ygtc_file(path) {
+        Ok(f) => f,
+        Err(e) => {
+            eprintln!("{}: not a valid .ygtc file: {e}", path.display());
+            std::process::exit(5);
+        }
+    };
+
+    let report = greentic_flow::info::InfoReport::from_flow(&flow, path)?;
+
+    if args.json {
+        let pretty = serde_json::to_string_pretty(&report)?;
+        println!("{pretty}");
+    } else {
+        print!("{}", greentic_flow::info::human::render(&report));
+    }
+
+    Ok(())
 }
 
 fn handle_new(args: NewArgs, backup: bool) -> Result<()> {
