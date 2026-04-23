@@ -17,6 +17,7 @@ pub mod flow_bundle;
 pub mod flow_ir;
 pub mod flow_meta;
 pub mod i18n;
+pub mod info;
 pub mod ir;
 pub mod json_output;
 pub mod lint;
