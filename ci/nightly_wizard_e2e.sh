@@ -203,13 +203,13 @@ run_wizard_menu_smoke() {
   pack_dir="$(cd "$(dirname "$flow_path")/../../.." && pwd)"
   answers_path="$pack_dir/wizard.exit.answers.json"
 
-  printf '0\n' | "$FLOW_BIN" wizard "$pack_dir" --emit-answers "$answers_path"
+  printf '0\n' | "$FLOW_BIN" wizard --answers "$answers_path" "$pack_dir"
   [[ -f "$answers_path" ]] || {
     echo "expected wizard answers file at $answers_path" >&2
     exit 1
   }
 
-  "$FLOW_BIN" wizard "$pack_dir" --answers-file "$answers_path" </dev/null
+  "$FLOW_BIN" wizard --answers "$answers_path" "$pack_dir" </dev/null
 }
 
 main() {
