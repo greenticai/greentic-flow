@@ -12,9 +12,9 @@ concurrency:
 
 jobs:
   ci:
-    uses: greenticai/.github/.github/workflows/host-crate-ci.yml@main
+    uses: greenticai/.github/.github/workflows/pr-ci.yml@main
     with:
-      run-semver-checks: true
+      variant: host
       setup-script: |
         rm -f .cargo/config.toml
         ci/check_no_duplicate_canonical_wit.sh
