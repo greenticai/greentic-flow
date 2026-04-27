@@ -20,7 +20,12 @@ fn catalog_echo() -> MemoryCatalog {
 }
 
 #[test]
-fn default_anchor_is_start_and_rewires() {
+fn default_anchor_appends_to_end_of_chain() {
+    // When `after` is omitted the wizard now appends to the end of the
+    // entrypoint-rooted chain. This makes sequential add-step calls build
+    // a forward-ordered flow (welcome → form → … → completion) instead of
+    // silently reversing it, which is what was breaking hr-onboarding-demo
+    // and other multi-step demos in greentic-demo.
     let flow = r#"id: main
 type: messaging
 start: start
@@ -49,19 +54,33 @@ nodes:
     };
 
     let plan = plan_add_step(&ir, spec, &catalog).expect("plan");
-    assert_eq!(plan.anchor, "start");
+    assert_eq!(
+        plan.anchor, "a",
+        "default anchor should walk to the last node in the chain"
+    );
     let updated = apply_and_validate(&ir, plan, &catalog, false).expect("apply");
 
     let entry = updated.entrypoints.get("default").unwrap();
-    assert_eq!(entry, "hello-world");
+    assert_eq!(entry, "start", "entrypoint must remain stable on append");
 
     let start = updated.nodes.get("start").unwrap();
     assert_eq!(start.routing.len(), 1);
     assert_eq!(start.routing[0].to.as_deref(), Some("a"));
 
+    let a = updated.nodes.get("a").unwrap();
+    assert_eq!(a.routing.len(), 1);
+    assert_eq!(
+        a.routing[0].to.as_deref(),
+        Some("hello-world"),
+        "former terminal `a` should now route to the new step"
+    );
+
     let inserted = updated.nodes.get("hello-world").unwrap();
     assert_eq!(inserted.routing.len(), 1);
-    assert_eq!(inserted.routing[0].to.as_deref(), Some("start"));
+    assert!(
+        inserted.routing[0].out,
+        "newly-appended terminal step inherits the previous out=true terminator"
+    );
 }
 
 #[test]
@@ -97,7 +116,13 @@ nodes:
     };
 
     let plan = plan_add_step(&ir, spec, &catalog).expect("plan");
-    assert_eq!(plan.anchor, "b", "first node in order should be anchor");
+    // No explicit `start`; the first entrypoint resolves to the first node
+    // in declaration order ("b"), and walking the chain b → end terminates
+    // at "end" (the out=true node), which is the natural append anchor.
+    assert_eq!(
+        plan.anchor, "end",
+        "default anchor should append at the chain terminus"
+    );
 }
 
 #[test]

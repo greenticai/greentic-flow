@@ -1373,7 +1373,13 @@ nodes:
 }
 
 #[test]
-fn add_step_defaults_to_entrypoint_before_existing() {
+fn add_step_defaults_to_appending_after_terminal_node() {
+    // Default behaviour change: when `--after` is omitted the wizard
+    // appends the new step at the end of the entrypoint-rooted chain
+    // instead of prepending before the entrypoint. Sequential `add-step`
+    // calls now build a forward-ordered flow, fixing the reversed-chain
+    // bug that broke greentic-demo flow_wizard_answers (hr-onboarding,
+    // sales-crm, supply-chain, …).
     let dir = tempdir().unwrap();
     let flow_path = dir.path().join("flow.ygtc");
     fs::write(
@@ -1423,32 +1429,37 @@ nodes:
         .and_then(Value::as_str)
         .or_else(|| yaml.get("start").and_then(Value::as_str))
         .expect("entrypoint or start");
-    assert_ne!(default_target, "a");
+    assert_eq!(
+        default_target, "a",
+        "entrypoint must remain stable when appending"
+    );
 
     let nodes = yaml.get("nodes").and_then(Value::as_mapping).unwrap();
     assert!(nodes.contains_key(Value::from("a")));
     assert!(nodes.contains_key(Value::from("b")));
-    assert!(nodes.contains_key(Value::from(default_target)));
+    assert!(nodes.contains_key(Value::from("inserted")));
 
-    let inserted = nodes
-        .get(Value::from(default_target))
-        .and_then(Value::as_mapping)
-        .unwrap();
-    let routing = inserted
-        .get(Value::from("routing"))
-        .and_then(Value::as_sequence)
-        .unwrap();
-    assert_eq!(routing[0].get("to").and_then(Value::as_str).unwrap(), "a");
-
-    let a_node = nodes
+    // a → b unchanged, b now routes forward to the new step, new step
+    // inherits the terminal `out: true` that b used to own.
+    let a_routing = nodes
         .get(Value::from("a"))
         .and_then(Value::as_mapping)
-        .unwrap();
-    let a_routing = a_node
-        .get(Value::from("routing"))
+        .and_then(|m| m.get(Value::from("routing")))
         .and_then(Value::as_sequence)
         .unwrap();
     assert_eq!(a_routing[0].get("to").and_then(Value::as_str).unwrap(), "b");
+
+    let b_routing = nodes
+        .get(Value::from("b"))
+        .and_then(Value::as_mapping)
+        .and_then(|m| m.get(Value::from("routing")))
+        .and_then(Value::as_sequence)
+        .unwrap();
+    assert_eq!(
+        b_routing[0].get("to").and_then(Value::as_str).unwrap(),
+        "inserted",
+        "former terminal node should now route forward to the new step"
+    );
 }
 
 #[test]

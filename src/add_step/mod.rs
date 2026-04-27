@@ -135,13 +135,15 @@ pub fn plan_add_step(
             return Err(diags);
         }
     };
-    let mut insert_before_entrypoint = false;
-    if spec.after.is_none()
-        && let Some((_, target)) = flow.entrypoints.get_index(0)
-        && target == &anchor_source
-    {
-        insert_before_entrypoint = true;
-    }
+    // Historic behaviour: when `after` was unspecified the wizard would
+    // PREPEND the new step before the current entrypoint, retargeting
+    // entrypoints at every call. That broke sequential add-step builds —
+    // a forward-ordered set of actions ended up compiled into a reversed
+    // chain (e.g. hr-onboarding-demo's manifest.cbor: completion → access
+    // → upload → checklist → form → welcome, with entrypoint pinned to
+    // `show_completion_card`). Empty-flow case still treats the very first
+    // step as the entrypoint via the early-return path inside apply_plan.
+    let insert_before_entrypoint = false;
     let anchor = anchor_source;
 
     if let Some(hint) = spec.node_id_hint.as_deref()
@@ -407,12 +409,36 @@ fn resolve_anchor(flow: &FlowIr, after: Option<&str>) -> std::result::Result<Str
         return Ok(String::new());
     }
 
-    if let Some(entry) = flow.entrypoints.get_index(0) {
-        return Ok(entry.1.clone());
+    // Default: append to the END of the chain so sequential add-step calls
+    // build a forward-ordered flow (welcome -> form -> ... -> completion).
+    // Walk from the first entrypoint following Next routes until we hit an
+    // End route, an unresolvable target, or a cycle. The last node visited
+    // is the natural append anchor.
+    if let Some((_, entry)) = flow.entrypoints.get_index(0) {
+        let mut current = entry.clone();
+        let mut visited: std::collections::HashSet<String> = std::collections::HashSet::new();
+        loop {
+            if !visited.insert(current.clone()) {
+                break;
+            }
+            let Some(node) = flow.nodes.get(&current) else {
+                break;
+            };
+            let next = node
+                .routing
+                .iter()
+                .find_map(|route| route.to.clone())
+                .filter(|next_id| flow.nodes.contains_key(next_id));
+            match next {
+                Some(next_id) => current = next_id,
+                None => break,
+            }
+        }
+        return Ok(current);
     }
 
-    if let Some(first) = flow.nodes.keys().next() {
-        return Ok(first.clone());
+    if let Some(last) = flow.nodes.keys().last() {
+        return Ok(last.clone());
     }
 
     Err("flow has no nodes to anchor insertion".to_string())
