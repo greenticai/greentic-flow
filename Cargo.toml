@@ -1,6 +1,10 @@
+bench = [
+    { name = "perf", harness = false },
+]
+
 [package]
 name = "greentic-flow"
-version = "0.6.0"
+version = "0.6.0-dev.0"
 edition = "2024"
 rust-version = "1.95"
 license = "MIT"
@@ -8,60 +12,138 @@ description = "Generic YGTC flow schema/loader/IR for self-describing component 
 repository = "https://github.com/greenticai/greentic-flow"
 build = "build.rs"
 include = [
-  "/Cargo.toml",
-  "/Cargo.lock",
-  "/README.md",
-  "/LICENSE",
-  "/build.rs",
-  "/frequent-components.json",
-  "/src/**",
-  "/i18n/**",
-  "/schemas/**",
-  "/fixtures/**",
-  "/tests/**",
+    "/Cargo.toml",
+    "/Cargo.lock",
+    "/README.md",
+    "/LICENSE",
+    "/build.rs",
+    "/frequent-components.json",
+    "/src/**",
+    "/i18n/**",
+    "/schemas/**",
+    "/fixtures/**",
+    "/tests/**",
+]
+
+[package.metadata.binstall]
+pkg-url = "{ repo }/releases/download/v{ version }/{ name }-v{ version }-{ target }.tgz"
+pkg-fmt = "tgz"
+bin-dir = "{ name }-v{ version }-{ target }/{ bin }{ binary-ext }"
+targets = [
+    "x86_64-unknown-linux-gnu",
+    "aarch64-unknown-linux-gnu",
+    "x86_64-apple-darwin",
+    "aarch64-apple-darwin",
+    "x86_64-pc-windows-msvc",
+    "aarch64-pc-windows-msvc",
 ]
 
 [features]
 default = []
-toml = ["dep:toml"]
+toml = [
+    "dep:toml",
+]
 
 [dependencies]
 anyhow = "1"
-clap = { version = "4", features = ["derive"] }
-greentic-interfaces-host = "0.5"
-greentic-types = { version = "0.5", features = ["telemetry-autoinit", "schema"] }
-serde = { version = "1", features = ["derive"] }
-serde_yaml_bw = {package="serde_yaml_gtc", version="2.5.2"}
+greentic-interfaces-host = ">=0.6.0-dev, <0.7.0-0"
 serde_json = "1"
 ciborium = "0.2"
 handlebars = "6"
-jsonschema = { version = "0.46"}
 thiserror = "2"
 regex = "1"
-indexmap = { version = "2", features = ["serde"] }
 lazy_static = "1"
-toml = { version = "1", optional = true }
 tracing = "0.1"
-tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 blake3 = "1"
 pathdiff = "0.2"
 sha2 = "0.11"
 semver = "1"
-chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 dashmap = "6"
-greentic-distributor-client = { version = "0.5", default-features = false, features = ["dist-client", "http-runtime"] }
-reqwest = { version = "0.13", default-features = false, features = ["blocking", "rustls"] }
 url = "2"
-wasmtime = { version = "43", features = ["component-model"] }
 wasmtime-wasi = "43"
 wasmtime-environ = "43"
-qa-spec = "0.5"
+qa-spec = ">=0.6.0-dev, <0.7.0-0"
 sys-locale = "0.3"
 unic-langid = "0.9"
 include_dir = "0.7"
-greentic-i18n-translator = { version = "0.5" }
-greentic-qa-lib = "0.5"
-greentic-interfaces-wasmtime = "0.5"
+greentic-qa-lib = ">=0.6.0-dev, <0.7.0-0"
+greentic-interfaces-wasmtime = ">=0.6.0-dev, <0.7.0-0"
+
+[dependencies.clap]
+version = "4"
+features = [
+    "derive",
+]
+
+[dependencies.greentic-types]
+version = ">=0.6.0-dev, <0.7.0-0"
+features = [
+    "telemetry-autoinit",
+    "schema",
+]
+
+[dependencies.serde]
+version = "1"
+features = [
+    "derive",
+]
+
+[dependencies.serde_yaml_bw]
+package = "serde_yaml_gtc"
+version = "2.5.2"
+
+[dependencies.jsonschema]
+version = "0.46"
+
+[dependencies.indexmap]
+version = "2"
+features = [
+    "serde",
+]
+
+[dependencies.toml]
+version = "1"
+optional = true
+
+[dependencies.tokio]
+version = "1"
+features = [
+    "rt-multi-thread",
+    "macros",
+]
+
+[dependencies.chrono]
+version = "0.4"
+default-features = false
+features = [
+    "clock",
+    "std",
+]
+
+[dependencies.greentic-distributor-client]
+version = ">=0.6.0-dev, <0.7.0-0"
+default-features = false
+features = [
+    "dist-client",
+    "http-runtime",
+]
+
+[dependencies.reqwest]
+version = "0.13"
+default-features = false
+features = [
+    "blocking",
+    "rustls",
+]
+
+[dependencies.wasmtime]
+version = "43"
+features = [
+    "component-model",
+]
+
+[dependencies.greentic-i18n-translator]
+version = ">=0.6.0-dev, <0.7.0-0"
 
 [dev-dependencies]
 assert_cmd = "2"
@@ -71,22 +153,5 @@ insta = "1"
 tempfile = "3"
 criterion = "0.8"
 
-[[bench]]
-name = "perf"
-harness = false
-
 [build-dependencies]
 serde_json = "1"
-
-[package.metadata.binstall]
-pkg-url = "{ repo }/releases/download/v{ version }/{ name }-v{ version }-{ target }.tgz"
-pkg-fmt = "tgz"
-bin-dir = "{ name }-v{ version }-{ target }/{ bin }{ binary-ext }"
-targets = [
-  "x86_64-unknown-linux-gnu",
-  "aarch64-unknown-linux-gnu",
-  "x86_64-apple-darwin",
-  "aarch64-apple-darwin",
-  "x86_64-pc-windows-msvc",
-  "aarch64-pc-windows-msvc",
-]
