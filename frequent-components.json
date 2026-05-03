@@ -8,7 +8,7 @@
       "name_i18n_key": "wizard.frequent_component.templates.name",
       "description": "Show a dynamic message",
       "description_i18n_key": "wizard.frequent_component.templates.description",
-      "component_ref": "oci://ghcr.io/greenticai/components/templates:latest"
+      "component_ref": "oci://ghcr.io/greenticai/components/templates:stable"
     },
     {
       "id": "adaptive-card",
@@ -16,7 +16,7 @@
       "name_i18n_key": "wizard.frequent_component.adaptive_card.name",
       "description": "Use cards inside flows",
       "description_i18n_key": "wizard.frequent_component.adaptive_card.description",
-      "component_ref": "oci://ghcr.io/greenticai/components/component-adaptive-card:latest"
+      "component_ref": "oci://ghcr.io/greenticai/components/component-adaptive-card:stable"
     },
     {
       "id": "questions-and-answers",
@@ -24,7 +24,7 @@
       "name_i18n_key": "wizard.frequent_component.questions_and_answers.name",
       "description": "Ask multiple questions and record answers",
       "description_i18n_key": "wizard.frequent_component.questions_and_answers.description",
-      "component_ref": "oci://ghcr.io/greenticai/components/component-qa:latest"
+      "component_ref": "oci://ghcr.io/greenticai/components/component-qa:stable"
     },
     {
       "id": "jump-to-flow",
@@ -32,7 +32,7 @@
       "name_i18n_key": "wizard.frequent_component.jump_to_flow.name",
       "description": "Jump from one flow to another",
       "description_i18n_key": "wizard.frequent_component.jump_to_flow.description",
-      "component_ref": "oci://ghcr.io/greenticai/component/component-pack2flow:latest"
+      "component_ref": "oci://ghcr.io/greenticai/component/component-pack2flow:stable"
     },
     {
       "id": "events-to-message",
@@ -40,7 +40,7 @@
       "name_i18n_key": "wizard.frequent_component.events_to_message.name",
       "description": "Send a message from an event flow",
       "description_i18n_key": "wizard.frequent_component.events_to_message.description",
-      "component_ref": "oci://ghcr.io/greenticai/component/component-events2msg:latest"
+      "component_ref": "oci://ghcr.io/greenticai/component/component-events2msg:stable"
     },
     {
       "id": "message-to-events",
@@ -48,7 +48,7 @@
       "name_i18n_key": "wizard.frequent_component.message_to_events.name",
       "description": "Send an event from a message flow",
       "description_i18n_key": "wizard.frequent_component.message_to_events.description",
-      "component_ref": "oci://ghcr.io/greenticai/component/component-msg2events:latest"
+      "component_ref": "oci://ghcr.io/greenticai/component/component-msg2events:stable"
     },
     {
       "id": "llm-openai",
@@ -56,7 +56,7 @@
       "name_i18n_key": "wizard.frequent_component.llm_openai.name",
       "description": "Use Openai, Ollama and others",
       "description_i18n_key": "wizard.frequent_component.llm_openai.description",
-      "component_ref": "oci://ghcr.io/greenticai/component/component-llm-openai:latest"
+      "component_ref": "oci://ghcr.io/greenticai/component/component-llm-openai:stable"
     },
     {
       "id": "http",
@@ -64,7 +64,7 @@
       "name_i18n_key": "wizard.frequent_component.http.name",
       "description": "Use http to call a url",
       "description_i18n_key": "wizard.frequent_component.http.description",
-      "component_ref": "oci://ghcr.io/greenticai/component/component-http:latest"
+      "component_ref": "oci://ghcr.io/greenticai/component/component-http:stable"
     }
   ]
 }

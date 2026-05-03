@@ -111,7 +111,7 @@ Using dev_flows (config mode) for schema-valid payloads:
 ```
 greentic-flow add-step --flow flows/main.ygtc --mode config \
   --node-id hello-world \
-  --component oci://ghcr.io/greenticai/components/hello-world:latest --pin \
+  --component oci://ghcr.io/greenticai/components/hello-world:stable --pin \
   --after start
 ```
 - Runs the component’s `dev_flows.default` config to emit a StepSpec with defaults and placeholder routing.
