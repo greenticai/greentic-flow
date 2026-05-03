@@ -151,7 +151,7 @@ fn component_id_from_source(source: &ComponentSourceRefV1) -> Option<ComponentId
         ComponentSourceRefV1::Store { r#ref, .. } => r#ref,
         ComponentSourceRefV1::Local { .. } => return None,
     };
-    // Extract component name from ref like "oci://ghcr.io/greenticai/components/templates:latest"
+    // Extract component name from ref like "oci://ghcr.io/greenticai/components/templates:stable"
     let path_part = raw_ref.split("://").last().unwrap_or(raw_ref);
     let without_tag = path_part.split([':', '@']).next().unwrap_or(path_part);
     let name = without_tag.rsplit('/').next().unwrap_or(without_tag);
@@ -441,7 +441,7 @@ mod tests {
     #[test]
     fn helper_functions_extract_component_ids_from_remote_refs() {
         let source = ComponentSourceRefV1::Oci {
-            r#ref: "oci://ghcr.io/greenticai/components/templates:latest".to_string(),
+            r#ref: "oci://ghcr.io/greenticai/components/templates:stable".to_string(),
             digest: None,
         };
         assert_eq!(
