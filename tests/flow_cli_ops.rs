@@ -1076,7 +1076,7 @@ nodes:
         .arg("--payload")
         .arg(r#"{}"#)
         .arg("--component")
-        .arg("oci://example.com/component:latest")
+        .arg("oci://example.com/component:stable")
         .arg("--pin")
         .arg("--after")
         .arg("start")
@@ -1330,7 +1330,7 @@ nodes:
         .arg("--node-id")
         .arg("adaptive-card")
         .arg("--component")
-        .arg("oci://example.com/component:latest")
+        .arg("oci://example.com/component:stable")
         .arg("--pin")
         .arg("--after")
         .arg("start")
@@ -3685,7 +3685,7 @@ fn add_step_rejects_private_oci_host() {
         .arg("--payload")
         .arg(r#"{}"#)
         .arg("--component")
-        .arg("oci://localhost/component:latest")
+        .arg("oci://localhost/component:stable")
         .assert()
         .failure()
         .stderr(predicates::str::contains(
@@ -3763,7 +3763,7 @@ nodes:
         .arg("--step")
         .arg("hello")
         .arg("--component")
-        .arg("oci://localhost/component:latest")
+        .arg("oci://localhost/component:stable")
         .assert()
         .failure()
         .stderr(predicates::str::contains(
@@ -3872,7 +3872,7 @@ nodes:
     .unwrap();
     fs::write(
         &sidecar_path,
-        r#"{"schema_version":1,"flow":"flow.ygtc","nodes":{"hello":{"source":{"kind":"oci","ref":"oci://localhost/component:latest"}}}}"#,
+        r#"{"schema_version":1,"flow":"flow.ygtc","nodes":{"hello":{"source":{"kind":"oci","ref":"oci://localhost/component:stable"}}}}"#,
     )
     .unwrap();
 

@@ -117,7 +117,7 @@ Examples:
 
 ```bash
 greentic-flow component-schema \
-  oci://ghcr.io/greenticai/component/component-llm-openai:latest \
+  oci://ghcr.io/greenticai/component/component-llm-openai:stable \
   --mode setup
 
 greentic-flow component-schema \
@@ -191,7 +191,7 @@ For buildable packs, prefer one of these:
 Examples:
 
 ```json
-{ "component": "oci://ghcr.io/greenticai/component/component-llm-openai:latest" }
+{ "component": "oci://ghcr.io/greenticai/component/component-llm-openai:stable" }
 ```
 
 ```json
