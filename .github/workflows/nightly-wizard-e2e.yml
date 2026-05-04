@@ -23,7 +23,7 @@ jobs:
       - name: Install cargo-binstall
         run: cargo install cargo-binstall --locked
       - name: Install greentic-pack
-        run: cargo binstall --no-confirm greentic-pack
+        run: cargo binstall --no-confirm greentic-pack || cargo install greentic-pack --locked
       - name: Build greentic-flow
         run: cargo build --bin greentic-flow
       - name: Run nightly wizard e2e
