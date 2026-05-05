@@ -14,7 +14,10 @@ pub fn normalize_under_root(root: &Path, candidate: &Path) -> Result<PathBuf> {
         .canonicalize()
         .with_context(|| format!("failed to canonicalize {}", joined.display()))?;
 
-    if !canon.starts_with(root) {
+    let canon_root = root
+        .canonicalize()
+        .with_context(|| format!("failed to canonicalize root {}", root.display()))?;
+    if !canon.starts_with(&canon_root) {
         anyhow::bail!(
             "path escapes root ({}): {}",
             root.display(),
