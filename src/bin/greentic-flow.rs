@@ -9142,7 +9142,10 @@ nodes: {}
             },
         )
         .expect("wizard run with emitted answers");
-        eprintln!("=== WIZARD OUTPUT ===\n{}", String::from_utf8_lossy(&output));
+        eprintln!(
+            "=== WIZARD OUTPUT ===\n{}",
+            String::from_utf8_lossy(&output)
+        );
         assert!(answers_path.exists(), "emitted answers file should exist");
 
         let mut replay_output = Vec::new();
