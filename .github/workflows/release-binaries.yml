@@ -19,6 +19,7 @@ jobs:
     with:
       package: greentic-flow
       binary: greentic-flow
+      windows-archive-format: zip
       extra-files: |
         frequent-components.json
     secrets: inherit
