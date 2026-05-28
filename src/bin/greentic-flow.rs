@@ -1216,6 +1216,18 @@ fn run_wizard_menu_with_io<R: Read, W: Write>(
 
 fn run_wizard_menu_with_config<R: Read, W: Write>(
     pack_dir: &Path,
+    reader: R,
+    writer: W,
+    config: WizardRunConfig,
+) -> Result<()> {
+    match run_wizard_menu_impl(pack_dir, reader, writer, config) {
+        Err(e) if e.is::<WizardEof>() => Ok(()),
+        other => other,
+    }
+}
+
+fn run_wizard_menu_impl<R: Read, W: Write>(
+    pack_dir: &Path,
     mut reader: R,
     mut writer: W,
     config: WizardRunConfig,
@@ -2363,6 +2375,20 @@ fn wizard_menu_answer<R: Read, W: Write>(
     Ok(value.to_string())
 }
 
+/// Returned by [`read_input_line`] when the reader reaches EOF with no buffered
+/// bytes.  The wizard treats this the same way a real terminal treats Ctrl-D:
+/// exit gracefully rather than propagating an error.
+#[derive(Debug)]
+struct WizardEof;
+
+impl std::fmt::Display for WizardEof {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "wizard input exhausted")
+    }
+}
+
+impl std::error::Error for WizardEof {}
+
 fn read_input_line<R: Read + ?Sized>(reader: &mut R) -> Result<String> {
     let mut buf = Vec::new();
     let mut cursor = 0usize;
@@ -2371,7 +2397,7 @@ fn read_input_line<R: Read + ?Sized>(reader: &mut R) -> Result<String> {
         let read = reader.read(&mut byte)?;
         if read == 0 {
             if buf.is_empty() {
-                anyhow::bail!("wizard input exhausted");
+                return Err(anyhow::Error::new(WizardEof));
             }
             break;
         }
@@ -3968,10 +3994,14 @@ fn wizard_component_record_value_for_node(flow_path: &Path, step_id: &str) -> Re
             let absolute = fs::canonicalize(local_path_from_sidecar(path, flow_path))
                 .unwrap_or_else(|_| local_path_from_sidecar(path, flow_path));
             let pack_dir = infer_pack_root_from_flow_path(flow_path)?;
-            if let Ok(rel) = absolute.strip_prefix(&pack_dir) {
+            let pack_dir_canonical =
+                fs::canonicalize(&pack_dir).unwrap_or_else(|_| pack_dir.clone());
+            if let Ok(rel) = absolute.strip_prefix(&pack_dir_canonical) {
+                rel.to_string_lossy().replace('\\', "/")
+            } else if let Ok(rel) = absolute.strip_prefix(&pack_dir) {
                 rel.to_string_lossy().replace('\\', "/")
             } else {
-                diff_paths(&absolute, &pack_dir)
+                diff_paths(&absolute, &pack_dir_canonical)
                     .unwrap_or(absolute)
                     .to_string_lossy()
                     .replace('\\', "/")
@@ -9102,7 +9132,7 @@ nodes: {}
         }
 
         let input = Cursor::new(format!(
-            "2\n1\n3\n2\n1\n1\n3\n{remote_url}\nfalse\n7\n0\n0\n0\n"
+            "2\n1\n3\n2\n1\n2\n3\n{remote_url}\nfalse\nltr\nwarn\nfalse\n7\n0\n0\n0\n"
         ));
         let mut output = Vec::new();
         super::run_wizard_menu_with_config(
@@ -9116,6 +9146,10 @@ nodes: {}
             },
         )
         .expect("wizard run with emitted answers");
+        eprintln!(
+            "=== WIZARD OUTPUT ===\n{}",
+            String::from_utf8_lossy(&output)
+        );
         assert!(answers_path.exists(), "emitted answers file should exist");
 
         let mut replay_output = Vec::new();

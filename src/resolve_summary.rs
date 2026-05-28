@@ -477,7 +477,10 @@ mod tests {
         .unwrap();
 
         assert!(manifest_matches_wasm(&manifest_path, &wasm_path.canonicalize().unwrap()).unwrap());
-        assert_eq!(find_manifest_for_wasm(&wasm_path).unwrap(), manifest_path);
+        assert_eq!(
+            find_manifest_for_wasm(&wasm_path).unwrap(),
+            manifest_path.canonicalize().unwrap()
+        );
 
         let (component_id, manifest) = read_manifest_metadata(&manifest_path).unwrap();
         assert_eq!(component_id.as_str(), "acme.widget");

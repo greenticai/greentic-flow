@@ -23,7 +23,13 @@ jobs:
       - name: Install cargo-binstall
         run: cargo install cargo-binstall --locked
       - name: Install greentic-pack
-        run: cargo binstall --no-confirm greentic-pack
+        run: |
+          if command -v greentic-pack >/dev/null 2>&1; then
+            echo "greentic-pack already present at $(command -v greentic-pack)"
+          else
+            cargo binstall --no-confirm --force greentic-pack || cargo install greentic-pack --locked --force
+          fi
+          command -v greentic-pack
       - name: Build greentic-flow
         run: cargo build --bin greentic-flow
       - name: Run nightly wizard e2e
