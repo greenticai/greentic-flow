@@ -119,6 +119,7 @@ pub fn compile_flow(doc: FlowDoc) -> Result<Flow> {
             })
             .unwrap_or_default();
         let mut op_key: Option<String> = None;
+        let mut op_sibling: Option<String> = None;
         let mut payload: Option<Value> = None;
         let mut input_mapping: Option<Value> = None;
         let mut output_mapping: Option<Value> = None;
@@ -137,6 +138,10 @@ pub fn compile_flow(doc: FlowDoc) -> Result<Flow> {
                     err_mapping = Some(v);
                     continue;
                 }
+                "operation" => {
+                    op_sibling = v.as_str().map(str::to_string);
+                    continue;
+                }
                 _ => {}
             }
             op_key = Some(k);
@@ -146,12 +151,16 @@ pub fn compile_flow(doc: FlowDoc) -> Result<Flow> {
             message: format!("node '{node_id_str}' missing operation key"),
             location: crate::error::FlowErrorLocation::at_path(format!("nodes.{node_id_str}")),
         })?;
-        let is_builtin = matches!(operation.as_str(), "questions" | "template");
+        let is_builtin =
+            matches!(operation.as_str(), "questions" | "template") || operation.starts_with("dw.");
         let is_legacy = schema_version.unwrap_or(1) < 2;
         let (component_id, op_field) = if is_builtin || is_legacy {
-            (operation, None)
+            (operation, op_sibling)
         } else {
-            ("component.exec".to_string(), Some(operation))
+            (
+                "component.exec".to_string(),
+                Some(op_sibling.unwrap_or(operation)),
+            )
         };
         let node = Node {
             id: node_id.clone(),
