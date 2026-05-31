@@ -167,3 +167,48 @@ nodes:
         Some(json!({ "target": "$.error" }))
     );
 }
+
+#[test]
+fn dw_agent_op_key_compiles_to_dw_agent_component() {
+    let yaml = r#"
+id: aw_flow
+type: messaging
+schema_version: 2
+nodes:
+  greet:
+    dw.agent:
+      user_text: "ping"
+    operation: greeter
+    routing: out
+"#;
+    let doc = load_ygtc_from_str(yaml).unwrap();
+    let flow = compile_flow(doc).unwrap();
+    let node = flow.nodes.get(&NodeId::new("greet").unwrap()).unwrap();
+    assert_eq!(node.component.id.as_str(), "dw.agent");
+    assert_eq!(node.component.operation.as_deref(), Some("greeter"));
+    assert_eq!(
+        node.input.mapping.pointer("/user_text"),
+        Some(&json!("ping"))
+    );
+}
+
+#[test]
+fn component_exec_with_operation_sibling_uses_operation_value() {
+    let yaml = r#"
+id: exec_flow
+type: messaging
+schema_version: 2
+nodes:
+  step:
+    component.exec:
+      component: "oci://acme/widget:1"
+      config: {}
+    operation: run
+    routing: out
+"#;
+    let doc = load_ygtc_from_str(yaml).unwrap();
+    let flow = compile_flow(doc).unwrap();
+    let node = flow.nodes.get(&NodeId::new("step").unwrap()).unwrap();
+    assert_eq!(node.component.id.as_str(), "component.exec");
+    assert_eq!(node.component.operation.as_deref(), Some("run"));
+}
