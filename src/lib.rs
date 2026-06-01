@@ -84,6 +84,7 @@ pub fn compile_flow(doc: FlowDoc) -> Result<Flow> {
         schema_version,
         mut entrypoints,
         meta: _,
+        slot_schema,
         nodes: node_docs,
     } = doc;
 
@@ -194,6 +195,26 @@ pub fn compile_flow(doc: FlowDoc) -> Result<Flow> {
 
     let entrypoints_map: BTreeMap<String, Value> = entrypoints.into_iter().collect();
 
+    let mut extra = parameters;
+    if let Some(ss) = slot_schema {
+        match extra {
+            Value::Object(ref mut map) => {
+                map.insert("greentic.slot_schema".to_string(), ss);
+            }
+            Value::Null => {
+                let mut map = serde_json::Map::new();
+                map.insert("greentic.slot_schema".to_string(), ss);
+                extra = Value::Object(map);
+            }
+            _ => {
+                tracing::warn!(
+                    flow_id = %id,
+                    "slot_schema present but parameters is not an object; skipping forward into extra"
+                );
+            }
+        }
+    }
+
     Ok(Flow {
         schema_version: "flow-v1".to_string(),
         id: flow_id,
@@ -204,7 +225,7 @@ pub fn compile_flow(doc: FlowDoc) -> Result<Flow> {
             title,
             description,
             tags: tags.into_iter().collect::<BTreeSet<_>>(),
-            extra: parameters,
+            extra,
         },
     })
 }
@@ -570,5 +591,53 @@ nodes:
         let ask_id = NodeId::new("ask").expect("valid node id");
         let ask = flow.nodes.get(&ask_id).expect("ask node exists");
         assert!(matches!(ask.routing, Routing::Custom(_)));
+    }
+
+    #[test]
+    fn compile_flow_forwards_slot_schema_into_metadata_extra() {
+        let slot_schema = json!([
+            { "name": "city", "slot_type": "string", "pattern": "^[A-Z].+" },
+            { "name": "color", "slot_type": "enum", "enum_values": ["red", "blue"] }
+        ]);
+        let doc = crate::model::FlowDoc {
+            id: "test".to_string(),
+            title: None,
+            description: None,
+            flow_type: "messaging".to_string(),
+            start: None,
+            parameters: json!({"custom_key": 42}),
+            tags: vec![],
+            schema_version: None,
+            entrypoints: Default::default(),
+            meta: None,
+            slot_schema: Some(slot_schema.clone()),
+            nodes: {
+                let mut m = indexmap::IndexMap::new();
+                m.insert(
+                    "start".to_string(),
+                    crate::model::NodeDoc {
+                        routing: json!("out"),
+                        raw: {
+                            let mut r = indexmap::IndexMap::new();
+                            r.insert("template".to_string(), json!("hi"));
+                            r
+                        },
+                        ..Default::default()
+                    },
+                );
+                m
+            },
+        };
+
+        let flow = compile_flow(doc).expect("compile_flow should succeed");
+        assert_eq!(
+            flow.metadata.extra["greentic.slot_schema"], slot_schema,
+            "slot_schema must be forwarded into metadata.extra"
+        );
+        assert_eq!(
+            flow.metadata.extra["custom_key"],
+            json!(42),
+            "original parameters must be preserved"
+        );
     }
 }

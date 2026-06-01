@@ -88,6 +88,7 @@ fn add_step_with_real_manifest_catalog() {
         schema_version: Some(2),
         entrypoints: indexmap! {"default".to_string() => "start".to_string()},
         meta: None,
+        slot_schema: None,
         nodes,
     };
 

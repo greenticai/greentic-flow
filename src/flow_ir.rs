@@ -22,6 +22,7 @@ pub struct FlowIr {
     pub schema_version: Option<u32>,
     pub entrypoints: IndexMap<String, String>,
     pub meta: Option<Value>,
+    pub slot_schema: Option<Value>,
     pub nodes: IndexMap<String, NodeIr>,
 }
 
@@ -102,6 +103,7 @@ impl FlowIr {
             schema_version,
             entrypoints,
             meta: doc.meta,
+            slot_schema: doc.slot_schema,
             nodes,
         })
     }
@@ -193,6 +195,7 @@ impl FlowIr {
             schema_version: self.schema_version,
             entrypoints,
             meta: self.meta.clone(),
+            slot_schema: self.slot_schema.clone(),
             nodes,
         })
     }
@@ -375,5 +378,64 @@ nodes:
         assert_eq!(raw.get("in_map"), Some(&json!({ "source": "$.input" })));
         assert_eq!(raw.get("out_map"), Some(&json!({ "target": "$.output" })));
         assert_eq!(raw.get("err_map"), Some(&json!({ "target": "$.error" })));
+    }
+
+    #[test]
+    fn slot_schema_round_trips_through_ir() {
+        let yaml = r#"
+id: nda_intake
+type: messaging
+schema_version: 2
+slot_schema:
+  - name: counterparty
+    slot_type: string
+    pattern: "between\\s+([A-Z][\\w&. ]*)"
+    required: true
+  - name: due_date
+    slot_type: date
+    required: true
+nodes:
+  start:
+    component.exec:
+      component: repo://demo/component
+    operation: run
+    routing: out
+"#;
+
+        let flow = parse_flow_to_ir(yaml).expect("parse flow");
+        let schema = flow.slot_schema.as_ref().expect("slot_schema present");
+        assert_eq!(schema[0]["name"], "counterparty");
+        assert_eq!(schema[0]["slot_type"], "string");
+        assert_eq!(schema[1]["name"], "due_date");
+        assert_eq!(schema[1]["slot_type"], "date");
+
+        let doc = flow.to_doc().expect("to doc");
+        assert_eq!(doc.slot_schema.as_ref(), Some(schema));
+    }
+
+    #[test]
+    fn flow_without_slot_schema_round_trips_with_none() {
+        let yaml = r#"
+id: legacy
+type: messaging
+nodes:
+  start:
+    component.exec:
+      component: repo://demo/component
+    operation: run
+    routing: out
+"#;
+
+        let flow = parse_flow_to_ir(yaml).expect("parse flow");
+        assert!(flow.slot_schema.is_none());
+        let doc = flow.to_doc().expect("to doc");
+        assert!(doc.slot_schema.is_none());
+
+        // And the serialized YAML must NOT include a slot_schema key (skip-if-none).
+        let yaml_out = serde_yaml_bw::to_string(&doc).expect("serialize");
+        assert!(
+            !yaml_out.contains("slot_schema"),
+            "absent slot_schema must not serialize: {yaml_out}"
+        );
     }
 }

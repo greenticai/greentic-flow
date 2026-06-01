@@ -2290,6 +2290,7 @@ fn wizard_menu_answer<R: Read, W: Write>(
         frontend: WizardFrontend::JsonUi,
         i18n: qa_i18n,
         verbose: false,
+        env_id: String::new(),
     })
     .map_err(|err| anyhow!("{}: {err}", wizard_t("wizard.error.qa_runner_failed")))?;
     loop {
@@ -2598,6 +2599,7 @@ fn run_questions_with_qa_lib_io<R: Read, W: Write>(
         frontend: WizardFrontend::JsonUi,
         i18n: qa_i18n,
         verbose: false,
+        env_id: String::new(),
     })
     .map_err(|err| anyhow!("{}: {err}", wizard_t("wizard.error.qa_runner_failed")))?;
 
@@ -3083,6 +3085,7 @@ fn run_component_qa_with_qa_lib(
             debug: false,
         },
         verbose: false,
+        env_id: String::new(),
     })
     .map_err(|err| anyhow!("{}: {err}", wizard_t("wizard.error.qa_runner_failed")))?;
 
@@ -4195,6 +4198,7 @@ fn write_new_flow_file(spec: NewFlowFileSpec) -> Result<()> {
         schema_version: Some(spec.schema_version),
         entrypoints: IndexMap::new(),
         meta: None,
+        slot_schema: None,
         nodes: IndexMap::new(),
     };
     let mut yaml = serde_yaml_bw::to_string(&doc)?;
