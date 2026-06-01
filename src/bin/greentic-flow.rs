@@ -4198,6 +4198,7 @@ fn write_new_flow_file(spec: NewFlowFileSpec) -> Result<()> {
         schema_version: Some(spec.schema_version),
         entrypoints: IndexMap::new(),
         meta: None,
+        slot_schema: None,
         nodes: IndexMap::new(),
     };
     let mut yaml = serde_yaml_bw::to_string(&doc)?;

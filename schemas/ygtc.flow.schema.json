@@ -64,6 +64,73 @@
       "type": "integer",
       "minimum": 1
     },
+    "slot_schema": {
+      "type": "array",
+      "description": "Slot definitions for utterance-driven prefill. Consumed by the canonical M2 chain (Fast2Flow Dispatch{utterance} -> component-slot-extractor -> adaptive-card with prefill). Each entry mirrors component-slot-extractor's SlotDefinition.",
+      "items": {
+        "type": "object",
+        "required": ["name", "slot_type"],
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1
+          },
+          "slot_type": {
+            "type": "string",
+            "enum": ["string", "enum", "number", "date", "boolean"]
+          },
+          "pattern": {
+            "type": "string",
+            "description": "Optional regex; required for string slots."
+          },
+          "required": {
+            "type": "boolean",
+            "default": false
+          },
+          "enum_values": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "default_value": {
+            "type": "string",
+            "description": "Fallback when extraction yields no match; coerced per slot_type."
+          }
+        },
+        "additionalProperties": false,
+        "allOf": [
+          {
+            "if": {
+              "properties": { "slot_type": { "const": "string" } },
+              "required": ["slot_type"]
+            },
+            "then": {
+              "required": ["pattern"],
+              "properties": {
+                "pattern": { "type": "string", "minLength": 1 }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": { "slot_type": { "const": "enum" } },
+              "required": ["slot_type"]
+            },
+            "then": {
+              "required": ["enum_values"],
+              "properties": {
+                "enum_values": {
+                  "type": "array",
+                  "minItems": 1,
+                  "items": { "type": "string" }
+                }
+              }
+            }
+          }
+        ]
+      }
+    },
     "nodes": {
       "type": "object",
       "minProperties": 1,
