@@ -36,6 +36,16 @@ pub struct FlowDoc {
     pub entrypoints: IndexMap<String, Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub meta: Option<Value>,
+    /// Slot definitions for utterance-driven prefill. Free-form `Value` to
+    /// avoid coupling greentic-flow to a specific extractor crate; expected
+    /// to be a JSON array of `SlotDefinition` objects matching the
+    /// `component-slot-extractor` wire shape (`name`, `slot_type`,
+    /// `pattern?`, `required`, `enum_values?`, `default_value?`).
+    /// Consumed by the canonical M2 chain: Fast2Flow `Dispatch{utterance}`
+    /// → slot-extractor node (utterance + this schema) → adaptive-card node
+    /// with `prefill = extractor output`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slot_schema: Option<Value>,
     pub nodes: IndexMap<String, NodeDoc>,
 }
 

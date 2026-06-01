@@ -84,6 +84,7 @@ pub fn compile_flow(doc: FlowDoc) -> Result<Flow> {
         schema_version,
         mut entrypoints,
         meta: _,
+        slot_schema: _,
         nodes: node_docs,
     } = doc;
 

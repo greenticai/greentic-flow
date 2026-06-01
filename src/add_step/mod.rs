@@ -254,6 +254,7 @@ pub fn apply_plan(flow: &FlowIr, plan: AddStepPlan, allow_cycles: bool) -> Resul
             schema_version: flow.schema_version,
             entrypoints,
             meta: flow.meta.clone(),
+            slot_schema: flow.slot_schema.clone(),
             nodes,
         });
     }
@@ -291,6 +292,7 @@ pub fn apply_plan(flow: &FlowIr, plan: AddStepPlan, allow_cycles: bool) -> Resul
             schema_version: flow.schema_version,
             entrypoints,
             meta: flow.meta.clone(),
+            slot_schema: flow.slot_schema.clone(),
             nodes: new_nodes,
         });
     }
@@ -332,6 +334,7 @@ pub fn apply_plan(flow: &FlowIr, plan: AddStepPlan, allow_cycles: bool) -> Resul
         schema_version: flow.schema_version,
         entrypoints: flow.entrypoints.clone(),
         meta: flow.meta.clone(),
+        slot_schema: flow.slot_schema.clone(),
         nodes: reordered,
     })
 }
