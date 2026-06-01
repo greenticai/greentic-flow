@@ -106,7 +106,7 @@
               "required": ["slot_type"]
             },
             "then": {
-              "required": ["name", "slot_type", "pattern"],
+              "required": ["pattern"],
               "properties": {
                 "pattern": { "type": "string", "minLength": 1 }
               }
@@ -118,7 +118,7 @@
               "required": ["slot_type"]
             },
             "then": {
-              "required": ["name", "slot_type", "enum_values"],
+              "required": ["enum_values"],
               "properties": {
                 "enum_values": {
                   "type": "array",
