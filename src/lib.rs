@@ -200,7 +200,7 @@ pub fn compile_flow(doc: FlowDoc) -> Result<Flow> {
 
     let mut extra = parameters;
     if let Some(ss) = slot_schema {
-        validate_slot_schema(&ss)?;
+        validate_slot_schema_names(&ss)?;
         match extra {
             Value::Object(ref mut map) => {
                 map.insert(SLOT_SCHEMA_METADATA_KEY.to_string(), ss);
@@ -234,99 +234,35 @@ pub fn compile_flow(doc: FlowDoc) -> Result<Flow> {
     })
 }
 
-/// Allowed `slot_type` values, matching the JSON schema enum.
-const SLOT_TYPES: &[&str] = &["string", "enum", "number", "date", "boolean"];
-
-/// Validate the structure of a `slot_schema` value before it enters
-/// `Flow.metadata.extra`. This catches malformed schemas that bypass
-/// the JSON-schema gate (e.g. `component.exec` flows where the loader
-/// skips `validate_json`).
-fn validate_slot_schema(value: &Value) -> Result<()> {
+/// Reject duplicate slot names in `slot_schema`. The JSON schema enforces
+/// structure (types, required fields, allOf conditionals) but cannot check
+/// name uniqueness across array items — `uniqueItems` compares whole objects,
+/// not individual fields.
+fn validate_slot_schema_names(value: &Value) -> Result<()> {
     use crate::error::{FlowError, FlowErrorLocation, SchemaErrorDetail};
 
-    let schema_err = |message: String, location: String| FlowError::Schema {
-        message: message.clone(),
-        details: vec![SchemaErrorDetail {
-            message,
-            location: FlowErrorLocation::at_path(&location),
-        }],
-        location: FlowErrorLocation::at_path(location),
+    let Some(slots) = value.as_array() else {
+        return Ok(()); // non-array is caught by the JSON schema
     };
-
-    let slots = value.as_array().ok_or_else(|| {
-        schema_err(
-            "slot_schema must be an array".to_string(),
-            "slot_schema".to_string(),
-        )
-    })?;
 
     let mut seen_names: HashSet<&str> = HashSet::with_capacity(slots.len());
 
     for (i, slot) in slots.iter().enumerate() {
-        let path = format!("slot_schema[{i}]");
-        let obj = slot.as_object().ok_or_else(|| {
-            schema_err(format!("{path}: each slot must be an object"), path.clone())
-        })?;
-
-        let name = obj
-            .get("name")
-            .and_then(Value::as_str)
-            .filter(|s| !s.is_empty())
-            .ok_or_else(|| {
-                schema_err(
-                    format!("{path}: 'name' is required and must be a non-empty string"),
-                    format!("{path}/name"),
-                )
-            })?;
-
+        let Some(name) = slot.get("name").and_then(Value::as_str) else {
+            continue; // missing/empty name is caught by the JSON schema
+        };
         if !seen_names.insert(name) {
-            return Err(schema_err(
-                format!("{path}: duplicate slot name '{name}'"),
-                format!("{path}/name"),
-            ));
-        }
-
-        let slot_type = obj
-            .get("slot_type")
-            .and_then(Value::as_str)
-            .ok_or_else(|| {
-                schema_err(
-                    format!("{path}: 'slot_type' is required and must be a string"),
-                    format!("{path}/slot_type"),
-                )
-            })?;
-
-        if !SLOT_TYPES.contains(&slot_type) {
-            return Err(schema_err(
-                format!("{path}: unknown slot_type '{slot_type}'; expected one of {SLOT_TYPES:?}"),
-                format!("{path}/slot_type"),
-            ));
-        }
-
-        match slot_type {
-            "string"
-                if obj
-                    .get("pattern")
-                    .and_then(Value::as_str)
-                    .is_none_or(str::is_empty) =>
-            {
-                return Err(schema_err(
-                    format!("{path}: string slot '{name}' requires a non-empty 'pattern'"),
-                    format!("{path}/pattern"),
-                ));
-            }
-            "enum"
-                if obj
-                    .get("enum_values")
-                    .and_then(Value::as_array)
-                    .is_none_or(Vec::is_empty) =>
-            {
-                return Err(schema_err(
-                    format!("{path}: enum slot '{name}' requires a non-empty 'enum_values' array"),
-                    format!("{path}/enum_values"),
-                ));
-            }
-            _ => {}
+            let path = format!("slot_schema[{i}]");
+            let message = format!("{path}: duplicate slot name '{name}'");
+            let loc_path = format!("{path}/name");
+            return Err(FlowError::Schema {
+                message: message.clone(),
+                details: vec![SchemaErrorDetail {
+                    message,
+                    location: FlowErrorLocation::at_path(&loc_path),
+                }],
+                location: FlowErrorLocation::at_path(loc_path),
+            });
         }
     }
 
@@ -623,7 +559,15 @@ nodes:
 "#,
         )
         .expect_err("invalid shorthand should fail during load");
-        assert!(matches!(err, crate::error::FlowError::Routing { .. }));
+        // The JSON schema now catches the invalid routing value ("invalid" is
+        // not in the `oneOf` enum) before the Rust routing validator runs.
+        assert!(
+            matches!(
+                err,
+                crate::error::FlowError::Routing { .. } | crate::error::FlowError::Schema { .. }
+            ),
+            "expected Routing or Schema error, got: {err}"
+        );
     }
 
     #[test]
@@ -779,41 +723,18 @@ nodes:
         }
     }
 
-    fn assert_slot_schema_rejected(slots: Value, expected_keyword: &str) {
-        let doc = component_exec_doc_with_slots(Some(slots));
-        let msg = compile_flow(doc)
-            .expect_err("compile_flow should reject malformed slot_schema")
-            .to_string();
-        assert!(
-            msg.contains(expected_keyword),
-            "error should mention '{expected_keyword}': {msg}"
-        );
-    }
-
-    #[test]
-    fn compile_rejects_string_slot_without_pattern_via_component_exec() {
-        assert_slot_schema_rejected(
-            json!([{ "name": "city", "slot_type": "string" }]),
-            "pattern",
-        );
-    }
-
-    #[test]
-    fn compile_rejects_enum_slot_without_enum_values_via_component_exec() {
-        assert_slot_schema_rejected(
-            json!([{ "name": "color", "slot_type": "enum" }]),
-            "enum_values",
-        );
-    }
-
     #[test]
     fn compile_rejects_duplicate_slot_names() {
-        assert_slot_schema_rejected(
-            json!([
-                { "name": "city", "slot_type": "string", "pattern": "^.+" },
-                { "name": "city", "slot_type": "number" }
-            ]),
-            "duplicate",
+        let doc = component_exec_doc_with_slots(Some(json!([
+            { "name": "city", "slot_type": "string", "pattern": "^.+" },
+            { "name": "city", "slot_type": "number" }
+        ])));
+        let msg = compile_flow(doc)
+            .expect_err("compile_flow should reject duplicate slot names")
+            .to_string();
+        assert!(
+            msg.contains("duplicate"),
+            "error should mention 'duplicate': {msg}"
         );
     }
 
@@ -830,6 +751,17 @@ nodes:
         assert!(
             flow.metadata.extra.get(SLOT_SCHEMA_METADATA_KEY).is_some(),
             "slot_schema must be present in metadata.extra"
+        );
+    }
+
+    #[test]
+    fn routing_shorthand_validator_rejects_invalid_string_directly() {
+        let nodes = HashSet::from(["start".to_string()]);
+        let err = compile_routing(&json!("invalid"), &nodes, "start")
+            .expect_err("invalid shorthand must be rejected");
+        assert!(
+            matches!(err, crate::error::FlowError::Routing { .. }),
+            "expected Routing error, got: {err}"
         );
     }
 }

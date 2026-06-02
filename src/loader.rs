@@ -225,26 +225,6 @@ pub(crate) fn load_with_schema_text(
         "meta",
         "operation",
     ];
-    let looks_legacy = v_json.get("nodes").and_then(Value::as_object).map(|nodes| {
-        nodes.values().any(|n| {
-            let (op_count, has_dot_key) = n
-                .as_object()
-                .map(|obj| {
-                    let op_count = obj
-                        .keys()
-                        .filter(|k| !reserved_for_count.contains(&k.as_str()))
-                        .count();
-                    let has_dot_key = obj.keys().any(|k| k.contains('.'));
-                    (op_count, has_dot_key)
-                })
-                .unwrap_or((0, false));
-            op_count != 1
-                || has_dot_key
-                || n.get("component.exec").is_some()
-                || n.get("operation").is_some()
-                || n.get("pack_alias").is_some()
-        })
-    });
     if v_json.get("type").is_none() {
         return Err(FlowError::Schema {
             message: format!("{source_label}/type: missing required property 'type'"),
@@ -282,7 +262,7 @@ pub(crate) fn load_with_schema_text(
         }
     }
 
-    if !nodes_empty && schema_version >= 2 && !looks_legacy.unwrap_or(false) {
+    if !nodes_empty && schema_version >= 2 {
         validate_json(
             &v_json,
             schema_text,
