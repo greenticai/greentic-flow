@@ -217,7 +217,7 @@
             }
           },
           "patternProperties": {
-            "^[A-Za-z_][\\w-]*$": {
+            "^[A-Za-z_][\\w.-]*$": {
               "description": "Operation payload (exactly one op key is required).",
               "additionalProperties": true
             }
