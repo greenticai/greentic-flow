@@ -46,6 +46,9 @@ pub use flow_bundle::{
 pub use json_output::{JsonDiagnostic, LintJsonOutput, lint_to_stdout_json};
 pub use splice::{NEXT_NODE_PLACEHOLDER, splice_node_after};
 
+/// Metadata key under which compiled flows expose their flow-level slot schema.
+pub const SLOT_SCHEMA_METADATA_KEY: &str = "greentic.slot_schema";
+
 use crate::{error::Result, model::FlowDoc};
 use greentic_types::{
     ComponentId, Flow, FlowComponentRef, FlowId, FlowKind, FlowMetadata, InputMapping, Node,
@@ -197,13 +200,14 @@ pub fn compile_flow(doc: FlowDoc) -> Result<Flow> {
 
     let mut extra = parameters;
     if let Some(ss) = slot_schema {
+        validate_slot_schema(&ss)?;
         match extra {
             Value::Object(ref mut map) => {
-                map.insert("greentic.slot_schema".to_string(), ss);
+                map.insert(SLOT_SCHEMA_METADATA_KEY.to_string(), ss);
             }
             Value::Null => {
                 let mut map = serde_json::Map::new();
-                map.insert("greentic.slot_schema".to_string(), ss);
+                map.insert(SLOT_SCHEMA_METADATA_KEY.to_string(), ss);
                 extra = Value::Object(map);
             }
             _ => {
@@ -228,6 +232,105 @@ pub fn compile_flow(doc: FlowDoc) -> Result<Flow> {
             extra,
         },
     })
+}
+
+/// Allowed `slot_type` values, matching the JSON schema enum.
+const SLOT_TYPES: &[&str] = &["string", "enum", "number", "date", "boolean"];
+
+/// Validate the structure of a `slot_schema` value before it enters
+/// `Flow.metadata.extra`. This catches malformed schemas that bypass
+/// the JSON-schema gate (e.g. `component.exec` flows where the loader
+/// skips `validate_json`).
+fn validate_slot_schema(value: &Value) -> Result<()> {
+    use crate::error::{FlowError, FlowErrorLocation, SchemaErrorDetail};
+
+    let schema_err = |message: String, location: String| FlowError::Schema {
+        message: message.clone(),
+        details: vec![SchemaErrorDetail {
+            message,
+            location: FlowErrorLocation::at_path(&location),
+        }],
+        location: FlowErrorLocation::at_path(location),
+    };
+
+    let slots = value.as_array().ok_or_else(|| {
+        schema_err(
+            "slot_schema must be an array".to_string(),
+            "slot_schema".to_string(),
+        )
+    })?;
+
+    let mut seen_names: HashSet<&str> = HashSet::with_capacity(slots.len());
+
+    for (i, slot) in slots.iter().enumerate() {
+        let path = format!("slot_schema[{i}]");
+        let obj = slot.as_object().ok_or_else(|| {
+            schema_err(format!("{path}: each slot must be an object"), path.clone())
+        })?;
+
+        let name = obj
+            .get("name")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| {
+                schema_err(
+                    format!("{path}: 'name' is required and must be a non-empty string"),
+                    format!("{path}/name"),
+                )
+            })?;
+
+        if !seen_names.insert(name) {
+            return Err(schema_err(
+                format!("{path}: duplicate slot name '{name}'"),
+                format!("{path}/name"),
+            ));
+        }
+
+        let slot_type = obj
+            .get("slot_type")
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                schema_err(
+                    format!("{path}: 'slot_type' is required and must be a string"),
+                    format!("{path}/slot_type"),
+                )
+            })?;
+
+        if !SLOT_TYPES.contains(&slot_type) {
+            return Err(schema_err(
+                format!("{path}: unknown slot_type '{slot_type}'; expected one of {SLOT_TYPES:?}"),
+                format!("{path}/slot_type"),
+            ));
+        }
+
+        match slot_type {
+            "string"
+                if obj
+                    .get("pattern")
+                    .and_then(Value::as_str)
+                    .is_none_or(str::is_empty) =>
+            {
+                return Err(schema_err(
+                    format!("{path}: string slot '{name}' requires a non-empty 'pattern'"),
+                    format!("{path}/pattern"),
+                ));
+            }
+            "enum"
+                if obj
+                    .get("enum_values")
+                    .and_then(Value::as_array)
+                    .is_none_or(Vec::is_empty) =>
+            {
+                return Err(schema_err(
+                    format!("{path}: enum slot '{name}' requires a non-empty 'enum_values' array"),
+                    format!("{path}/enum_values"),
+                ));
+            }
+            _ => {}
+        }
+    }
+
+    Ok(())
 }
 
 /// Compile YGTC YAML text into [`Flow`].
@@ -631,13 +734,102 @@ nodes:
 
         let flow = compile_flow(doc).expect("compile_flow should succeed");
         assert_eq!(
-            flow.metadata.extra["greentic.slot_schema"], slot_schema,
+            flow.metadata.extra[SLOT_SCHEMA_METADATA_KEY], slot_schema,
             "slot_schema must be forwarded into metadata.extra"
         );
         assert_eq!(
             flow.metadata.extra["custom_key"],
             json!(42),
             "original parameters must be preserved"
+        );
+    }
+
+    /// Helper: build a `FlowDoc` with a `component.exec` node and the given
+    /// `slot_schema`. This exercises the path that bypasses JSON-schema
+    /// validation in the loader.
+    fn component_exec_doc_with_slots(slot_schema: Option<Value>) -> crate::model::FlowDoc {
+        crate::model::FlowDoc {
+            id: "exec-test".to_string(),
+            title: None,
+            description: None,
+            flow_type: "messaging".to_string(),
+            start: None,
+            parameters: json!({}),
+            tags: vec![],
+            schema_version: None,
+            entrypoints: Default::default(),
+            meta: None,
+            slot_schema,
+            nodes: {
+                let mut m = indexmap::IndexMap::new();
+                m.insert(
+                    "run".to_string(),
+                    crate::model::NodeDoc {
+                        routing: json!("out"),
+                        raw: {
+                            let mut r = indexmap::IndexMap::new();
+                            r.insert("component.exec".to_string(), json!("some.component"));
+                            r
+                        },
+                        ..Default::default()
+                    },
+                );
+                m
+            },
+        }
+    }
+
+    fn assert_slot_schema_rejected(slots: Value, expected_keyword: &str) {
+        let doc = component_exec_doc_with_slots(Some(slots));
+        let msg = compile_flow(doc)
+            .expect_err("compile_flow should reject malformed slot_schema")
+            .to_string();
+        assert!(
+            msg.contains(expected_keyword),
+            "error should mention '{expected_keyword}': {msg}"
+        );
+    }
+
+    #[test]
+    fn compile_rejects_string_slot_without_pattern_via_component_exec() {
+        assert_slot_schema_rejected(
+            json!([{ "name": "city", "slot_type": "string" }]),
+            "pattern",
+        );
+    }
+
+    #[test]
+    fn compile_rejects_enum_slot_without_enum_values_via_component_exec() {
+        assert_slot_schema_rejected(
+            json!([{ "name": "color", "slot_type": "enum" }]),
+            "enum_values",
+        );
+    }
+
+    #[test]
+    fn compile_rejects_duplicate_slot_names() {
+        assert_slot_schema_rejected(
+            json!([
+                { "name": "city", "slot_type": "string", "pattern": "^.+" },
+                { "name": "city", "slot_type": "number" }
+            ]),
+            "duplicate",
+        );
+    }
+
+    #[test]
+    fn compile_accepts_valid_slot_schema_via_component_exec() {
+        let doc = component_exec_doc_with_slots(Some(json!([
+            { "name": "city", "slot_type": "string", "pattern": "^[A-Z].+" },
+            { "name": "color", "slot_type": "enum", "enum_values": ["red", "blue"] },
+            { "name": "count", "slot_type": "number" },
+            { "name": "active", "slot_type": "boolean" },
+            { "name": "when", "slot_type": "date" }
+        ])));
+        let flow = compile_flow(doc).expect("valid slot_schema should compile");
+        assert!(
+            flow.metadata.extra.get(SLOT_SCHEMA_METADATA_KEY).is_some(),
+            "slot_schema must be present in metadata.extra"
         );
     }
 }
