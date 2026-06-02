@@ -199,10 +199,8 @@ pub fn compile_flow(doc: FlowDoc) -> Result<Flow> {
     let entrypoints_map: BTreeMap<String, Value> = entrypoints.into_iter().collect();
 
     let mut extra = parameters;
-    if let Some(ref ss) = slot_schema {
-        validate_slot_schema(ss)?;
-    }
     if let Some(ss) = slot_schema {
+        validate_slot_schema(&ss)?;
         match extra {
             Value::Object(ref mut map) => {
                 map.insert(SLOT_SCHEMA_METADATA_KEY.to_string(), ss);
@@ -246,116 +244,89 @@ const SLOT_TYPES: &[&str] = &["string", "enum", "number", "date", "boolean"];
 fn validate_slot_schema(value: &Value) -> Result<()> {
     use crate::error::{FlowError, FlowErrorLocation, SchemaErrorDetail};
 
-    let slots = value.as_array().ok_or_else(|| FlowError::Schema {
-        message: "slot_schema must be an array".to_string(),
+    let schema_err = |message: String, location: String| FlowError::Schema {
+        message: message.clone(),
         details: vec![SchemaErrorDetail {
-            message: "expected array".to_string(),
-            location: FlowErrorLocation::at_path("slot_schema"),
+            message,
+            location: FlowErrorLocation::at_path(&location),
         }],
-        location: FlowErrorLocation::at_path("slot_schema"),
+        location: FlowErrorLocation::at_path(location),
+    };
+
+    let slots = value.as_array().ok_or_else(|| {
+        schema_err(
+            "slot_schema must be an array".to_string(),
+            "slot_schema".to_string(),
+        )
     })?;
 
-    let mut seen_names: HashSet<&str> = HashSet::new();
+    let mut seen_names: HashSet<&str> = HashSet::with_capacity(slots.len());
 
     for (i, slot) in slots.iter().enumerate() {
         let path = format!("slot_schema[{i}]");
-        let obj = slot.as_object().ok_or_else(|| FlowError::Schema {
-            message: format!("{path}: each slot must be an object"),
-            details: vec![SchemaErrorDetail {
-                message: "expected object".to_string(),
-                location: FlowErrorLocation::at_path(&path),
-            }],
-            location: FlowErrorLocation::at_path(&path),
+        let obj = slot.as_object().ok_or_else(|| {
+            schema_err(format!("{path}: each slot must be an object"), path.clone())
         })?;
 
-        // name: required, non-empty string
         let name = obj
             .get("name")
             .and_then(Value::as_str)
             .filter(|s| !s.is_empty())
-            .ok_or_else(|| FlowError::Schema {
-                message: format!("{path}: 'name' is required and must be a non-empty string"),
-                details: vec![SchemaErrorDetail {
-                    message: "missing or empty 'name'".to_string(),
-                    location: FlowErrorLocation::at_path(format!("{path}/name")),
-                }],
-                location: FlowErrorLocation::at_path(&path),
+            .ok_or_else(|| {
+                schema_err(
+                    format!("{path}: 'name' is required and must be a non-empty string"),
+                    format!("{path}/name"),
+                )
             })?;
 
-        // duplicate names
         if !seen_names.insert(name) {
-            return Err(FlowError::Schema {
-                message: format!("{path}: duplicate slot name '{name}'"),
-                details: vec![SchemaErrorDetail {
-                    message: format!("duplicate slot name '{name}'"),
-                    location: FlowErrorLocation::at_path(format!("{path}/name")),
-                }],
-                location: FlowErrorLocation::at_path(&path),
-            });
+            return Err(schema_err(
+                format!("{path}: duplicate slot name '{name}'"),
+                format!("{path}/name"),
+            ));
         }
 
-        // slot_type: required, one of the known variants
         let slot_type = obj
             .get("slot_type")
             .and_then(Value::as_str)
-            .ok_or_else(|| FlowError::Schema {
-                message: format!("{path}: 'slot_type' is required and must be a string"),
-                details: vec![SchemaErrorDetail {
-                    message: "missing 'slot_type'".to_string(),
-                    location: FlowErrorLocation::at_path(format!("{path}/slot_type")),
-                }],
-                location: FlowErrorLocation::at_path(&path),
+            .ok_or_else(|| {
+                schema_err(
+                    format!("{path}: 'slot_type' is required and must be a string"),
+                    format!("{path}/slot_type"),
+                )
             })?;
 
         if !SLOT_TYPES.contains(&slot_type) {
-            return Err(FlowError::Schema {
-                message: format!(
-                    "{path}: unknown slot_type '{slot_type}'; expected one of {SLOT_TYPES:?}"
-                ),
-                details: vec![SchemaErrorDetail {
-                    message: format!("unknown slot_type '{slot_type}'"),
-                    location: FlowErrorLocation::at_path(format!("{path}/slot_type")),
-                }],
-                location: FlowErrorLocation::at_path(&path),
-            });
+            return Err(schema_err(
+                format!("{path}: unknown slot_type '{slot_type}'; expected one of {SLOT_TYPES:?}"),
+                format!("{path}/slot_type"),
+            ));
         }
 
-        // string → pattern required (non-empty)
-        if slot_type == "string" {
-            let has_pattern = obj
-                .get("pattern")
-                .and_then(Value::as_str)
-                .is_some_and(|s| !s.is_empty());
-            if !has_pattern {
-                return Err(FlowError::Schema {
-                    message: format!("{path}: string slot '{name}' requires a non-empty 'pattern'"),
-                    details: vec![SchemaErrorDetail {
-                        message: "missing or empty 'pattern' for string slot".to_string(),
-                        location: FlowErrorLocation::at_path(format!("{path}/pattern")),
-                    }],
-                    location: FlowErrorLocation::at_path(&path),
-                });
+        match slot_type {
+            "string"
+                if obj
+                    .get("pattern")
+                    .and_then(Value::as_str)
+                    .is_none_or(str::is_empty) =>
+            {
+                return Err(schema_err(
+                    format!("{path}: string slot '{name}' requires a non-empty 'pattern'"),
+                    format!("{path}/pattern"),
+                ));
             }
-        }
-
-        // enum → enum_values required (non-empty array)
-        if slot_type == "enum" {
-            let has_values = obj
-                .get("enum_values")
-                .and_then(Value::as_array)
-                .is_some_and(|a| !a.is_empty());
-            if !has_values {
-                return Err(FlowError::Schema {
-                    message: format!(
-                        "{path}: enum slot '{name}' requires a non-empty 'enum_values' array"
-                    ),
-                    details: vec![SchemaErrorDetail {
-                        message: "missing or empty 'enum_values' for enum slot".to_string(),
-                        location: FlowErrorLocation::at_path(format!("{path}/enum_values")),
-                    }],
-                    location: FlowErrorLocation::at_path(&path),
-                });
+            "enum"
+                if obj
+                    .get("enum_values")
+                    .and_then(Value::as_array)
+                    .is_none_or(Vec::is_empty) =>
+            {
+                return Err(schema_err(
+                    format!("{path}: enum slot '{name}' requires a non-empty 'enum_values' array"),
+                    format!("{path}/enum_values"),
+                ));
             }
+            _ => {}
         }
     }
 
@@ -808,43 +779,41 @@ nodes:
         }
     }
 
+    fn assert_slot_schema_rejected(slots: Value, expected_keyword: &str) {
+        let doc = component_exec_doc_with_slots(Some(slots));
+        let msg = compile_flow(doc)
+            .expect_err("compile_flow should reject malformed slot_schema")
+            .to_string();
+        assert!(
+            msg.contains(expected_keyword),
+            "error should mention '{expected_keyword}': {msg}"
+        );
+    }
+
     #[test]
     fn compile_rejects_string_slot_without_pattern_via_component_exec() {
-        let doc = component_exec_doc_with_slots(Some(json!([
-            { "name": "city", "slot_type": "string" }
-        ])));
-        let err = compile_flow(doc).expect_err("should reject string slot without pattern");
-        let msg = err.to_string();
-        assert!(
-            msg.contains("pattern"),
-            "error should mention 'pattern': {msg}"
+        assert_slot_schema_rejected(
+            json!([{ "name": "city", "slot_type": "string" }]),
+            "pattern",
         );
     }
 
     #[test]
     fn compile_rejects_enum_slot_without_enum_values_via_component_exec() {
-        let doc = component_exec_doc_with_slots(Some(json!([
-            { "name": "color", "slot_type": "enum" }
-        ])));
-        let err = compile_flow(doc).expect_err("should reject enum slot without enum_values");
-        let msg = err.to_string();
-        assert!(
-            msg.contains("enum_values"),
-            "error should mention 'enum_values': {msg}"
+        assert_slot_schema_rejected(
+            json!([{ "name": "color", "slot_type": "enum" }]),
+            "enum_values",
         );
     }
 
     #[test]
     fn compile_rejects_duplicate_slot_names() {
-        let doc = component_exec_doc_with_slots(Some(json!([
-            { "name": "city", "slot_type": "string", "pattern": "^.+" },
-            { "name": "city", "slot_type": "number" }
-        ])));
-        let err = compile_flow(doc).expect_err("should reject duplicate slot names");
-        let msg = err.to_string();
-        assert!(
-            msg.contains("duplicate"),
-            "error should mention 'duplicate': {msg}"
+        assert_slot_schema_rejected(
+            json!([
+                { "name": "city", "slot_type": "string", "pattern": "^.+" },
+                { "name": "city", "slot_type": "number" }
+            ]),
+            "duplicate",
         );
     }
 
