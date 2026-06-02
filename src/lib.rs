@@ -253,13 +253,15 @@ fn validate_slot_schema_names(value: &Value) -> Result<()> {
         };
         if !seen_names.insert(name) {
             let path = format!("slot_schema[{i}]");
+            let message = format!("{path}: duplicate slot name '{name}'");
+            let loc_path = format!("{path}/name");
             return Err(FlowError::Schema {
-                message: format!("{path}: duplicate slot name '{name}'"),
+                message: message.clone(),
                 details: vec![SchemaErrorDetail {
-                    message: format!("{path}: duplicate slot name '{name}'"),
-                    location: FlowErrorLocation::at_path(format!("{path}/name")),
+                    message,
+                    location: FlowErrorLocation::at_path(&loc_path),
                 }],
-                location: FlowErrorLocation::at_path(format!("{path}/name")),
+                location: FlowErrorLocation::at_path(loc_path),
             });
         }
     }
@@ -749,6 +751,17 @@ nodes:
         assert!(
             flow.metadata.extra.get(SLOT_SCHEMA_METADATA_KEY).is_some(),
             "slot_schema must be present in metadata.extra"
+        );
+    }
+
+    #[test]
+    fn routing_shorthand_validator_rejects_invalid_string_directly() {
+        let nodes = HashSet::from(["start".to_string()]);
+        let err = compile_routing(&json!("invalid"), &nodes, "start")
+            .expect_err("invalid shorthand must be rejected");
+        assert!(
+            matches!(err, crate::error::FlowError::Routing { .. }),
+            "expected Routing error, got: {err}"
         );
     }
 }
