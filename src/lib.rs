@@ -46,6 +46,9 @@ pub use flow_bundle::{
 pub use json_output::{JsonDiagnostic, LintJsonOutput, lint_to_stdout_json};
 pub use splice::{NEXT_NODE_PLACEHOLDER, splice_node_after};
 
+/// Metadata key under which compiled flows expose their flow-level slot schema.
+pub const SLOT_SCHEMA_METADATA_KEY: &str = "greentic.slot_schema";
+
 use crate::{error::Result, model::FlowDoc};
 use greentic_types::{
     ComponentId, Flow, FlowComponentRef, FlowId, FlowKind, FlowMetadata, InputMapping, Node,
@@ -199,11 +202,11 @@ pub fn compile_flow(doc: FlowDoc) -> Result<Flow> {
     if let Some(ss) = slot_schema {
         match extra {
             Value::Object(ref mut map) => {
-                map.insert("greentic.slot_schema".to_string(), ss);
+                map.insert(SLOT_SCHEMA_METADATA_KEY.to_string(), ss);
             }
             Value::Null => {
                 let mut map = serde_json::Map::new();
-                map.insert("greentic.slot_schema".to_string(), ss);
+                map.insert(SLOT_SCHEMA_METADATA_KEY.to_string(), ss);
                 extra = Value::Object(map);
             }
             _ => {
@@ -631,7 +634,7 @@ nodes:
 
         let flow = compile_flow(doc).expect("compile_flow should succeed");
         assert_eq!(
-            flow.metadata.extra["greentic.slot_schema"], slot_schema,
+            flow.metadata.extra[SLOT_SCHEMA_METADATA_KEY], slot_schema,
             "slot_schema must be forwarded into metadata.extra"
         );
         assert_eq!(
