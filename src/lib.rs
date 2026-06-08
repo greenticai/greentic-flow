@@ -264,6 +264,23 @@ fn validate_slot_schema_names(value: &Value) -> Result<()> {
                 location: FlowErrorLocation::at_path(loc_path),
             });
         }
+
+        // Reject patterns that are not valid regular expressions.
+        if let Some(pat) = slot.get("pattern").and_then(Value::as_str)
+            && let Err(e) = regex::Regex::new(pat)
+        {
+            let path = format!("slot_schema[{i}]");
+            let message = format!("{path}: invalid regex pattern for slot '{name}': {e}");
+            let loc_path = format!("{path}/pattern");
+            return Err(FlowError::Schema {
+                message: message.clone(),
+                details: vec![SchemaErrorDetail {
+                    message,
+                    location: FlowErrorLocation::at_path(&loc_path),
+                }],
+                location: FlowErrorLocation::at_path(loc_path),
+            });
+        }
     }
 
     Ok(())
@@ -735,6 +752,20 @@ nodes:
         assert!(
             msg.contains("duplicate"),
             "error should mention 'duplicate': {msg}"
+        );
+    }
+
+    #[test]
+    fn compile_rejects_invalid_regex_in_slot_pattern() {
+        let doc = component_exec_doc_with_slots(Some(json!([
+            { "name": "city", "slot_type": "string", "pattern": "(" }
+        ])));
+        let msg = compile_flow(doc)
+            .expect_err("compile_flow should reject invalid regex")
+            .to_string();
+        assert!(
+            msg.contains("invalid regex pattern"),
+            "error should mention 'invalid regex pattern': {msg}"
         );
     }
 
