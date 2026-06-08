@@ -371,6 +371,10 @@ mod host {
                 state_store: Some(|state: &mut HostState| &mut state.state_store),
                 secrets_store_v1_1: Some(|state: &mut HostState| &mut state.secrets_store),
                 secrets_store: None,
+                // C4.1 added `greentic:runtime-config@1.0.0`. The wizard ops
+                // host does not expose runtime config — wizard flows are a
+                // build-time authoring surface, not a deployment runtime.
+                runtime_config: None,
             },
         )
         .map_err(|err| anyhow!("link Greentic v1 host imports: {err}"))?;
