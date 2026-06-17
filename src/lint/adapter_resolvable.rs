@@ -30,6 +30,9 @@ impl AdapterResolvableRule {
                         ));
                     }
                 }
+                // MCP nodes reference a tenant-configured server resolved at
+                // runtime, not the static adapter catalog; nothing to check here.
+                NodeKind::Mcp { .. } => {}
                 NodeKind::Builtin(_) => {}
             }
         }

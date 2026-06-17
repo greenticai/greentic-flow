@@ -156,6 +156,12 @@ pub enum FlowError {
         node_id: String,
         location: FlowErrorLocation,
     },
+    #[error("Invalid MCP node '{node_id}'{location}: {message}")]
+    McpConfig {
+        node_id: String,
+        message: String,
+        location: FlowErrorLocation,
+    },
     #[error("Internal error{location}: {message}")]
     Internal {
         message: String,

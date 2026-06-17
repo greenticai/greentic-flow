@@ -327,6 +327,27 @@ pub(crate) fn load_with_schema_text(
                 location: node_location(&source_label, source_path, id),
             });
         }
+
+        // Structurally validate MCP nodes (`mcp:<server>/<tool>` keys). This is
+        // offline-only: it checks the `config` shape and never probes the
+        // server. The component key is the single non-reserved raw key.
+        if let Some((comp_key, config)) = node
+            .raw
+            .iter()
+            .find(|(k, _)| !reserved.contains(&k.as_str()))
+            && comp_key.starts_with(crate::ir::MCP_PREFIX)
+        {
+            crate::ir::validate_mcp_config(id, config).map_err(|err| match err {
+                FlowError::McpConfig {
+                    node_id, message, ..
+                } => FlowError::McpConfig {
+                    node_id,
+                    message,
+                    location: node_location(&source_label, source_path, id),
+                },
+                other => other,
+            })?;
+        }
     }
 
     for (from_id, node) in &flow.nodes {

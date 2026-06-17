@@ -121,6 +121,7 @@ pub fn flow_error_to_reports(err: FlowError) -> Vec<JsonDiagnostic> {
         | FlowError::BadComponentKey { location, .. }
         | FlowError::Routing { location, .. }
         | FlowError::MissingNode { location, .. }
+        | FlowError::McpConfig { location, .. }
         | FlowError::Internal { location, .. } => {
             vec![JsonDiagnostic::from_location(display_message, location)]
         }

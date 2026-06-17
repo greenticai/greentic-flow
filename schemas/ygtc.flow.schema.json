@@ -220,6 +220,11 @@
             "^[A-Za-z_][\\w.-]*$": {
               "description": "Operation payload (exactly one op key is required).",
               "additionalProperties": true
+            },
+            "^mcp:[\\w.-]+/.+$": {
+              "description": "MCP tool invocation keyed as 'mcp:<server_id>/<tool_name>'. Payload is the MCP node config (arguments/output).",
+              "type": "object",
+              "additionalProperties": true
             }
           },
           "additionalProperties": false
