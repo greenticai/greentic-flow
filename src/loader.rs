@@ -327,6 +327,29 @@ pub(crate) fn load_with_schema_text(
                 location: node_location(&source_label, source_path, id),
             });
         }
+
+        // Structurally validate MCP nodes (op key == "mcp"). This is
+        // offline-only: it checks the payload `server`/`tool`/`arguments`/
+        // `output` shape and never probes the server. The component key is the
+        // single non-reserved raw key; server and tool live in the payload, not
+        // the key, so the key stays a valid greentic_types::ComponentId.
+        if let Some((comp_key, config)) = node
+            .raw
+            .iter()
+            .find(|(k, _)| !reserved.contains(&k.as_str()))
+            && comp_key.as_str() == crate::ir::MCP_COMPONENT
+        {
+            crate::ir::validate_mcp_config(id, config).map_err(|err| match err {
+                FlowError::McpConfig {
+                    node_id, message, ..
+                } => FlowError::McpConfig {
+                    node_id,
+                    message,
+                    location: node_location(&source_label, source_path, id),
+                },
+                other => other,
+            })?;
+        }
     }
 
     for (from_id, node) in &flow.nodes {

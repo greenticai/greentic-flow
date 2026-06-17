@@ -218,7 +218,7 @@
           },
           "patternProperties": {
             "^[A-Za-z_][\\w.-]*$": {
-              "description": "Operation payload (exactly one op key is required).",
+              "description": "Operation payload (exactly one op key is required). MCP nodes use the literal op key 'mcp' and carry server/tool/arguments/output in this payload.",
               "additionalProperties": true
             }
           },

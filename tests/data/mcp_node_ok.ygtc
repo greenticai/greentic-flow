@@ -1,0 +1,25 @@
+id: mcp_lookup_flow
+type: messaging
+schema_version: 2
+
+nodes:
+  in:
+    questions:
+      welcome: "Which issue do you want to look up?"
+      questions:
+        - id: issue_number
+          prompt: "Issue number?"
+          answer_type: text
+    routing:
+      - to: lookup_issue
+
+  lookup_issue:
+    mcp:
+      server: github
+      tool: get_issue
+      arguments:
+        owner: "{{ flow.owner }}"
+        number: "{{ input.issue_number }}"
+      output: issue
+    routing:
+      - out: true

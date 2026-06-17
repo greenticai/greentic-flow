@@ -155,10 +155,17 @@ pub fn compile_flow(doc: FlowDoc) -> Result<Flow> {
             message: format!("node '{node_id_str}' missing operation key"),
             location: crate::error::FlowErrorLocation::at_path(format!("nodes.{node_id_str}")),
         })?;
+        let is_mcp = operation.as_str() == crate::ir::MCP_COMPONENT;
         let is_builtin =
             matches!(operation.as_str(), "questions" | "template") || operation.starts_with("dw.");
         let is_legacy = schema_version.unwrap_or(1) < 2;
-        let (component_id, op_field) = if is_builtin || is_legacy {
+        let (component_id, op_field) = if is_mcp {
+            // MCP nodes lower to the literal `mcp` component. `server`, `tool`,
+            // `arguments` and `output` stay in the node payload (carried via the
+            // input mapping below), so the component string remains a valid
+            // greentic_types::ComponentId and survives pack/runtime load.
+            (crate::ir::MCP_COMPONENT.to_string(), op_sibling)
+        } else if is_builtin || is_legacy {
             (operation, op_sibling)
         } else {
             (
