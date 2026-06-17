@@ -218,12 +218,7 @@
           },
           "patternProperties": {
             "^[A-Za-z_][\\w.-]*$": {
-              "description": "Operation payload (exactly one op key is required).",
-              "additionalProperties": true
-            },
-            "^mcp:[\\w.-]+/.+$": {
-              "description": "MCP tool invocation keyed as 'mcp:<server_id>/<tool_name>'. Payload is the MCP node config (arguments/output).",
-              "type": "object",
+              "description": "Operation payload (exactly one op key is required). MCP nodes use the literal op key 'mcp' and carry server/tool/arguments/output in this payload.",
               "additionalProperties": true
             }
           },

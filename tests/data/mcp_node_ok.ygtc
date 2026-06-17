@@ -14,7 +14,9 @@ nodes:
       - to: lookup_issue
 
   lookup_issue:
-    "mcp:github/get_issue":
+    mcp:
+      server: github
+      tool: get_issue
       arguments:
         owner: "{{ flow.owner }}"
         number: "{{ input.issue_number }}"
