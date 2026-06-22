@@ -1633,9 +1633,9 @@ dependencies = [
 
 [[package]]
 name = "greentic-secrets-api"
-version = "0.5.0"
+version = "0.5.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "33b05da6497a5b153592dfa6891db30696e152db755ad31344f867f89d8fd61d"
+checksum = "7c46218b77761ee342ae3697d45ce9ab1e5ce2d5c5be09ce3a91a271702f3cad"
 dependencies = [
  "anyhow",
  "async-trait",
