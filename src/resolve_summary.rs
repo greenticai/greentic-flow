@@ -85,6 +85,20 @@ fn summarize_node(
     node_id: &str,
     source: &ComponentSourceRefV1,
 ) -> Result<NodeResolveSummaryV1> {
+    // ext:// nodes are declared by flow but resolved by packc at pack-build time.
+    // No wasm artifact or manifest is available at this stage; return a deferred summary.
+    if matches!(source, ComponentSourceRefV1::Ext { .. }) {
+        let component_id = component_id_from_source(source)
+            .or_else(|| ComponentId::from_str(node_id).ok())
+            .unwrap_or_else(|| ComponentId::from_str("unknown").expect("valid component id"));
+        let (_, _, digest) = resolve_source(flow_path, source)?;
+        return Ok(NodeResolveSummaryV1 {
+            component_id,
+            source: summary_source_ref(source),
+            digest,
+            manifest: None,
+        });
+    }
     let (source_ref, wasm_path, digest) = resolve_source(flow_path, source)?;
     match find_manifest_for_wasm(&wasm_path) {
         Ok(manifest_path) => {
@@ -149,6 +163,7 @@ fn component_id_from_source(source: &ComponentSourceRefV1) -> Option<ComponentId
         ComponentSourceRefV1::Oci { r#ref, .. } => r#ref,
         ComponentSourceRefV1::Repo { r#ref, .. } => r#ref,
         ComponentSourceRefV1::Store { r#ref, .. } => r#ref,
+        ComponentSourceRefV1::Ext { r#ref, .. } => r#ref,
         ComponentSourceRefV1::Local { .. } => return None,
     };
     // Extract component name from ref like "oci://ghcr.io/greenticai/components/templates:stable"
@@ -177,6 +192,16 @@ fn resolve_source(
         ComponentSourceRefV1::Store { r#ref, digest, .. } => {
             resolve_remote(flow_path, r#ref, digest.as_deref(), RemoteKind::Store)
         }
+        ComponentSourceRefV1::Ext { digest, .. } => {
+            // ext:// is resolved by packc's PackResolver at pack-build (extract the
+            // component wasm from the extension .gtxpack + compute digest). flow only
+            // DECLARES the source; it does not fetch/extract. Digest deferred unless pinned.
+            Ok((
+                summary_source_ref(source),
+                std::path::PathBuf::new(),
+                digest.clone().unwrap_or_default(),
+            ))
+        }
     }
 }
 
@@ -198,6 +223,9 @@ fn summary_source_ref(source: &ComponentSourceRefV1) -> FlowResolveSummarySource
             r#ref: r#ref.to_string(),
         },
         ComponentSourceRefV1::Store { r#ref, .. } => FlowResolveSummarySourceRefV1::Store {
+            r#ref: r#ref.to_string(),
+        },
+        ComponentSourceRefV1::Ext { r#ref, .. } => FlowResolveSummarySourceRefV1::Ext {
             r#ref: r#ref.to_string(),
         },
     }
@@ -422,6 +450,43 @@ mod tests {
     use greentic_types::flow_resolve::ComponentSourceRefV1;
     use semver::Version;
     use tempfile::tempdir;
+
+    #[test]
+    fn ext_source_produces_deferred_summary_without_manifest() {
+        let source = ComponentSourceRefV1::Ext {
+            r#ref: "ext://greentic.http#component".into(),
+            digest: None,
+        };
+
+        let (summary_ref, wasm_path, digest) =
+            resolve_source(Path::new("/tmp/flows/demo.ygtc"), &source).unwrap();
+        assert!(
+            wasm_path.as_os_str().is_empty(),
+            "ext:// wasm_path must be empty (deferred)"
+        );
+        assert_eq!(digest, "", "ext:// digest must be empty when unpinned");
+        match &summary_ref {
+            FlowResolveSummarySourceRefV1::Ext { r#ref } => {
+                assert_eq!(r#ref, "ext://greentic.http#component");
+            }
+            other => panic!("expected Ext summary ref, got {other:?}"),
+        }
+
+        let mapped = summary_source_ref(&source);
+        match &mapped {
+            FlowResolveSummarySourceRefV1::Ext { r#ref } => {
+                assert_eq!(r#ref, "ext://greentic.http#component");
+            }
+            other => panic!("expected Ext summary ref from summary_source_ref, got {other:?}"),
+        }
+
+        // The ext:// ref contains '#' which is not valid in a ComponentId,
+        // so component_id_from_source returns None (component_id resolved via node_id fallback).
+        assert!(
+            component_id_from_source(&source).is_none(),
+            "ext:// ref with '#' fragment should yield None from component_id_from_source"
+        );
+    }
 
     #[test]
     fn helper_functions_normalize_local_paths_and_refs() {

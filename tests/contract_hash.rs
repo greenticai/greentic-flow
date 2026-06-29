@@ -45,6 +45,7 @@ fn describe_hash_is_deterministic() {
             display_name: None,
         },
         provided_capabilities: Vec::new(),
+        outcomes: Vec::new(),
         required_capabilities: Vec::new(),
         metadata: BTreeMap::new(),
         operations: Vec::new(),
@@ -53,7 +54,6 @@ fn describe_hash_is_deterministic() {
             required: Vec::new(),
             additional: AdditionalProperties::Allow,
         },
-        outcomes: Vec::new(),
     };
     let hash1 = contracts::describe_hash(&describe).unwrap();
     let hash2 = contracts::describe_hash(&describe).unwrap();
@@ -76,6 +76,7 @@ fn find_operation_reports_missing_operation_id() {
             display_name: None,
         },
         provided_capabilities: Vec::new(),
+        outcomes: Vec::new(),
         required_capabilities: Vec::new(),
         metadata: BTreeMap::new(),
         operations: Vec::new(),
@@ -84,7 +85,6 @@ fn find_operation_reports_missing_operation_id() {
             required: Vec::new(),
             additional: AdditionalProperties::Allow,
         },
-        outcomes: Vec::new(),
     };
 
     let err = contracts::find_operation(&describe, "missing").expect_err("missing op must fail");
