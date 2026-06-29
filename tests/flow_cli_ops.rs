@@ -89,6 +89,7 @@ fn write_fixture_wizard_component(
             display_name: None,
         },
         provided_capabilities: Vec::new(),
+        outcomes: Vec::new(),
         required_capabilities: Vec::new(),
         metadata: BTreeMap::new(),
         operations: operations
@@ -109,7 +110,6 @@ fn write_fixture_wizard_component(
             })
             .collect(),
         config_schema,
-        outcomes: Vec::new(),
     };
     let describe_cbor = canonical::to_canonical_cbor_allow_floats(&describe).unwrap();
     fs::write(
@@ -487,6 +487,7 @@ fn add_step_wizard_uses_fixture_resolver() {
             display_name: None,
         },
         provided_capabilities: Vec::new(),
+        outcomes: Vec::new(),
         required_capabilities: Vec::new(),
         metadata: BTreeMap::new(),
         operations: vec![ComponentOperation {
@@ -502,7 +503,6 @@ fn add_step_wizard_uses_fixture_resolver() {
             schema_hash: op_schema_hash,
         }],
         config_schema,
-        outcomes: Vec::new(),
     };
     let describe_cbor = canonical::to_canonical_cbor_allow_floats(&describe).unwrap();
     fs::write(
@@ -658,6 +658,7 @@ fn add_step_setup_rejects_component_when_required_input_is_missing() {
             display_name: None,
         },
         provided_capabilities: Vec::new(),
+        outcomes: Vec::new(),
         required_capabilities: Vec::new(),
         metadata: BTreeMap::new(),
         operations: vec![ComponentOperation {
@@ -675,7 +676,6 @@ fn add_step_setup_rejects_component_when_required_input_is_missing() {
             schema_hash: op_schema_hash,
         }],
         config_schema,
-        outcomes: Vec::new(),
     };
     let describe_cbor = canonical::to_canonical_cbor_allow_floats(&describe).unwrap();
     fs::write(
