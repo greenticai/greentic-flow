@@ -14,7 +14,7 @@
   **Key functionality:** Embeds the schema for validation convenience; canonicalises JSON ordering; computes BLAKE3 hashes; derives entry node (prefers explicit `start`, then `in`, then first node); extracts component pins with wildcard version requirements; returns bundles alongside IR when requested.
 - **Path:** `src/ir.rs`  
   **Role:** Define intermediate representation and component classification helpers.  
-  **Key functionality:** `FlowIR`/`NodeIR` structures retain parameters, payload expressions, and routing; `classify_node_type` distinguishes adapter-style components (`<namespace>.<adapter>.<operation>`) from builtins.
+  **Key functionality:** `FlowIR`/`NodeIR` structures retain parameters, payload expressions, and routing; `classify_node_type` distinguishes adapter-style components (`<namespace>.<adapter>.<operation>`), MCP tool nodes (`mcp:<server_id>/<tool_name>` → `NodeKind::Mcp`, split on the first `/`), and builtins. `validate_mcp_config` performs offline structural validation of an MCP node's config payload (`arguments` must be an object, `output` must be a string when present); never probes the server.
 - **Path:** `src/util.rs`  
   **Role:** Shared helpers.  
   **Key functionality:** Component key validation now allows both namespaced components and builtin helpers (`questions`, `template`) used by config flows.

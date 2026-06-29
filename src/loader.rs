@@ -225,26 +225,6 @@ pub(crate) fn load_with_schema_text(
         "meta",
         "operation",
     ];
-    let looks_legacy = v_json.get("nodes").and_then(Value::as_object).map(|nodes| {
-        nodes.values().any(|n| {
-            let (op_count, has_dot_key) = n
-                .as_object()
-                .map(|obj| {
-                    let op_count = obj
-                        .keys()
-                        .filter(|k| !reserved_for_count.contains(&k.as_str()))
-                        .count();
-                    let has_dot_key = obj.keys().any(|k| k.contains('.'));
-                    (op_count, has_dot_key)
-                })
-                .unwrap_or((0, false));
-            op_count != 1
-                || has_dot_key
-                || n.get("component.exec").is_some()
-                || n.get("operation").is_some()
-                || n.get("pack_alias").is_some()
-        })
-    });
     if v_json.get("type").is_none() {
         return Err(FlowError::Schema {
             message: format!("{source_label}/type: missing required property 'type'"),
@@ -282,7 +262,7 @@ pub(crate) fn load_with_schema_text(
         }
     }
 
-    if !nodes_empty && schema_version >= 2 && !looks_legacy.unwrap_or(false) {
+    if !nodes_empty && schema_version >= 2 {
         validate_json(
             &v_json,
             schema_text,
@@ -346,6 +326,29 @@ pub(crate) fn load_with_schema_text(
                 node_id: id.clone(),
                 location: node_location(&source_label, source_path, id),
             });
+        }
+
+        // Structurally validate MCP nodes (op key == "mcp"). This is
+        // offline-only: it checks the payload `server`/`tool`/`arguments`/
+        // `output` shape and never probes the server. The component key is the
+        // single non-reserved raw key; server and tool live in the payload, not
+        // the key, so the key stays a valid greentic_types::ComponentId.
+        if let Some((comp_key, config)) = node
+            .raw
+            .iter()
+            .find(|(k, _)| !reserved.contains(&k.as_str()))
+            && comp_key.as_str() == crate::ir::MCP_COMPONENT
+        {
+            crate::ir::validate_mcp_config(id, config).map_err(|err| match err {
+                FlowError::McpConfig {
+                    node_id, message, ..
+                } => FlowError::McpConfig {
+                    node_id,
+                    message,
+                    location: node_location(&source_label, source_path, id),
+                },
+                other => other,
+            })?;
         }
     }
 

@@ -46,6 +46,9 @@ pub use flow_bundle::{
 pub use json_output::{JsonDiagnostic, LintJsonOutput, lint_to_stdout_json};
 pub use splice::{NEXT_NODE_PLACEHOLDER, splice_node_after};
 
+/// Metadata key under which compiled flows expose their flow-level slot schema.
+pub const SLOT_SCHEMA_METADATA_KEY: &str = "greentic.slot_schema";
+
 use crate::{error::Result, model::FlowDoc};
 use greentic_types::{
     ComponentId, Flow, FlowComponentRef, FlowId, FlowKind, FlowMetadata, InputMapping, Node,
@@ -84,6 +87,7 @@ pub fn compile_flow(doc: FlowDoc) -> Result<Flow> {
         schema_version,
         mut entrypoints,
         meta: _,
+        slot_schema,
         nodes: node_docs,
     } = doc;
 
@@ -151,10 +155,17 @@ pub fn compile_flow(doc: FlowDoc) -> Result<Flow> {
             message: format!("node '{node_id_str}' missing operation key"),
             location: crate::error::FlowErrorLocation::at_path(format!("nodes.{node_id_str}")),
         })?;
+        let is_mcp = operation.as_str() == crate::ir::MCP_COMPONENT;
         let is_builtin =
             matches!(operation.as_str(), "questions" | "template") || operation.starts_with("dw.");
         let is_legacy = schema_version.unwrap_or(1) < 2;
-        let (component_id, op_field) = if is_builtin || is_legacy {
+        let (component_id, op_field) = if is_mcp {
+            // MCP nodes lower to the literal `mcp` component. `server`, `tool`,
+            // `arguments` and `output` stay in the node payload (carried via the
+            // input mapping below), so the component string remains a valid
+            // greentic_types::ComponentId and survives pack/runtime load.
+            (crate::ir::MCP_COMPONENT.to_string(), op_sibling)
+        } else if is_builtin || is_legacy {
             (operation, op_sibling)
         } else {
             (
@@ -194,6 +205,27 @@ pub fn compile_flow(doc: FlowDoc) -> Result<Flow> {
 
     let entrypoints_map: BTreeMap<String, Value> = entrypoints.into_iter().collect();
 
+    let mut extra = parameters;
+    if let Some(ss) = slot_schema {
+        validate_slot_schema_names(&ss)?;
+        match extra {
+            Value::Object(ref mut map) => {
+                map.insert(SLOT_SCHEMA_METADATA_KEY.to_string(), ss);
+            }
+            Value::Null => {
+                let mut map = serde_json::Map::new();
+                map.insert(SLOT_SCHEMA_METADATA_KEY.to_string(), ss);
+                extra = Value::Object(map);
+            }
+            _ => {
+                tracing::warn!(
+                    flow_id = %id,
+                    "slot_schema present but parameters is not an object; skipping forward into extra"
+                );
+            }
+        }
+    }
+
     Ok(Flow {
         schema_version: "flow-v1".to_string(),
         id: flow_id,
@@ -204,9 +236,61 @@ pub fn compile_flow(doc: FlowDoc) -> Result<Flow> {
             title,
             description,
             tags: tags.into_iter().collect::<BTreeSet<_>>(),
-            extra: parameters,
+            extra,
         },
     })
+}
+
+/// Reject duplicate slot names in `slot_schema`. The JSON schema enforces
+/// structure (types, required fields, allOf conditionals) but cannot check
+/// name uniqueness across array items — `uniqueItems` compares whole objects,
+/// not individual fields.
+fn validate_slot_schema_names(value: &Value) -> Result<()> {
+    use crate::error::{FlowError, FlowErrorLocation, SchemaErrorDetail};
+
+    let Some(slots) = value.as_array() else {
+        return Ok(()); // non-array is caught by the JSON schema
+    };
+
+    let mut seen_names: HashSet<&str> = HashSet::with_capacity(slots.len());
+
+    for (i, slot) in slots.iter().enumerate() {
+        let Some(name) = slot.get("name").and_then(Value::as_str) else {
+            continue; // missing/empty name is caught by the JSON schema
+        };
+        if !seen_names.insert(name) {
+            let path = format!("slot_schema[{i}]");
+            let message = format!("{path}: duplicate slot name '{name}'");
+            let loc_path = format!("{path}/name");
+            return Err(FlowError::Schema {
+                message: message.clone(),
+                details: vec![SchemaErrorDetail {
+                    message,
+                    location: FlowErrorLocation::at_path(&loc_path),
+                }],
+                location: FlowErrorLocation::at_path(loc_path),
+            });
+        }
+
+        // Reject patterns that are not valid regular expressions.
+        if let Some(pat) = slot.get("pattern").and_then(Value::as_str)
+            && let Err(e) = regex::Regex::new(pat)
+        {
+            let path = format!("slot_schema[{i}]");
+            let message = format!("{path}: invalid regex pattern for slot '{name}': {e}");
+            let loc_path = format!("{path}/pattern");
+            return Err(FlowError::Schema {
+                message: message.clone(),
+                details: vec![SchemaErrorDetail {
+                    message,
+                    location: FlowErrorLocation::at_path(&loc_path),
+                }],
+                location: FlowErrorLocation::at_path(loc_path),
+            });
+        }
+    }
+
+    Ok(())
 }
 
 /// Compile YGTC YAML text into [`Flow`].
@@ -499,7 +583,15 @@ nodes:
 "#,
         )
         .expect_err("invalid shorthand should fail during load");
-        assert!(matches!(err, crate::error::FlowError::Routing { .. }));
+        // The JSON schema now catches the invalid routing value ("invalid" is
+        // not in the `oneOf` enum) before the Rust routing validator runs.
+        assert!(
+            matches!(
+                err,
+                crate::error::FlowError::Routing { .. } | crate::error::FlowError::Schema { .. }
+            ),
+            "expected Routing or Schema error, got: {err}"
+        );
     }
 
     #[test]
@@ -570,5 +662,144 @@ nodes:
         let ask_id = NodeId::new("ask").expect("valid node id");
         let ask = flow.nodes.get(&ask_id).expect("ask node exists");
         assert!(matches!(ask.routing, Routing::Custom(_)));
+    }
+
+    #[test]
+    fn compile_flow_forwards_slot_schema_into_metadata_extra() {
+        let slot_schema = json!([
+            { "name": "city", "slot_type": "string", "pattern": "^[A-Z].+" },
+            { "name": "color", "slot_type": "enum", "enum_values": ["red", "blue"] }
+        ]);
+        let doc = crate::model::FlowDoc {
+            id: "test".to_string(),
+            title: None,
+            description: None,
+            flow_type: "messaging".to_string(),
+            start: None,
+            parameters: json!({"custom_key": 42}),
+            tags: vec![],
+            schema_version: None,
+            entrypoints: Default::default(),
+            meta: None,
+            slot_schema: Some(slot_schema.clone()),
+            nodes: {
+                let mut m = indexmap::IndexMap::new();
+                m.insert(
+                    "start".to_string(),
+                    crate::model::NodeDoc {
+                        routing: json!("out"),
+                        raw: {
+                            let mut r = indexmap::IndexMap::new();
+                            r.insert("template".to_string(), json!("hi"));
+                            r
+                        },
+                        ..Default::default()
+                    },
+                );
+                m
+            },
+        };
+
+        let flow = compile_flow(doc).expect("compile_flow should succeed");
+        assert_eq!(
+            flow.metadata.extra[SLOT_SCHEMA_METADATA_KEY], slot_schema,
+            "slot_schema must be forwarded into metadata.extra"
+        );
+        assert_eq!(
+            flow.metadata.extra["custom_key"],
+            json!(42),
+            "original parameters must be preserved"
+        );
+    }
+
+    /// Helper: build a `FlowDoc` with a `component.exec` node and the given
+    /// `slot_schema`. This exercises the path that bypasses JSON-schema
+    /// validation in the loader.
+    fn component_exec_doc_with_slots(slot_schema: Option<Value>) -> crate::model::FlowDoc {
+        crate::model::FlowDoc {
+            id: "exec-test".to_string(),
+            title: None,
+            description: None,
+            flow_type: "messaging".to_string(),
+            start: None,
+            parameters: json!({}),
+            tags: vec![],
+            schema_version: None,
+            entrypoints: Default::default(),
+            meta: None,
+            slot_schema,
+            nodes: {
+                let mut m = indexmap::IndexMap::new();
+                m.insert(
+                    "run".to_string(),
+                    crate::model::NodeDoc {
+                        routing: json!("out"),
+                        raw: {
+                            let mut r = indexmap::IndexMap::new();
+                            r.insert("component.exec".to_string(), json!("some.component"));
+                            r
+                        },
+                        ..Default::default()
+                    },
+                );
+                m
+            },
+        }
+    }
+
+    #[test]
+    fn compile_rejects_duplicate_slot_names() {
+        let doc = component_exec_doc_with_slots(Some(json!([
+            { "name": "city", "slot_type": "string", "pattern": "^.+" },
+            { "name": "city", "slot_type": "number" }
+        ])));
+        let msg = compile_flow(doc)
+            .expect_err("compile_flow should reject duplicate slot names")
+            .to_string();
+        assert!(
+            msg.contains("duplicate"),
+            "error should mention 'duplicate': {msg}"
+        );
+    }
+
+    #[test]
+    fn compile_rejects_invalid_regex_in_slot_pattern() {
+        let doc = component_exec_doc_with_slots(Some(json!([
+            { "name": "city", "slot_type": "string", "pattern": "(" }
+        ])));
+        let msg = compile_flow(doc)
+            .expect_err("compile_flow should reject invalid regex")
+            .to_string();
+        assert!(
+            msg.contains("invalid regex pattern"),
+            "error should mention 'invalid regex pattern': {msg}"
+        );
+    }
+
+    #[test]
+    fn compile_accepts_valid_slot_schema_via_component_exec() {
+        let doc = component_exec_doc_with_slots(Some(json!([
+            { "name": "city", "slot_type": "string", "pattern": "^[A-Z].+" },
+            { "name": "color", "slot_type": "enum", "enum_values": ["red", "blue"] },
+            { "name": "count", "slot_type": "number" },
+            { "name": "active", "slot_type": "boolean" },
+            { "name": "when", "slot_type": "date" }
+        ])));
+        let flow = compile_flow(doc).expect("valid slot_schema should compile");
+        assert!(
+            flow.metadata.extra.get(SLOT_SCHEMA_METADATA_KEY).is_some(),
+            "slot_schema must be present in metadata.extra"
+        );
+    }
+
+    #[test]
+    fn routing_shorthand_validator_rejects_invalid_string_directly() {
+        let nodes = HashSet::from(["start".to_string()]);
+        let err = compile_routing(&json!("invalid"), &nodes, "start")
+            .expect_err("invalid shorthand must be rejected");
+        assert!(
+            matches!(err, crate::error::FlowError::Routing { .. }),
+            "expected Routing error, got: {err}"
+        );
     }
 }

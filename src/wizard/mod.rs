@@ -204,6 +204,7 @@ impl FlowScaffoldWizardProvider {
             schema_version: Some(2),
             entrypoints: IndexMap::new(),
             meta: None,
+            slot_schema: None,
             nodes: IndexMap::new(),
         };
 

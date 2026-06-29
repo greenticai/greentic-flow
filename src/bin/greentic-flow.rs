@@ -2290,6 +2290,7 @@ fn wizard_menu_answer<R: Read, W: Write>(
         frontend: WizardFrontend::JsonUi,
         i18n: qa_i18n,
         verbose: false,
+        env_id: String::new(),
     })
     .map_err(|err| anyhow!("{}: {err}", wizard_t("wizard.error.qa_runner_failed")))?;
     loop {
@@ -2598,6 +2599,7 @@ fn run_questions_with_qa_lib_io<R: Read, W: Write>(
         frontend: WizardFrontend::JsonUi,
         i18n: qa_i18n,
         verbose: false,
+        env_id: String::new(),
     })
     .map_err(|err| anyhow!("{}: {err}", wizard_t("wizard.error.qa_runner_failed")))?;
 
@@ -3083,6 +3085,7 @@ fn run_component_qa_with_qa_lib(
             debug: false,
         },
         verbose: false,
+        env_id: String::new(),
     })
     .map_err(|err| anyhow!("{}: {err}", wizard_t("wizard.error.qa_runner_failed")))?;
 
@@ -4009,7 +4012,8 @@ fn wizard_component_record_value_for_node(flow_path: &Path, step_id: &str) -> Re
         }
         ComponentSourceRefV1::Oci { r#ref, .. }
         | ComponentSourceRefV1::Repo { r#ref, .. }
-        | ComponentSourceRefV1::Store { r#ref, .. } => r#ref.clone(),
+        | ComponentSourceRefV1::Store { r#ref, .. }
+        | ComponentSourceRefV1::Ext { r#ref, .. } => r#ref.clone(),
     };
     Ok(value)
 }
@@ -4195,6 +4199,7 @@ fn write_new_flow_file(spec: NewFlowFileSpec) -> Result<()> {
         schema_version: Some(spec.schema_version),
         entrypoints: IndexMap::new(),
         meta: None,
+        slot_schema: None,
         nodes: IndexMap::new(),
     };
     let mut yaml = serde_yaml_bw::to_string(&doc)?;
@@ -7019,6 +7024,12 @@ fn resolve_source_to_wasm(flow_path: &Path, source: &ComponentSourceRefV1) -> Re
         | ComponentSourceRefV1::Store { r#ref, .. } => {
             let resolved = resolve_ref_to_bytes(r#ref, None)?;
             Ok(resolved.bytes)
+        }
+        ComponentSourceRefV1::Ext { r#ref, .. } => {
+            anyhow::bail!(
+                "ext:// component '{}' cannot be loaded directly; resolve via packc at pack-build time",
+                r#ref
+            )
         }
     }
 }
@@ -13704,6 +13715,14 @@ fn validate_sidecar_source(source: &ComponentSourceRefV1, flow_path: &Path) -> R
                 anyhow::bail!("store reference must start with store://");
             }
         }
+        ComponentSourceRefV1::Ext { r#ref, .. } => {
+            if r#ref.trim().is_empty() {
+                anyhow::bail!("ext reference is empty");
+            }
+            if !r#ref.starts_with("ext://") {
+                anyhow::bail!("ext reference must start with ext://");
+            }
+        }
     }
     Ok(())
 }
@@ -14350,6 +14369,8 @@ fn ensure_sidecar_source_available(source: &ComponentSourceRefV1, flow_path: &Pa
                 })?;
             }
         }
+        // ext:// sources are resolved by packc at pack-build time; nothing to check locally.
+        ComponentSourceRefV1::Ext { .. } => {}
     }
     Ok(())
 }
@@ -14430,6 +14451,12 @@ fn resolve_component_manifest_path(
                 .map(|p| p.join("component.manifest.json"))
                 .unwrap_or_else(|| PathBuf::from("component.manifest.json"))
         }
+        ComponentSourceRefV1::Ext { r#ref, .. } => {
+            anyhow::bail!(
+                "ext:// component '{}' manifest is resolved by packc at pack-build time",
+                r#ref
+            )
+        }
     };
 
     if !manifest_path.exists() {
@@ -14474,6 +14501,8 @@ fn load_component_payload(
                 .map(|p| p.join("component.manifest.json"))
                 .unwrap_or_else(|| PathBuf::from("component.manifest.json"))
         }
+        // ext:// manifest is resolved by packc at pack-build time; no payload to load here.
+        ComponentSourceRefV1::Ext { .. } => return Ok(None),
     };
 
     if !manifest_path.exists() {

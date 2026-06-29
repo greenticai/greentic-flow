@@ -89,6 +89,7 @@ fn write_fixture_wizard_component(
             display_name: None,
         },
         provided_capabilities: Vec::new(),
+        outcomes: Vec::new(),
         required_capabilities: Vec::new(),
         metadata: BTreeMap::new(),
         operations: operations
@@ -486,6 +487,7 @@ fn add_step_wizard_uses_fixture_resolver() {
             display_name: None,
         },
         provided_capabilities: Vec::new(),
+        outcomes: Vec::new(),
         required_capabilities: Vec::new(),
         metadata: BTreeMap::new(),
         operations: vec![ComponentOperation {
@@ -656,6 +658,7 @@ fn add_step_setup_rejects_component_when_required_input_is_missing() {
             display_name: None,
         },
         provided_capabilities: Vec::new(),
+        outcomes: Vec::new(),
         required_capabilities: Vec::new(),
         metadata: BTreeMap::new(),
         operations: vec![ComponentOperation {
