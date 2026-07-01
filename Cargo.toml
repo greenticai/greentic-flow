@@ -4,7 +4,7 @@ bench = [
 
 [package]
 name = "greentic-flow"
-version = "1.1.0-dev.0"
+version = "1.1.1-dev.0"
 edition = "2024"
 rust-version = "1.95"
 license = "MIT"
