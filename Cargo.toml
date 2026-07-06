@@ -137,7 +137,7 @@ features = [
 ]
 
 [dependencies.wasmtime]
-version = "45"
+version = "46"
 features = [
     "component-model",
 ]
