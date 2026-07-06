@@ -1,0 +1,17 @@
+# Crate-only publish (bypasses the release-binaries gate).
+name: Publish greentic-flow to crates.io
+on:
+  push:
+    tags: ["flowcrates-v*"]
+  workflow_dispatch: {}
+permissions:
+  contents: read
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  publish:
+    uses: greenticai/.github/.github/workflows/crates-publish.yml@main
+    with:
+      crates: "greentic-flow"
+    secrets: inherit
