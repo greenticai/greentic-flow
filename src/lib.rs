@@ -128,10 +128,18 @@ pub fn compile_flow(doc: FlowDoc) -> Result<Flow> {
         let mut input_mapping: Option<Value> = None;
         let mut output_mapping: Option<Value> = None;
         let mut err_mapping: Option<Value> = None;
+        let mut conversational = false;
         for (k, v) in node_doc.raw {
             match k.as_str() {
                 "in_map" => {
                     input_mapping = Some(v);
+                    continue;
+                }
+                // SP3: opt-in conversational chat-segment flag. Must be a known
+                // key with `continue` so it is NOT mistaken for the operation key
+                // (the fall-through below treats any unrecognised key as the op).
+                "conversational" => {
+                    conversational = v.as_bool().unwrap_or(false);
                     continue;
                 }
                 "out_map" | "output" => {
@@ -191,6 +199,7 @@ pub fn compile_flow(doc: FlowDoc) -> Result<Flow> {
             err_map: err_mapping.map(|mapping| OutputMapping { mapping }),
             routing,
             telemetry,
+            conversational,
         };
         nodes.insert(node_id, node);
     }
@@ -548,6 +557,42 @@ nodes:
             }
             other => panic!("expected branch routing, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn conversational_flag_flows_from_doc_to_node() {
+        let yaml = r#"id: demo
+type: messaging
+schema_version: 2
+nodes:
+  chat:
+    dw.agent:
+      user_text: "hi"
+    operation: support
+    conversational: true
+    routing: out
+  plain:
+    dw.agent:
+      user_text: "hi"
+    operation: helper
+    routing: out
+"#;
+        let flow = compile_ygtc_str(yaml).expect("compile flow");
+        assert!(
+            flow.nodes
+                .get(&NodeId::new("chat").unwrap())
+                .unwrap()
+                .conversational,
+            "conversational: true must reach the compiled node"
+        );
+        assert!(
+            !flow
+                .nodes
+                .get(&NodeId::new("plain").unwrap())
+                .unwrap()
+                .conversational,
+            "absent conversational must default false"
+        );
     }
 
     #[test]
