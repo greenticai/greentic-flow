@@ -155,3 +155,5 @@ criterion = "0.8"
 
 [build-dependencies]
 serde_json = "1"
+[patch.crates-io]
+greentic-types = { git = "https://github.com/greenticai/greentic-types.git", rev = "9d161ae95ff9d24be7b761dd4f50f648269dc603" }
