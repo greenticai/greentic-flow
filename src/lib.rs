@@ -191,6 +191,7 @@ pub fn compile_flow(doc: FlowDoc) -> Result<Flow> {
             err_map: err_mapping.map(|mapping| OutputMapping { mapping }),
             routing,
             telemetry,
+            conversational: false,
         };
         nodes.insert(node_id, node);
     }
