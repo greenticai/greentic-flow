@@ -49,6 +49,29 @@ pub use splice::{NEXT_NODE_PLACEHOLDER, splice_node_after};
 /// Metadata key under which compiled flows expose their flow-level slot schema.
 pub const SLOT_SCHEMA_METADATA_KEY: &str = "greentic.slot_schema";
 
+/// Op keys the runner dispatches itself and addresses by component id, with the
+/// dispatch target carried in a sibling `operation:` (greentic-runner-host
+/// `HostNode::from` → `NodeKind::{OperalaCall, SorlaCall, AgenticCall,
+/// ApprovalCall, TelcoXCall}`).
+///
+/// Under `schema_version: 2` every other dotted op key lowers to
+/// `component.exec`, which would drop the kind and hand the target to the
+/// generic exec path — and greentic-pack's builtin exemption, which reads the
+/// operation of a `component.exec` node, would then see `<target>` and demand a
+/// resolve-summary entry that can never exist.
+///
+/// Matched by EQUALITY only. A 3-segment key such as `x.call.y` is an adapter
+/// component and must keep lowering to `component.exec`; a prefix rule would
+/// silently reclassify it (the `mcp.exec` hazard documented in greentic-pack's
+/// `builtin.rs`).
+const RUNTIME_NATIVE_CALL_KINDS: &[&str] = &[
+    "operala.call",
+    "sorla.call",
+    "agentic.call",
+    "approval.call",
+    "telco-x.call",
+];
+
 use crate::{error::Result, model::FlowDoc};
 use greentic_types::{
     ComponentId, Flow, FlowComponentRef, FlowId, FlowKind, FlowMetadata, InputMapping, Node,
@@ -164,8 +187,9 @@ pub fn compile_flow(doc: FlowDoc) -> Result<Flow> {
             location: crate::error::FlowErrorLocation::at_path(format!("nodes.{node_id_str}")),
         })?;
         let is_mcp = operation.as_str() == crate::ir::MCP_COMPONENT;
-        let is_builtin =
-            matches!(operation.as_str(), "questions" | "template") || operation.starts_with("dw.");
+        let is_builtin = matches!(operation.as_str(), "questions" | "template")
+            || operation.starts_with("dw.")
+            || RUNTIME_NATIVE_CALL_KINDS.contains(&operation.as_str());
         let is_legacy = schema_version.unwrap_or(1) < 2;
         let (component_id, op_field) = if is_mcp {
             // MCP nodes lower to the literal `mcp` component. `server`, `tool`,
