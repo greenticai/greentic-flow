@@ -49,6 +49,29 @@ pub use splice::{NEXT_NODE_PLACEHOLDER, splice_node_after};
 /// Metadata key under which compiled flows expose their flow-level slot schema.
 pub const SLOT_SCHEMA_METADATA_KEY: &str = "greentic.slot_schema";
 
+/// Op keys the runner dispatches itself and addresses by component id, with the
+/// dispatch target carried in a sibling `operation:` (greentic-runner-host
+/// `HostNode::from` → `NodeKind::{OperalaCall, SorlaCall, AgenticCall,
+/// ApprovalCall, TelcoXCall}`).
+///
+/// Under `schema_version: 2` every other dotted op key lowers to
+/// `component.exec`, which would drop the kind and hand the target to the
+/// generic exec path — and greentic-pack's builtin exemption, which reads the
+/// operation of a `component.exec` node, would then see `<target>` and demand a
+/// resolve-summary entry that can never exist.
+///
+/// Matched by EQUALITY only. A 3-segment key such as `x.call.y` is an adapter
+/// component and must keep lowering to `component.exec`; a prefix rule would
+/// silently reclassify it (the `mcp.exec` hazard documented in greentic-pack's
+/// `builtin.rs`).
+const RUNTIME_NATIVE_CALL_KINDS: &[&str] = &[
+    "operala.call",
+    "sorla.call",
+    "agentic.call",
+    "approval.call",
+    "telco-x.call",
+];
+
 use crate::{error::Result, model::FlowDoc};
 use greentic_types::{
     ComponentId, Flow, FlowComponentRef, FlowId, FlowKind, FlowMetadata, InputMapping, Node,
@@ -128,10 +151,18 @@ pub fn compile_flow(doc: FlowDoc) -> Result<Flow> {
         let mut input_mapping: Option<Value> = None;
         let mut output_mapping: Option<Value> = None;
         let mut err_mapping: Option<Value> = None;
+        let mut conversational = false;
         for (k, v) in node_doc.raw {
             match k.as_str() {
                 "in_map" => {
                     input_mapping = Some(v);
+                    continue;
+                }
+                // SP3: opt-in conversational chat-segment flag. Must be a known
+                // key with `continue` so it is NOT mistaken for the operation key
+                // (the fall-through below treats any unrecognised key as the op).
+                "conversational" => {
+                    conversational = v.as_bool().unwrap_or(false);
                     continue;
                 }
                 "out_map" | "output" => {
@@ -156,8 +187,9 @@ pub fn compile_flow(doc: FlowDoc) -> Result<Flow> {
             location: crate::error::FlowErrorLocation::at_path(format!("nodes.{node_id_str}")),
         })?;
         let is_mcp = operation.as_str() == crate::ir::MCP_COMPONENT;
-        let is_builtin =
-            matches!(operation.as_str(), "questions" | "template") || operation.starts_with("dw.");
+        let is_builtin = matches!(operation.as_str(), "questions" | "template")
+            || operation.starts_with("dw.")
+            || RUNTIME_NATIVE_CALL_KINDS.contains(&operation.as_str());
         let is_legacy = schema_version.unwrap_or(1) < 2;
         let (component_id, op_field) = if is_mcp {
             // MCP nodes lower to the literal `mcp` component. `server`, `tool`,
@@ -191,7 +223,7 @@ pub fn compile_flow(doc: FlowDoc) -> Result<Flow> {
             err_map: err_mapping.map(|mapping| OutputMapping { mapping }),
             routing,
             telemetry,
-            conversational: false,
+            conversational,
         };
         nodes.insert(node_id, node);
     }
@@ -549,6 +581,42 @@ nodes:
             }
             other => panic!("expected branch routing, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn conversational_flag_flows_from_doc_to_node() {
+        let yaml = r#"id: demo
+type: messaging
+schema_version: 2
+nodes:
+  chat:
+    dw.agent:
+      user_text: "hi"
+    operation: support
+    conversational: true
+    routing: out
+  plain:
+    dw.agent:
+      user_text: "hi"
+    operation: helper
+    routing: out
+"#;
+        let flow = compile_ygtc_str(yaml).expect("compile flow");
+        assert!(
+            flow.nodes
+                .get(&NodeId::new("chat").unwrap())
+                .unwrap()
+                .conversational,
+            "conversational: true must reach the compiled node"
+        );
+        assert!(
+            !flow
+                .nodes
+                .get(&NodeId::new("plain").unwrap())
+                .unwrap()
+                .conversational,
+            "absent conversational must default false"
+        );
     }
 
     #[test]
