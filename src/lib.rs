@@ -351,6 +351,8 @@ fn compile_routing(raw: &Value, nodes: &HashSet<String>, node_id: &str) -> Resul
         reply: Option<bool>,
         #[serde(default)]
         condition: Option<String>,
+        #[serde(default)]
+        on_message: Option<bool>,
     }
 
     let routes: Vec<RouteDoc> = if raw.is_null() {
@@ -363,6 +365,7 @@ fn compile_routing(raw: &Value, nodes: &HashSet<String>, node_id: &str) -> Resul
                 status: None,
                 reply: None,
                 condition: None,
+                on_message: None,
             }],
             "reply" => vec![RouteDoc {
                 to: None,
@@ -370,6 +373,7 @@ fn compile_routing(raw: &Value, nodes: &HashSet<String>, node_id: &str) -> Resul
                 status: None,
                 reply: Some(true),
                 condition: None,
+                on_message: None,
             }],
             other => {
                 return Err(crate::error::FlowError::Routing {
@@ -389,8 +393,14 @@ fn compile_routing(raw: &Value, nodes: &HashSet<String>, node_id: &str) -> Resul
         })?
     };
 
-    // Any route with a condition expression → preserve as Custom routing
-    if routes.iter().any(|r| r.condition.is_some()) {
+    // Any route with a condition expression → preserve as Custom routing. An
+    // `on_message` route is conditional too: it is taken only on the turn that
+    // resumes a parked card, so collapsing it into a plain next-hop would make
+    // the card skip its own page.
+    if routes
+        .iter()
+        .any(|r| r.condition.is_some() || r.on_message == Some(true))
+    {
         // Validate all target nodes exist
         for route in &routes {
             if let Some(to) = &route.to
