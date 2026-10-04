@@ -369,6 +369,9 @@ mod host {
                 runner_host_kv: Some(|state: &mut HostState| &mut state.runner_kv),
                 telemetry_logger: Some(|state: &mut HostState| &mut state.telemetry_logger),
                 state_store: Some(|state: &mut HostState| &mut state.state_store),
+                // state-store@1.1.0 (write-if-absent) is not exposed to wizard
+                // components; the 1.0.0 registration above is unchanged.
+                state_store_v1_1: None,
                 secrets_store_v1_1: Some(|state: &mut HostState| &mut state.secrets_store),
                 secrets_store: None,
                 // C4.1 added `greentic:runtime-config@1.0.0`. The wizard ops
