@@ -49,8 +49,9 @@ pub use splice::{NEXT_NODE_PLACEHOLDER, splice_node_after};
 /// Metadata key under which compiled flows expose their flow-level slot schema.
 pub const SLOT_SCHEMA_METADATA_KEY: &str = "greentic.slot_schema";
 
-/// Op keys the runner dispatches itself and addresses by component id, with the
-/// dispatch target carried in a sibling `operation:` (greentic-runner-host
+/// Op keys the runner dispatches itself and addresses by component id (`a2a`
+/// carries its agent in its own payload, with no sibling `operation:`), with the
+/// dispatch target otherwise carried in a sibling `operation:` (greentic-runner-host
 /// `HostNode::from` → `NodeKind::{OperalaCall, SorlaCall, AgenticCall,
 /// ApprovalCall, TelcoXCall}`).
 ///
@@ -70,6 +71,7 @@ const RUNTIME_NATIVE_CALL_KINDS: &[&str] = &[
     "agentic.call",
     "approval.call",
     "telco-x.call",
+    "a2a",
 ];
 
 use crate::{error::Result, model::FlowDoc};
