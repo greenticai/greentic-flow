@@ -212,6 +212,7 @@ pub(crate) fn load_with_schema_text(
         .map(|m| m.is_empty())
         .unwrap_or(false);
     let reserved_for_count = [
+        "conversational",
         "routing",
         "telemetry",
         "output",
@@ -301,6 +302,7 @@ pub(crate) fn load_with_schema_text(
             location: node_location(&source_label, source_path, id),
         })?;
         let reserved = [
+            "conversational",
             "routing",
             "telemetry",
             "output",

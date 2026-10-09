@@ -23,6 +23,11 @@ Check the installed CLI version:
 greentic-flow --version
 ```
 
+Dev-channel builds (`greentic-flow-dev`, installed by `gtc install --channel dev`)
+report `1.2.<run-id>`, the same version as their `v1.2.<run-id>` release tag. A dev
+build that reports `1.2.0-dev.0` predates greenticai/.github#262 and should be
+reinstalled from a newer dev release.
+
 ## Create your first flow
 
 ```bash
