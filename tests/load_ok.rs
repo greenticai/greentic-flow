@@ -262,6 +262,18 @@ fn runtime_native_call_kinds_keep_their_op_key_and_take_the_sibling_operation() 
 }
 
 #[test]
+fn a_bare_a2a_node_keeps_its_op_key_as_the_component_id() {
+    // `a2a` is dispatched natively by the runner. Lowered to `component.exec`
+    // it loses the component id, so the runtime reports
+    // "component 'component.exec' not found in pack" and sends nothing.
+    let body = "    a2a:\n      agent: support-agent\n      message: \"hi\"\n";
+    let (component, operation, mapping) = lower_single_step(body);
+    assert_eq!(component, "a2a");
+    assert_eq!(operation, None);
+    assert_eq!(mapping.pointer("/agent"), Some(&json!("support-agent")));
+}
+
+#[test]
 fn a_sibling_less_approval_call_keeps_its_op_key_with_no_operation() {
     // The designer emits `approval.call` WITHOUT a sibling `operation`. It used to
     // lower to component.exec/approval.call; it now lowers to the shape the
@@ -279,7 +291,13 @@ fn only_exact_runtime_native_kinds_are_exempt_from_component_exec() {
     // A 3-segment key is an adapter COMPONENT (greentic-pack builtin.rs
     // documents the `mcp.exec` / `telco-x.call.*` hazard). A prefix match here
     // would silently reclassify it as engine-dispatched.
-    for key in ["x.call.y", "operala.call.extra", "sorla.caller"] {
+    for key in [
+        "x.call.y",
+        "operala.call.extra",
+        "sorla.caller",
+        "a2a.custom",
+        "a2aa",
+    ] {
         let body = format!("    {key}:\n      a: 1\n");
         let (component, operation, _) = lower_single_step(&body);
         assert_eq!(component, "component.exec", "{key} must stay a component");
