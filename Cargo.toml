@@ -103,7 +103,7 @@ package = "serde_yaml_gtc"
 version = "2.5.2"
 
 [dependencies.jsonschema]
-version = "0.48"
+version = "0.58"
 
 [dependencies.indexmap]
 version = "2"
