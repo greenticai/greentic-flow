@@ -274,6 +274,19 @@ fn a_bare_a2a_node_keeps_its_op_key_as_the_component_id() {
 }
 
 #[test]
+fn a_bare_media_create_node_keeps_its_op_key_as_the_component_id() {
+    // `media.create` is dispatched natively by the runner. Lowered to
+    // `component.exec` it would lose the component id and never run.
+    let body =
+        "    media.create:\n      format: pdf\n      name: \"Summary\"\n      text: \"hi\"\n";
+    let (component, operation, mapping) = lower_single_step(body);
+    assert_eq!(component, "media.create");
+    assert_eq!(operation, None);
+    assert_eq!(mapping.pointer("/format"), Some(&json!("pdf")));
+    assert_eq!(mapping.pointer("/text"), Some(&json!("hi")));
+}
+
+#[test]
 fn a_sibling_less_approval_call_keeps_its_op_key_with_no_operation() {
     // The designer emits `approval.call` WITHOUT a sibling `operation`. It used to
     // lower to component.exec/approval.call; it now lowers to the shape the
@@ -297,6 +310,8 @@ fn only_exact_runtime_native_kinds_are_exempt_from_component_exec() {
         "sorla.caller",
         "a2a.custom",
         "a2aa",
+        "media.create.extra",
+        "media.creator",
     ] {
         let body = format!("    {key}:\n      a: 1\n");
         let (component, operation, _) = lower_single_step(&body);
