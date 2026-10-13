@@ -72,6 +72,7 @@ const RUNTIME_NATIVE_CALL_KINDS: &[&str] = &[
     "approval.call",
     "telco-x.call",
     "a2a",
+    "media.create",
 ];
 
 use crate::{error::Result, model::FlowDoc};
