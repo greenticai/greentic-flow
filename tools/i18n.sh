@@ -3,6 +3,13 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 MODE="${1:-all}"
+case "$MODE" in
+  translate|validate|status|all) ;;
+  *)
+    echo "Unknown mode: $MODE (expected translate|validate|status|all)" >&2
+    exit 2
+    ;;
+esac
 AUTH_MODE="${AUTH_MODE:-auto}"
 LOCALE="${LOCALE:-en}"
 TRANSLATOR_BIN="${TRANSLATOR_BIN:-greentic-i18n-translator}"
@@ -93,7 +100,7 @@ merge_local_cache_into_global() {
 
   find "$LOCAL_CACHE_DIR" -type f -name '*.json' -print0 | while IFS= read -r -d '' file; do
     local rel
-    rel="${file#$LOCAL_CACHE_DIR/}"
+    rel="${file#"$LOCAL_CACHE_DIR"/}"
     local dest="$GLOBAL_CACHE_DIR/$rel"
     mkdir -p "$(dirname "$dest")"
     if [[ ! -f "$dest" ]]; then
@@ -117,12 +124,13 @@ resolve_en_paths() {
 
 base_langs_csv() {
   local base_dir="$ROOT_DIR/i18n"
-  ls -1 "$base_dir"/*.json 2>/dev/null \
-    | xargs -n1 basename \
-    | sed 's/\.json$//' \
-    | grep -v '^en$' \
-    | sort -u \
-    | paste -sd, -
+  local f
+  # Portable glob loop (BSD/macOS find lacks -printf). grep -v exits 1 when only en.json exists.
+  for f in "$base_dir"/*.json; do
+    [[ -e $f ]] || continue
+    f=${f##*/}
+    printf '%s\n' "${f%.json}"
+  done | { grep -v '^en$' || true; } | sort -u | paste -sd, -
 }
 
 langs_for_en_path() {

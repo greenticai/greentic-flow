@@ -102,27 +102,6 @@ pub fn normalize_node_map(value: Value) -> Result<NormalizedNode> {
         op_value = Some(val);
     }
 
-    // Legacy path: component.exec + operation
-    if op_key.is_none() && value.get("component.exec").is_some() {
-        let op = value
-            .get("operation")
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .to_string();
-        if op.trim().is_empty() {
-            return Err(FlowError::Internal {
-                message: "component.exec requires a non-empty operation".to_string(),
-                location: FlowErrorLocation::at_path("node.operation".to_string()),
-            });
-        }
-        let payload = value
-            .get("component.exec")
-            .cloned()
-            .unwrap_or(Value::Object(Default::default()));
-        op_key = Some(op);
-        op_value = Some(payload);
-    }
-
     let operation = op_key.ok_or_else(|| FlowError::Internal {
         message: "node must contain exactly one operation key".to_string(),
         location: FlowErrorLocation::at_path("node".to_string()),

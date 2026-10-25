@@ -192,6 +192,7 @@ impl FlowScaffoldWizardProvider {
             .unwrap_or("start-end");
 
         let flow_rel = PathBuf::from(flow_path);
+        ensure_relative_flow_path(&flow_rel)?;
         let flow_file = ctx.root_dir.join(&flow_rel);
         let mut doc = FlowDoc {
             id: flow_name.to_string(),
@@ -338,7 +339,37 @@ fn starter_nodes(variant: &str, entrypoint: &str) -> Result<Vec<(String, NodeDoc
         }
     }
 
+    let mut seen = std::collections::HashSet::new();
+    for (id, _) in &nodes {
+        if !seen.insert(id.as_str()) {
+            return Err(anyhow!(
+                "flow.entrypoint '{id}' collides with a starter node of variant '{variant}'; choose a different entrypoint id"
+            ));
+        }
+    }
+
     Ok(nodes)
+}
+
+/// `flow.path` must stay under the provider root: no absolute paths and no `..` components.
+fn ensure_relative_flow_path(path: &Path) -> Result<()> {
+    use std::path::Component;
+    if path.is_absolute() || path.has_root() {
+        return Err(anyhow!(
+            "flow.path must be relative to the project root, got '{}'",
+            path.display()
+        ));
+    }
+    if path
+        .components()
+        .any(|c| matches!(c, Component::ParentDir | Component::Prefix(_)))
+    {
+        return Err(anyhow!(
+            "flow.path must not contain '..' components, got '{}'",
+            path.display()
+        ));
+    }
+    Ok(())
 }
 
 fn template_node(template: &str, routing: Vec<Value>) -> NodeDoc {

@@ -14,31 +14,22 @@ fn sanitize_for_log(value: &str) -> String {
 }
 
 #[test]
+#[ignore = "requires ADD_STEP_REAL_MANIFEST and ADD_STEP_REAL_COMPONENT; run with --ignored"]
 fn add_step_with_real_manifest_catalog() {
-    let manifest_path = match env::var("ADD_STEP_REAL_MANIFEST") {
-        Ok(path) => PathBuf::from(path),
-        Err(_) => {
-            eprintln!("skip: set ADD_STEP_REAL_MANIFEST to run real-pack integration");
-            return;
-        }
-    };
-    let component_id = match env::var("ADD_STEP_REAL_COMPONENT") {
-        Ok(id) => id,
-        Err(_) => {
-            eprintln!("skip: set ADD_STEP_REAL_COMPONENT to run real-pack integration");
-            return;
-        }
-    };
+    let manifest_path = PathBuf::from(
+        env::var("ADD_STEP_REAL_MANIFEST")
+            .expect("set ADD_STEP_REAL_MANIFEST to run real-pack integration"),
+    );
+    let component_id = env::var("ADD_STEP_REAL_COMPONENT")
+        .expect("set ADD_STEP_REAL_COMPONENT to run real-pack integration");
 
     let catalog = ManifestCatalog::load_from_paths(&[manifest_path]);
-    let Some(meta) = catalog.resolve(&component_id) else {
-        let component_id = sanitize_for_log(&component_id);
-        eprintln!(
-            "skip: component '{}' not found in manifest catalog",
-            component_id
-        );
-        return;
-    };
+    let meta = catalog.resolve(&component_id).unwrap_or_else(|| {
+        panic!(
+            "component '{}' not found in manifest catalog",
+            sanitize_for_log(&component_id)
+        )
+    });
 
     let payload = required_payload(&meta);
     let mut nodes = indexmap::IndexMap::new();

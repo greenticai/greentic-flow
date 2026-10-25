@@ -14,8 +14,45 @@ use serde_json::Value as JsonValue;
 use serde_json::json;
 use serde_yaml_bw::Value;
 use std::collections::BTreeMap;
-use std::{fs, path::Path, process::Command};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+    process::Command,
+};
 use tempfile::tempdir;
+
+/// Resolves a path inside a sibling checkout (e.g. `../component-adaptive-card/dist/...`).
+fn sibling_checkout_path(segments: &[&str]) -> PathBuf {
+    let mut path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("workspace parent")
+        .to_path_buf();
+    for segment in segments {
+        path.push(segment);
+    }
+    path
+}
+
+/// Returns true when the sibling wasm fixture exists. When it is missing the test is skipped
+/// with a visible message, unless `GREENTIC_REQUIRE_SIBLING_WASM=1` is set, in which case it
+/// panics so CI cannot silently pass without exercising these tests.
+fn sibling_fixture_available(path: &Path) -> bool {
+    if path.exists() {
+        return true;
+    }
+    let required = std::env::var("GREENTIC_REQUIRE_SIBLING_WASM").is_ok_and(|v| v == "1");
+    if required {
+        panic!(
+            "required sibling wasm fixture missing: {} (GREENTIC_REQUIRE_SIBLING_WASM=1)",
+            path.display()
+        );
+    }
+    eprintln!(
+        "SKIPPED: sibling wasm fixture missing: {} (set GREENTIC_REQUIRE_SIBLING_WASM=1 to fail instead)",
+        path.display()
+    );
+    false
+}
 
 fn read_yaml(path: &Path) -> Value {
     serde_yaml_bw::from_str(&fs::read_to_string(path).unwrap()).unwrap()
@@ -805,6 +842,8 @@ nodes:
         .arg(&flow_path)
         .arg("--mode")
         .arg("default")
+        .arg("--after")
+        .arg("start")
         .arg("--node-id")
         .arg("next")
         .arg("--operation")
@@ -1049,6 +1088,11 @@ nodes:
 }
 
 #[test]
+// Needs the debug-only GREENTIC_FLOW_TEST_DIGEST override (compiled out of release builds).
+#[cfg_attr(
+    not(debug_assertions),
+    ignore = "requires debug-only GREENTIC_FLOW_TEST_DIGEST"
+)]
 fn add_step_remote_pin_uses_env_digest() {
     let dir = tempdir().unwrap();
     let flow_path = dir.path().join("flow.ygtc");
@@ -1246,6 +1290,11 @@ nodes:
 }
 
 #[test]
+// Needs the debug-only GREENTIC_FLOW_TEST_DIGEST override (compiled out of release builds).
+#[cfg_attr(
+    not(debug_assertions),
+    ignore = "requires debug-only GREENTIC_FLOW_TEST_DIGEST"
+)]
 fn add_step_config_uses_cached_component_manifest() {
     let dir = tempdir().unwrap();
     let flow_path = dir.path().join("flow.ygtc");
@@ -2497,14 +2546,13 @@ nodes:
 }
 
 #[test]
-fn wizard_answers_plan_copies_adaptive_card_asset_from_local_file_and_remote_url() {
-    let wasm_path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .expect("workspace parent")
-        .join("component-adaptive-card")
-        .join("dist")
-        .join("component_adaptive_card__0_6_0.wasm");
-    if !wasm_path.exists() {
+fn wizard_answers_plan_copies_adaptive_card_asset_from_local_file() {
+    let wasm_path = sibling_checkout_path(&[
+        "component-adaptive-card",
+        "dist",
+        "component_adaptive_card__0_6_0.wasm",
+    ]);
+    if !sibling_fixture_available(&wasm_path) {
         return;
     }
 
@@ -2515,8 +2563,6 @@ fn wizard_answers_plan_copies_adaptive_card_asset_from_local_file_and_remote_url
         r#"{"type":"AdaptiveCard","version":"1.6","body":[{"type":"TextBlock","text":"Local"}]}"#,
     )
     .unwrap();
-
-    let remote_url = "https://github.com/greenticai/component-adaptive-card/releases/latest/download/adaptive-card.json";
 
     let local_pack = dir.path().join("pack-local");
     seed_wizard_pack(&local_pack, &wasm_path);
@@ -2557,6 +2603,22 @@ fn wizard_answers_plan_copies_adaptive_card_asset_from_local_file_and_remote_url
         fs::read_to_string(&copied_local_asset).unwrap(),
         fs::read_to_string(&local_source).unwrap()
     );
+}
+
+#[test]
+#[ignore = "network: downloads from github.com releases; the binary rejects loopback http outside its own unit tests (SSRF guard), so no local server is possible"]
+fn wizard_answers_plan_copies_adaptive_card_asset_from_remote_url() {
+    let wasm_path = sibling_checkout_path(&[
+        "component-adaptive-card",
+        "dist",
+        "component_adaptive_card__0_6_0.wasm",
+    ]);
+    if !sibling_fixture_available(&wasm_path) {
+        return;
+    }
+
+    let dir = tempdir().unwrap();
+    let remote_url = "https://github.com/greenticai/component-adaptive-card/releases/latest/download/adaptive-card.json";
 
     let remote_pack = dir.path().join("pack-remote");
     seed_wizard_pack(&remote_pack, &wasm_path);
@@ -2602,13 +2664,12 @@ fn wizard_answers_plan_copies_adaptive_card_asset_from_local_file_and_remote_url
 
 #[test]
 fn wizard_answers_plan_registers_referenced_asset_in_pack_yaml() {
-    let wasm_path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .expect("workspace parent")
-        .join("component-adaptive-card")
-        .join("dist")
-        .join("component_adaptive_card__0_6_0.wasm");
-    if !wasm_path.exists() {
+    let wasm_path = sibling_checkout_path(&[
+        "component-adaptive-card",
+        "dist",
+        "component_adaptive_card__0_6_0.wasm",
+    ]);
+    if !sibling_fixture_available(&wasm_path) {
         return;
     }
 
@@ -2702,15 +2763,14 @@ fn wizard_answers_plan_registers_referenced_asset_in_pack_yaml() {
 
 #[test]
 fn add_step_local_wasm_setup_rejects_required_runtime_input() {
-    let wasm_path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .expect("workspace parent")
-        .join("component-llm-openai")
-        .join("target")
-        .join("wasm32-wasip2")
-        .join("release")
-        .join("component_llm_openai.wasm");
-    if !wasm_path.exists() {
+    let wasm_path = sibling_checkout_path(&[
+        "component-llm-openai",
+        "target",
+        "wasm32-wasip2",
+        "release",
+        "component_llm_openai.wasm",
+    ]);
+    if !sibling_fixture_available(&wasm_path) {
         return;
     }
 
@@ -2769,15 +2829,14 @@ fn add_step_local_wasm_setup_rejects_required_runtime_input() {
 
 #[test]
 fn wizard_answers_plan_registers_local_wasm_component_in_pack_yaml() {
-    let source_wasm = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .expect("workspace parent")
-        .join("component-llm-openai")
-        .join("target")
-        .join("wasm32-wasip2")
-        .join("release")
-        .join("component_llm_openai.wasm");
-    if !source_wasm.exists() {
+    let source_wasm = sibling_checkout_path(&[
+        "component-llm-openai",
+        "target",
+        "wasm32-wasip2",
+        "release",
+        "component_llm_openai.wasm",
+    ]);
+    if !sibling_fixture_available(&source_wasm) {
         return;
     }
 
@@ -2855,13 +2914,12 @@ fn wizard_answers_plan_registers_local_wasm_component_in_pack_yaml() {
 
 #[test]
 fn wizard_answers_plan_add_step_persists_mapping_aliases() {
-    let wasm_path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .expect("workspace parent")
-        .join("component-adaptive-card")
-        .join("dist")
-        .join("component_adaptive_card__0_6_0.wasm");
-    if !wasm_path.exists() {
+    let wasm_path = sibling_checkout_path(&[
+        "component-adaptive-card",
+        "dist",
+        "component_adaptive_card__0_6_0.wasm",
+    ]);
+    if !sibling_fixture_available(&wasm_path) {
         return;
     }
 
@@ -2918,13 +2976,12 @@ fn wizard_answers_plan_add_step_persists_mapping_aliases() {
 
 #[test]
 fn wizard_answers_plan_update_step_persists_mapping_aliases() {
-    let wasm_path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .expect("workspace parent")
-        .join("component-adaptive-card")
-        .join("dist")
-        .join("component_adaptive_card__0_6_0.wasm");
-    if !wasm_path.exists() {
+    let wasm_path = sibling_checkout_path(&[
+        "component-adaptive-card",
+        "dist",
+        "component_adaptive_card__0_6_0.wasm",
+    ]);
+    if !sibling_fixture_available(&wasm_path) {
         return;
     }
 
@@ -3350,15 +3407,14 @@ nodes:
 
 #[test]
 fn wizard_answers_plan_two_phase_llm_handle_message_authoring() {
-    let source_wasm = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .expect("workspace parent")
-        .join("component-llm-openai")
-        .join("target")
-        .join("wasm32-wasip2")
-        .join("release")
-        .join("component_llm_openai.wasm");
-    if !source_wasm.exists() {
+    let source_wasm = sibling_checkout_path(&[
+        "component-llm-openai",
+        "target",
+        "wasm32-wasip2",
+        "release",
+        "component_llm_openai.wasm",
+    ]);
+    if !sibling_fixture_available(&source_wasm) {
         return;
     }
 
@@ -3453,21 +3509,19 @@ fn wizard_answers_plan_two_phase_llm_handle_message_authoring() {
 
 #[test]
 fn wizard_answers_plan_deep_research_slice_preserves_orchestration() {
-    let adaptive_card_wasm = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .expect("workspace parent")
-        .join("component-adaptive-card")
-        .join("dist")
-        .join("component_adaptive_card__0_6_0.wasm");
-    let llm_wasm = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .expect("workspace parent")
-        .join("component-llm-openai")
-        .join("target")
-        .join("wasm32-wasip2")
-        .join("release")
-        .join("component_llm_openai.wasm");
-    if !adaptive_card_wasm.exists() || !llm_wasm.exists() {
+    let adaptive_card_wasm = sibling_checkout_path(&[
+        "component-adaptive-card",
+        "dist",
+        "component_adaptive_card__0_6_0.wasm",
+    ]);
+    let llm_wasm = sibling_checkout_path(&[
+        "component-llm-openai",
+        "target",
+        "wasm32-wasip2",
+        "release",
+        "component_llm_openai.wasm",
+    ]);
+    if !(sibling_fixture_available(&adaptive_card_wasm) && sibling_fixture_available(&llm_wasm)) {
         return;
     }
 

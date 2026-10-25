@@ -4,7 +4,7 @@ use greentic_types::schemas::component::v0_6_0::{ComponentQaSpec, QuestionKind};
 use qa_spec::FormSpec;
 use qa_spec::spec::question::{QuestionSpec, QuestionType};
 use serde_json::{Map, Number, Value};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{self, BufRead, Write};
 
 pub fn warn_unknown_keys(
@@ -58,6 +58,7 @@ fn run_interactive_with_io<R: BufRead, W: Write>(
     mut writer: W,
 ) -> Result<HashMap<String, Value>> {
     let form = component_spec_to_form(spec, catalog, locale);
+    let inline_json_ids = inline_json_ids(spec);
     writeln!(writer, "{}", resolve_text(&spec.title, catalog, locale)).map_err(|err| {
         FlowError::Internal {
             message: format!("write prompt: {err}"),
@@ -139,7 +140,7 @@ fn run_interactive_with_io<R: BufRead, W: Write>(
             let default = question
                 .default
                 .as_ref()
-                .and_then(|value| crate::wizard_ops::cbor_value_to_json(value).ok());
+                .and_then(|value| crate::wizard_ops::cbor_default_to_json(&question.id, value));
             let raw = prompt_line(&prompt, default.as_ref(), &mut reader, &mut writer)?;
             let value = if raw.trim().is_empty() {
                 if let Some(default) = default.clone() {
@@ -193,8 +194,24 @@ fn run_interactive_with_io<R: BufRead, W: Write>(
                 continue;
             }
             answers.insert(question.id.clone(), value);
-            if validate_answers_with_form(&form, &answers, true)? {
-                break;
+            match validate_answers_with_form(&form, &answers, &inline_json_ids, true) {
+                Ok(true) => break,
+                Ok(false) => {
+                    answers.remove(&question.id);
+                }
+                Err(err) => {
+                    // Only re-prompt when the rejected answer is the culprit. Errors that belong
+                    // to other questions (e.g. an invalid seed) cannot be fixed by re-asking this
+                    // one and would loop forever, so surface them.
+                    if !errors_only_for_question(&form, &answers, &inline_json_ids, &question.id) {
+                        return Err(err);
+                    }
+                    answers.remove(&question.id);
+                    writeln!(writer, "{err}").map_err(|write_err| FlowError::Internal {
+                        message: format!("write prompt: {write_err}"),
+                        location: FlowErrorLocation::new(None, None, None),
+                    })?;
+                }
             }
         }
     }
@@ -212,16 +229,33 @@ pub fn validate_required(
     answers: &HashMap<String, Value>,
 ) -> Result<()> {
     let form = component_spec_to_form(spec, catalog, locale);
-    let _ = validate_answers_with_form(&form, answers, false)?;
+    let _ = validate_answers_with_form(&form, answers, &inline_json_ids(spec), false)?;
     Ok(())
+}
+
+/// True when every validation error produced for `answers` is attributed to `question_id`.
+fn errors_only_for_question(
+    form: &FormSpec,
+    answers: &HashMap<String, Value>,
+    inline_json_ids: &HashSet<String>,
+    question_id: &str,
+) -> bool {
+    let value = Value::Object(map_from_answers(answers, inline_json_ids));
+    let result = qa_spec::validate(form, &value);
+    !result.errors.is_empty()
+        && result
+            .errors
+            .iter()
+            .all(|err| err.question_id.as_deref() == Some(question_id))
 }
 
 fn validate_answers_with_form(
     form: &FormSpec,
     answers: &HashMap<String, Value>,
+    inline_json_ids: &HashSet<String>,
     allow_incomplete: bool,
 ) -> Result<bool> {
-    let value = Value::Object(map_from_answers(answers));
+    let value = Value::Object(map_from_answers(answers, inline_json_ids));
     let result = qa_spec::validate(form, &value);
     if result.valid {
         return Ok(true);
@@ -252,10 +286,29 @@ fn validate_answers_with_form(
     Ok(false)
 }
 
-fn map_from_answers(answers: &HashMap<String, Value>) -> Map<String, Value> {
+/// Ids of questions whose answers are arbitrary JSON. `qa_spec` has no JSON question type, so these
+/// are modelled as strings in the form; their values are stringified before validation so the
+/// type check does not reject objects/arrays/numbers.
+fn inline_json_ids(spec: &ComponentQaSpec) -> HashSet<String> {
+    spec.questions
+        .iter()
+        .filter(|question| matches!(question.kind, QuestionKind::InlineJson { .. }))
+        .map(|question| question.id.clone())
+        .collect()
+}
+
+fn map_from_answers(
+    answers: &HashMap<String, Value>,
+    inline_json_ids: &HashSet<String>,
+) -> Map<String, Value> {
     let mut map = Map::new();
     for (key, value) in answers {
-        if !value.is_null() {
+        if value.is_null() {
+            continue;
+        }
+        if inline_json_ids.contains(key) && !value.is_string() {
+            map.insert(key.clone(), Value::String(value.to_string()));
+        } else {
             map.insert(key.clone(), value.clone());
         }
     }
@@ -289,7 +342,7 @@ fn component_spec_to_form(spec: &ComponentQaSpec, catalog: &I18nCatalog, locale:
         let default_value = question
             .default
             .as_ref()
-            .and_then(|value| crate::wizard_ops::cbor_value_to_json(value).ok())
+            .and_then(|value| crate::wizard_ops::cbor_default_to_json(&question.id, value))
             .map(|value| value.to_string());
         questions.push(QuestionSpec {
             id: question.id.clone(),
@@ -341,11 +394,14 @@ fn parse_answer(kind: &QuestionKind, raw: &str) -> Result<Value> {
                     location: FlowErrorLocation::new(None, None, None),
                 })
         }
-        QuestionKind::Bool => {
-            let lower = trimmed.to_ascii_lowercase();
-            let value = matches!(lower.as_str(), "true" | "t" | "yes" | "y" | "1");
-            Ok(Value::Bool(value))
-        }
+        QuestionKind::Bool => match trimmed.to_ascii_lowercase().as_str() {
+            "true" | "t" | "yes" | "y" | "1" => Ok(Value::Bool(true)),
+            "false" | "f" | "no" | "n" | "0" => Ok(Value::Bool(false)),
+            _ => Err(FlowError::Internal {
+                message: "invalid boolean (expected true/false, yes/no, y/n, 1/0)".to_string(),
+                location: FlowErrorLocation::new(None, None, None),
+            }),
+        },
         QuestionKind::InlineJson { .. } => {
             serde_json::from_str(trimmed).map_err(|err| FlowError::Internal {
                 message: format!("invalid json: {err}"),
@@ -565,6 +621,107 @@ mod tests {
         assert_eq!(
             parse_answer(&QuestionKind::Bool, "no").unwrap(),
             json!(false)
+        );
+    }
+
+    #[test]
+    fn parse_answer_rejects_invalid_bool() {
+        assert!(parse_answer(&QuestionKind::Bool, "maybe").is_err());
+        assert!(parse_answer(&QuestionKind::Bool, "tru").is_err());
+        assert_eq!(
+            parse_answer(&QuestionKind::Bool, "f").unwrap(),
+            json!(false)
+        );
+    }
+
+    #[test]
+    fn run_interactive_with_io_reprompts_on_invalid_bool() {
+        let spec = spec(vec![question("enabled", QuestionKind::Bool, true, None)]);
+        let mut output = Vec::new();
+        let answers = run_interactive_with_io(
+            &spec,
+            &I18nCatalog::default(),
+            "en",
+            HashMap::new(),
+            Cursor::new("maybe\nno\n"),
+            &mut output,
+        )
+        .expect("interactive answers");
+        assert_eq!(answers.get("enabled"), Some(&json!(false)));
+        assert!(
+            String::from_utf8(output)
+                .expect("utf8")
+                .contains("invalid boolean")
+        );
+    }
+
+    #[test]
+    fn run_interactive_with_io_accepts_inline_json_object() {
+        let spec = spec(vec![
+            question(
+                "payload",
+                QuestionKind::InlineJson { schema: None },
+                true,
+                None,
+            ),
+            question("name", QuestionKind::Text, true, None),
+        ]);
+        let answers = run_interactive_with_io(
+            &spec,
+            &I18nCatalog::default(),
+            "en",
+            HashMap::new(),
+            Cursor::new("{\"a\": [1, 2]}\nAda\n"),
+            Vec::new(),
+        )
+        .expect("inline json must not fail type validation");
+        assert_eq!(answers.get("payload"), Some(&json!({"a": [1, 2]})));
+        assert_eq!(answers.get("name"), Some(&json!("Ada")));
+    }
+
+    #[test]
+    fn validate_required_accepts_inline_json_non_string_answers() {
+        let spec = spec(vec![question(
+            "payload",
+            QuestionKind::InlineJson { schema: None },
+            true,
+            None,
+        )]);
+        let mut answers = HashMap::new();
+        answers.insert("payload".to_string(), json!({"k": 1}));
+        validate_required(&spec, &I18nCatalog::default(), "en", &answers)
+            .expect("object answer for inline json is valid");
+        answers.insert("payload".to_string(), json!(42));
+        validate_required(&spec, &I18nCatalog::default(), "en", &answers)
+            .expect("number answer for inline json is valid");
+    }
+
+    #[test]
+    fn run_interactive_with_io_fails_on_invalid_seed_instead_of_looping() {
+        let spec = spec(vec![
+            question("enabled", QuestionKind::Bool, false, None),
+            question("name", QuestionKind::Text, true, None),
+        ]);
+        let mut seed = HashMap::new();
+        seed.insert("enabled".to_string(), json!("not-a-bool"));
+        let err = run_interactive_with_io(
+            &spec,
+            &I18nCatalog::default(),
+            "en",
+            seed,
+            Cursor::new(
+                "Ada
+Ada
+Ada
+",
+            ),
+            Vec::new(),
+        )
+        .expect_err("invalid seed must surface as an error");
+        let message = format!("{err}");
+        assert!(
+            message.contains("answers failed validation"),
+            "unexpected error: {message}"
         );
     }
 }

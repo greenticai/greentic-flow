@@ -8,7 +8,6 @@ use greentic_types::flow_resolve_summary::{
     read_flow_resolve_summary, resolve_summary_path_for_flow, write_flow_resolve_summary,
 };
 use semver::Version;
-use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -167,9 +166,14 @@ fn component_id_from_source(source: &ComponentSourceRefV1) -> Option<ComponentId
         ComponentSourceRefV1::Local { .. } => return None,
     };
     // Extract component name from ref like "oci://ghcr.io/greenticai/components/templates:stable"
+    // Take the last path segment first so a registry port ("localhost:5000/x")
+    // is not mistaken for a tag separator.
     let path_part = raw_ref.split("://").last().unwrap_or(raw_ref);
-    let without_tag = path_part.split([':', '@']).next().unwrap_or(path_part);
-    let name = without_tag.rsplit('/').next().unwrap_or(without_tag);
+    let last_segment = path_part.rsplit('/').next().unwrap_or(path_part);
+    let name = last_segment
+        .split([':', '@'])
+        .next()
+        .unwrap_or(last_segment);
     ComponentId::from_str(name).ok()
 }
 
@@ -231,13 +235,22 @@ fn summary_source_ref(source: &ComponentSourceRefV1) -> FlowResolveSummarySource
     }
 }
 
-fn block_on_auto<F: std::future::Future>(fut: F) -> F::Output {
+fn block_on_auto<F: std::future::Future>(fut: F) -> Result<F::Output> {
     if let Ok(handle) = tokio::runtime::Handle::try_current() {
-        tokio::task::block_in_place(|| handle.block_on(fut))
+        Ok(tokio::task::block_in_place(|| handle.block_on(fut)))
     } else {
-        tokio::runtime::Runtime::new()
-            .expect("create tokio runtime")
-            .block_on(fut)
+        let runtime = tokio::runtime::Runtime::new().context("create tokio runtime")?;
+        Ok(runtime.block_on(fut))
+    }
+}
+
+/// A caller-supplied digest hint must agree with what the registry resolved.
+fn ensure_digest_matches_hint(reference: &str, hint: Option<&str>, actual: &str) -> Result<()> {
+    match hint {
+        Some(expected) if expected != actual => anyhow::bail!(
+            "digest mismatch for {reference}: pinned {expected} but registry resolved {actual}"
+        ),
+        _ => Ok(()),
     }
 }
 
@@ -254,7 +267,7 @@ fn resolve_remote(
             let source = client
                 .parse_source(reference)
                 .map_err(|e| anyhow!("failed to resolve reference {reference}: {e}"))?;
-            block_on_auto(client.resolve(source, ResolvePolicy))
+            block_on_auto(client.resolve(source, ResolvePolicy))?
                 .map_err(|e| anyhow!("failed to resolve reference {reference}: {e}"))?
                 .digest
         }
@@ -268,13 +281,14 @@ fn resolve_remote(
                 reference
             )
         })?;
-        let descriptor = block_on_auto(client.resolve(source, ResolvePolicy)).map_err(|e| {
+        let descriptor = block_on_auto(client.resolve(source, ResolvePolicy))?.map_err(|e| {
             anyhow!(
                 "component reference {} not available locally: {e}",
                 reference
             )
         })?;
-        let resolved = block_on_auto(client.fetch(&descriptor, CachePolicy)).map_err(|e| {
+        ensure_digest_matches_hint(reference, digest_hint, &descriptor.digest)?;
+        let resolved = block_on_auto(client.fetch(&descriptor, CachePolicy))?.map_err(|e| {
             anyhow!(
                 "component reference {} not available locally: {e}",
                 reference
@@ -320,11 +334,22 @@ fn manifest_wasm_from_dir(cache_dir: &Path) -> Result<Option<PathBuf>> {
         return Ok(None);
     };
     let candidate = cache_dir.join(rel);
-    if candidate.exists() {
-        Ok(Some(candidate))
-    } else {
-        Ok(None)
+    if !candidate.exists() {
+        return Ok(None);
     }
+    // The manifest comes from a (possibly untrusted) registry artifact: refuse
+    // paths that escape the cache directory (`..`, absolute, symlinks).
+    let canonical_dir = fs::canonicalize(cache_dir)
+        .with_context(|| format!("resolve cache dir {}", cache_dir.display()))?;
+    let canonical_candidate = fs::canonicalize(&candidate)
+        .with_context(|| format!("resolve manifest wasm {}", candidate.display()))?;
+    if !canonical_candidate.starts_with(&canonical_dir) {
+        anyhow::bail!(
+            "component_wasm '{rel}' escapes cache directory {}",
+            cache_dir.display()
+        );
+    }
+    Ok(Some(candidate))
 }
 
 fn find_manifest_for_wasm(wasm_path: &Path) -> Result<PathBuf> {
@@ -344,25 +369,29 @@ fn find_manifest_for_wasm(wasm_path: &Path) -> Result<PathBuf> {
     );
 }
 
+/// Returns whether `manifest_path` declares `wasm_abs` as its component wasm.
+/// A malformed or unrelated manifest simply does not match, so the upward search
+/// in [`find_manifest_for_wasm`] can continue to parent directories.
 fn manifest_matches_wasm(manifest_path: &Path, wasm_abs: &Path) -> Result<bool> {
-    let raw = fs::read_to_string(manifest_path)
-        .with_context(|| format!("read {}", manifest_path.display()))?;
-    let json: serde_json::Value =
-        serde_json::from_str(&raw).context("parse component.manifest.json")?;
-    let artifacts = json.get("artifacts").and_then(|v| v.as_object());
-    let Some(artifacts) = artifacts else {
+    let Ok(raw) = fs::read_to_string(manifest_path) else {
         return Ok(false);
     };
-    let rel = artifacts
-        .get("component_wasm")
+    let Ok(json) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        return Ok(false);
+    };
+    let Some(rel) = json
+        .get("artifacts")
+        .and_then(|v| v.get("component_wasm"))
         .and_then(|v| v.as_str())
-        .ok_or_else(|| anyhow!("manifest missing artifacts.component_wasm"))?;
-    let manifest_dir = manifest_path
-        .parent()
-        .ok_or_else(|| anyhow!("manifest path {} has no parent", manifest_path.display()))?;
-    let abs = fs::canonicalize(manifest_dir.join(rel))
-        .with_context(|| format!("resolve manifest wasm {}", rel))?;
-    Ok(abs == *wasm_abs)
+    else {
+        return Ok(false);
+    };
+    let Some(manifest_dir) = manifest_path.parent() else {
+        return Ok(false);
+    };
+    Ok(fs::canonicalize(manifest_dir.join(rel))
+        .map(|abs| abs == *wasm_abs)
+        .unwrap_or(false))
 }
 
 fn read_manifest_metadata(
@@ -432,16 +461,7 @@ fn local_path_from_sidecar(path: &str, flow_path: &Path) -> PathBuf {
 
 fn compute_sha256(path: &Path) -> Result<String> {
     let bytes = fs::read(path).with_context(|| format!("read wasm at {}", path.display()))?;
-    let mut sha = Sha256::new();
-    sha.update(bytes);
-    let digest = sha.finalize();
-    Ok(format!(
-        "sha256:{}",
-        digest
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect::<String>()
-    ))
+    Ok(format!("sha256:{}", crate::flow_bundle::sha256_hex(bytes)))
 }
 
 #[cfg(test)]
@@ -501,6 +521,67 @@ mod tests {
             PathBuf::from("/abs/component.wasm")
         );
         assert_eq!(flow_name_from_path(flow_path), "demo.ygtc");
+    }
+
+    #[test]
+    fn component_id_ignores_registry_port() {
+        let source = ComponentSourceRefV1::Oci {
+            r#ref: "oci://localhost:5000/ns/templates:stable".to_string(),
+            digest: None,
+        };
+        assert_eq!(
+            component_id_from_source(&source).unwrap().as_str(),
+            "templates"
+        );
+        let digest_ref = ComponentSourceRefV1::Oci {
+            r#ref: "oci://reg.io:443/ns/widget@sha256:abc".to_string(),
+            digest: None,
+        };
+        assert_eq!(
+            component_id_from_source(&digest_ref).unwrap().as_str(),
+            "widget"
+        );
+    }
+
+    #[test]
+    fn digest_hint_must_match_resolved_digest() {
+        assert!(ensure_digest_matches_hint("r", None, "sha256:a").is_ok());
+        assert!(ensure_digest_matches_hint("r", Some("sha256:a"), "sha256:a").is_ok());
+        assert!(ensure_digest_matches_hint("r", Some("sha256:a"), "sha256:b").is_err());
+    }
+
+    #[test]
+    fn manifest_wasm_from_dir_rejects_path_traversal() {
+        let root = tempdir().unwrap();
+        let cache = root.path().join("cache");
+        fs::create_dir_all(&cache).unwrap();
+        fs::write(root.path().join("outside.wasm"), b"x").unwrap();
+        fs::write(
+            cache.join("component.manifest.json"),
+            serde_json::json!({"artifacts": {"component_wasm": "../outside.wasm"}}).to_string(),
+        )
+        .unwrap();
+        assert!(manifest_wasm_from_dir(&cache).is_err());
+    }
+
+    #[test]
+    fn malformed_manifest_does_not_abort_upward_search() {
+        let root = tempdir().unwrap();
+        let good = root.path().join("component");
+        let nested = good.join("dist/inner");
+        fs::create_dir_all(&nested).unwrap();
+        let wasm = good.join("dist/widget.wasm");
+        fs::write(&wasm, b"w").unwrap();
+        fs::write(good.join("dist/component.manifest.json"), b"{not json").unwrap();
+        let manifest = good.join("component.manifest.json");
+        fs::write(
+            &manifest,
+            serde_json::json!({"id":"a.b","artifacts":{"component_wasm":"dist/widget.wasm"}})
+                .to_string(),
+        )
+        .unwrap();
+        let found = find_manifest_for_wasm(&wasm).unwrap();
+        assert_eq!(found, manifest.canonicalize().unwrap());
     }
 
     #[test]

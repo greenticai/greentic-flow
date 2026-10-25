@@ -21,7 +21,9 @@ use crate::{
 use self::{
     id::{generate_node_id, is_placeholder_value},
     normalize::normalize_node_map,
-    rewire::{apply_threaded_routing, rewrite_placeholder_routes},
+    rewire::{
+        apply_threaded_routing, rewrite_placeholder_routes, rewrite_routes_before_entrypoint,
+    },
     validate::validate_schema_and_flow,
 };
 
@@ -187,13 +189,34 @@ pub fn plan_add_step(
         .or(Some(normalized.operation.as_str()));
     let new_node_id = generate_node_id(hint, &anchor, flow.nodes.keys().map(|k| k.as_str()));
 
-    let routing = rewrite_placeholder_routes(
-        normalized.routing.clone(),
-        &anchor_old_routing,
-        spec.allow_cycles,
-        &anchor,
-        spec.require_placeholder,
-    )
+    let routing = if insert_before_entrypoint {
+        // The new node becomes the entrypoint and flows into the old entrypoint target, so the
+        // placeholder resolves to the anchor and explicit routes are honored.
+        rewrite_routes_before_entrypoint(
+            normalized.routing.clone(),
+            &anchor,
+            spec.require_placeholder,
+        )
+    } else {
+        // An empty flow has no anchor routing to inherit: the placeholder becomes a terminal
+        // `out: true` route so the first node is still routed. (An existing anchor without
+        // routing keeps failing with ADD_STEP_ROUTING_MISSING.)
+        let inherited = if flow.nodes.is_empty() && anchor_old_routing.is_empty() {
+            vec![Route {
+                out: true,
+                ..Route::default()
+            }]
+        } else {
+            anchor_old_routing.clone()
+        };
+        rewrite_placeholder_routes(
+            normalized.routing.clone(),
+            &inherited,
+            spec.allow_cycles,
+            &anchor,
+            spec.require_placeholder,
+        )
+    }
     .map_err(|msg| {
         vec![Diagnostic {
             code: "ADD_STEP_ROUTING_INVALID",
@@ -201,6 +224,29 @@ pub fn plan_add_step(
             location: Some(format!("nodes.{new_node_id}.routing")),
         }]
     })?;
+
+    if insert_before_entrypoint && !routing.is_empty() {
+        // The old entrypoint is retargeted to the new node; without a route into the anchor
+        // (from the new node or any other node) the old entrypoint would become unreachable.
+        let routed_by_new_node = routing.iter().any(|r| r.to.as_deref() == Some(&anchor));
+        let routed_by_other = flow.nodes.iter().any(|(id, node)| {
+            id != &anchor
+                && node
+                    .routing
+                    .iter()
+                    .any(|r| r.to.as_deref() == Some(&anchor))
+        });
+        if !routed_by_new_node && !routed_by_other {
+            return Err(vec![Diagnostic {
+                code: "ADD_STEP_ENTRYPOINT_ORPHANED",
+                message: format!(
+                    "inserting before entrypoint node '{anchor}' with explicit routing leaves '{anchor}' unreachable; \
+                     add a route to '{anchor}' (or use the next-node placeholder), or pass --after"
+                ),
+                location: Some(format!("nodes.{new_node_id}.routing")),
+            }]);
+        }
+    }
 
     if routing.is_empty() {
         return Err(vec![Diagnostic {
@@ -243,20 +289,7 @@ pub fn apply_plan(flow: &FlowIr, plan: AddStepPlan, allow_cycles: bool) -> Resul
         let mut entrypoints = IndexMap::new();
         entrypoints.insert("default".to_string(), plan.new_node.id.clone());
         nodes.insert(plan.new_node.id.clone(), plan.new_node);
-        return Ok(FlowIr {
-            id: flow.id.clone(),
-            title: flow.title.clone(),
-            description: flow.description.clone(),
-            kind: flow.kind.clone(),
-            start: flow.start.clone(),
-            parameters: flow.parameters.clone(),
-            tags: flow.tags.clone(),
-            schema_version: flow.schema_version,
-            entrypoints,
-            meta: flow.meta.clone(),
-            slot_schema: flow.slot_schema.clone(),
-            nodes,
-        });
+        return Ok(with_graph(flow, entrypoints, nodes));
     }
 
     if plan.insert_before_entrypoint {
@@ -265,10 +298,12 @@ pub fn apply_plan(flow: &FlowIr, plan: AddStepPlan, allow_cycles: bool) -> Resul
         for (id, node) in nodes.into_iter() {
             if id == plan.anchor {
                 let mut new_node = plan.new_node.clone();
-                new_node.routing = vec![Route {
-                    to: Some(plan.anchor.clone()),
-                    ..Route::default()
-                }];
+                if new_node.routing.is_empty() {
+                    new_node.routing = vec![Route {
+                        to: Some(plan.anchor.clone()),
+                        ..Route::default()
+                    }];
+                }
                 new_nodes.insert(new_node.id.clone(), new_node);
             }
             new_nodes.insert(id.clone(), node);
@@ -281,20 +316,7 @@ pub fn apply_plan(flow: &FlowIr, plan: AddStepPlan, allow_cycles: bool) -> Resul
             }
         }
 
-        return Ok(FlowIr {
-            id: flow.id.clone(),
-            title: flow.title.clone(),
-            description: flow.description.clone(),
-            kind: flow.kind.clone(),
-            start: flow.start.clone(),
-            parameters: flow.parameters.clone(),
-            tags: flow.tags.clone(),
-            schema_version: flow.schema_version,
-            entrypoints,
-            meta: flow.meta.clone(),
-            slot_schema: flow.slot_schema.clone(),
-            nodes: new_nodes,
-        });
+        return Ok(with_graph(flow, entrypoints, new_nodes));
     }
 
     let mut reordered = IndexMap::new();
@@ -323,20 +345,20 @@ pub fn apply_plan(flow: &FlowIr, plan: AddStepPlan, allow_cycles: bool) -> Resul
         });
     }
 
-    Ok(FlowIr {
-        id: flow.id.clone(),
-        title: flow.title.clone(),
-        description: flow.description.clone(),
-        kind: flow.kind.clone(),
-        start: flow.start.clone(),
-        parameters: flow.parameters.clone(),
-        tags: flow.tags.clone(),
-        schema_version: flow.schema_version,
-        entrypoints: flow.entrypoints.clone(),
-        meta: flow.meta.clone(),
-        slot_schema: flow.slot_schema.clone(),
-        nodes: reordered,
-    })
+    Ok(with_graph(flow, flow.entrypoints.clone(), reordered))
+}
+
+/// Copy of `flow` with its entrypoints and nodes replaced.
+fn with_graph(
+    flow: &FlowIr,
+    entrypoints: IndexMap<String, String>,
+    nodes: IndexMap<String, NodeIr>,
+) -> FlowIr {
+    FlowIr {
+        entrypoints,
+        nodes,
+        ..flow.clone()
+    }
 }
 
 pub fn validate_flow(flow: &FlowIr, _catalog: &dyn ComponentCatalog) -> Vec<Diagnostic> {

@@ -9,7 +9,7 @@ use serde_json::Value;
 use std::path::Path;
 
 const INLINE_SOURCE_LABEL: &str = "<inline>";
-const EMBEDDED_SCHEMA: &str = include_str!("../schemas/ygtc.flow.schema.json");
+use crate::loader::EMBEDDED_SCHEMA;
 const DEFAULT_SCHEMA_LABEL: &str = "https://raw.githubusercontent.com/greenticai/greentic-flow/refs/heads/master/schemas/ygtc.flow.schema.json";
 
 pub type NodeId = String;
@@ -61,6 +61,15 @@ pub fn blake3_hex(bytes: impl AsRef<[u8]>) -> String {
     hasher.update(bytes.as_ref());
     let hash = hasher.finalize();
     hash.to_hex().to_string()
+}
+
+/// Compute a lowercase hex-encoded SHA-256 digest (no `sha256:` prefix).
+pub fn sha256_hex(bytes: impl AsRef<[u8]>) -> String {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(bytes.as_ref())
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
 }
 
 /// Extract component pins from the IR.

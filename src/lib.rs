@@ -211,7 +211,16 @@ pub fn compile_flow(doc: FlowDoc) -> Result<Flow> {
         let node = Node {
             id: node_id.clone(),
             component: FlowComponentRef {
-                id: ComponentId::new(&component_id).unwrap(),
+                id: ComponentId::new(&component_id).map_err(|e| {
+                    crate::error::FlowError::InvalidIdentifier {
+                        kind: "component",
+                        value: component_id.clone(),
+                        detail: e.to_string(),
+                        location: crate::error::FlowErrorLocation::at_path(format!(
+                            "nodes.{node_id_str}"
+                        )),
+                    }
+                })?,
                 pack_alias: None,
                 operation: op_field,
             },
@@ -341,6 +350,12 @@ pub fn compile_ygtc_file(path: &Path) -> Result<Flow> {
     compile_flow(doc)
 }
 
+/// `to: out` is the loader's terminal sentinel, not a real node, unless a
+/// node literally named `out` exists.
+fn is_terminal_target(to: &str, nodes: &HashSet<String>) -> bool {
+    to == "out" && !nodes.contains(to)
+}
+
 fn compile_routing(raw: &Value, nodes: &HashSet<String>, node_id: &str) -> Result<Routing> {
     #[derive(serde::Deserialize)]
     struct RouteDoc {
@@ -407,6 +422,7 @@ fn compile_routing(raw: &Value, nodes: &HashSet<String>, node_id: &str) -> Resul
         // Validate all target nodes exist
         for route in &routes {
             if let Some(to) = &route.to
+                && !is_terminal_target(to, nodes)
                 && !nodes.contains(to)
             {
                 return Err(crate::error::FlowError::MissingNode {
@@ -423,15 +439,7 @@ fn compile_routing(raw: &Value, nodes: &HashSet<String>, node_id: &str) -> Resul
 
     if routes.len() == 1 {
         let route = &routes[0];
-        let has_condition = raw
-            .as_array()
-            .and_then(|routes| routes.first())
-            .and_then(Value::as_object)
-            .is_some_and(|route| route.contains_key("condition"));
         let is_out = route.out.unwrap_or(false);
-        if has_condition {
-            return Ok(Routing::Custom(raw.clone()));
-        }
         if route.reply.unwrap_or(false) {
             return Ok(Routing::Reply);
         }
@@ -478,16 +486,6 @@ fn compile_routing(raw: &Value, nodes: &HashSet<String>, node_id: &str) -> Resul
     // Attempt to build a Branch when multiple status routes are present.
     if routes.len() >= 2 {
         use std::collections::BTreeMap;
-        let has_condition = raw.as_array().is_some_and(|routes| {
-            routes.iter().any(|route| {
-                route
-                    .as_object()
-                    .is_some_and(|route| route.contains_key("condition"))
-            })
-        });
-        if has_condition {
-            return Ok(Routing::Custom(raw.clone()));
-        }
         let mut on_status: BTreeMap<String, NodeId> = BTreeMap::new();
         let mut default: Option<NodeId> = None;
         let mut any_status = false;
@@ -499,6 +497,9 @@ fn compile_routing(raw: &Value, nodes: &HashSet<String>, node_id: &str) -> Resul
                 Some(t) => t,
                 None => return Ok(Routing::Custom(raw.clone())),
             };
+            if is_terminal_target(to, nodes) {
+                return Ok(Routing::Custom(raw.clone()));
+            }
             if !nodes.contains(to) {
                 return Err(crate::error::FlowError::MissingNode {
                     target: to.clone(),

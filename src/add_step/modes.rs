@@ -2,10 +2,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{Map, Value, json};
 
-use crate::{
-    component_catalog::ComponentCatalog, config_flow::run_config_flow, error::Result,
-    loader::load_ygtc_from_str_with_schema,
-};
+use crate::{component_catalog::ComponentCatalog, config_flow::run_config_flow, error::Result};
 
 use super::normalize::normalize_node_map;
 
@@ -55,16 +52,16 @@ pub fn materialize_node(
             schema_path,
             answers,
             manifest_id,
-            manifest_path,
+            manifest_path: _,
         } => {
-            let _doc = load_ygtc_from_str_with_schema(&config_flow, &schema_path)?; // schema validation
+            // `run_config_flow` normalizes the flow (e.g. defaults `type`) and then validates it
+            // against the schema, so validating the raw text here would reject valid flows.
             let output = run_config_flow(&config_flow, &schema_path, &answers, manifest_id)?;
             let normalized = normalize_node_map(output.node.clone())?;
             let mut hint = Some(output.node_id.clone());
             if normalized.operation.is_empty() {
                 hint = None;
             }
-            let _ = manifest_path;
             Ok((hint, output.node))
         }
     }

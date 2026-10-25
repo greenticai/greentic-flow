@@ -59,17 +59,36 @@ fn run_bundle_workload(threads: usize, iters_per_thread: usize) -> Duration {
     start.elapsed()
 }
 
-#[test]
-fn compile_flow_scaling_should_not_collapse_under_concurrency() {
+fn median(mut samples: Vec<Duration>) -> Duration {
+    samples.sort();
+    samples[samples.len() / 2]
+}
+
+fn sample(samples: usize, mut run: impl FnMut() -> Duration) -> Duration {
+    median((0..samples).map(|_| run()).collect())
+}
+
+fn skip_if_single_cpu(test: &str) -> bool {
     let cpus = std::thread::available_parallelism()
         .map(|count| count.get())
         .unwrap_or(2);
     if cpus < 2 {
+        eprintln!("SKIPPED {test}: needs >= 2 CPUs, found {cpus}");
+        return true;
+    }
+    false
+}
+
+const SAMPLES: usize = 5;
+
+#[test]
+fn compile_flow_scaling_should_not_collapse_under_concurrency() {
+    if skip_if_single_cpu("compile_flow_scaling") {
         return;
     }
 
-    let t1 = run_compile_workload(1, 12);
-    let t2 = run_compile_workload(2, 12);
+    let t1 = sample(SAMPLES, || run_compile_workload(1, 12));
+    let t2 = sample(SAMPLES, || run_compile_workload(2, 12));
     let per_op_1 = t1.as_secs_f64() / 12.0;
     let per_op_2 = t2.as_secs_f64() / 24.0;
 
@@ -83,15 +102,12 @@ fn compile_flow_scaling_should_not_collapse_under_concurrency() {
 
 #[test]
 fn bundle_validation_scaling_should_not_collapse_under_concurrency() {
-    let cpus = std::thread::available_parallelism()
-        .map(|count| count.get())
-        .unwrap_or(2);
-    if cpus < 2 {
+    if skip_if_single_cpu("bundle_validation_scaling") {
         return;
     }
 
-    let t1 = run_bundle_workload(1, 8);
-    let t2 = run_bundle_workload(2, 8);
+    let t1 = sample(SAMPLES, || run_bundle_workload(1, 8));
+    let t2 = sample(SAMPLES, || run_bundle_workload(2, 8));
     let per_op_1 = t1.as_secs_f64() / 8.0;
     let per_op_2 = t2.as_secs_f64() / 16.0;
 

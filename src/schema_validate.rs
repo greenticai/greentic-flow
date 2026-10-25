@@ -337,6 +337,11 @@ fn validate_enum(
     });
 }
 
+/// `oneOf` is satisfied when at least one variant matches (the historical
+/// behavior). Strict JSON-Schema "exactly one" semantics are deliberately not
+/// enforced: overlapping variants such as `[Enum{"auto"}, String]`,
+/// `[Int, Enum{0}]`, `[Int, Float]` or two loose objects are common in
+/// component schemas and were always accepted.
 fn validate_one_of(
     variants: &[SchemaIr],
     value: &CborValue,
