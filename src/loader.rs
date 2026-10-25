@@ -16,6 +16,7 @@ use std::{
 
 /// Node keys that are never treated as the component/operation key.
 pub(crate) const RESERVED_NODE_KEYS: &[&str] = &[
+    "conversational",
     "routing",
     "telemetry",
     "output",

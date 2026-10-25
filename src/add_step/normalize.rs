@@ -154,7 +154,7 @@ fn parse_routes(raw: Value) -> Result<Vec<Route>> {
         })?;
         for key in obj.keys() {
             match key.as_str() {
-                "to" | "out" | "status" | "reply" | "condition" => {}
+                "to" | "out" | "status" | "reply" | "condition" | "on_message" => {}
                 other => {
                     return Err(FlowError::Internal {
                         message: format!("unsupported routing key '{other}'"),
@@ -175,6 +175,10 @@ fn parse_routes(raw: Value) -> Result<Vec<Route>> {
                 .get("condition")
                 .and_then(Value::as_str)
                 .map(|s| s.to_string()),
+            on_message: obj
+                .get("on_message")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
         });
     }
 

@@ -51,6 +51,9 @@ pub struct Route {
     pub reply: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub condition: Option<String>,
+    /// A card's answer-by-typing route (see the schema's `on_message`).
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub on_message: bool,
 }
 
 fn is_false(value: &bool) -> bool {
@@ -251,6 +254,8 @@ fn parse_routing(node: &NodeDoc, node_id: &str) -> Result<Vec<Route>> {
         reply: Option<bool>,
         #[serde(default)]
         condition: Option<String>,
+        #[serde(default)]
+        on_message: Option<bool>,
     }
 
     let routes: Vec<RouteDoc> =
@@ -267,6 +272,7 @@ fn parse_routing(node: &NodeDoc, node_id: &str) -> Result<Vec<Route>> {
             status: r.status,
             reply: r.reply.unwrap_or(false),
             condition: r.condition,
+            on_message: r.on_message.unwrap_or(false),
         })
         .collect())
 }

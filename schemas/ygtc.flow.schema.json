@@ -172,6 +172,10 @@
                       "condition": {
                         "type": "string",
                         "description": "Expression that must evaluate to true for this route to be taken"
+                      },
+                      "on_message": {
+                        "type": "boolean",
+                        "description": "A card's answer-by-typing route: taken only on the turn that resumes the card with a message carrying no action, never on the turn that renders it. Conditional, so the card still parks."
                       }
                     }
                   }
