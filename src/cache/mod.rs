@@ -99,7 +99,45 @@ impl CacheManager {
         })
     }
 
+    /// Try to load `key` from the disk cache into memory.
+    ///
+    /// Corrupt or incompatible entries are deleted and treated as a miss.
     #[allow(unsafe_code)]
+    fn load_from_disk(&self, engine: &Engine, key: &ArtifactKey) -> Result<Option<Arc<Component>>> {
+        if !self.config.disk_enabled {
+            return Ok(None);
+        }
+        self.metrics.disk_reads.fetch_add(1, Ordering::Relaxed);
+        let Some(serialized) = self.disk.try_read(key)? else {
+            return Ok(None);
+        };
+        // SAFETY: the bytes come from this cache's per-user directory, which is
+        // checked to be non-world-writable and whose metadata (engine profile,
+        // wasm digest, size) has been validated against `key`.
+        match unsafe { Component::deserialize(engine, &serialized) } {
+            Ok(component) => {
+                self.metrics.disk_hits.fetch_add(1, Ordering::Relaxed);
+                let component = Arc::new(component);
+                if self.config.memory_enabled {
+                    self.memory.insert(
+                        key.clone(),
+                        Arc::clone(&component),
+                        serialized.len(),
+                        false,
+                    );
+                }
+                Ok(Some(component))
+            }
+            Err(err) => {
+                tracing::warn!(error = %err, "discarding undeserializable cache entry");
+                if let Err(err) = self.disk.delete(key) {
+                    tracing::warn!(error = %err, "failed to delete corrupt cache entry");
+                }
+                Ok(None)
+            }
+        }
+    }
+
     pub async fn get_component(
         &self,
         engine: &Engine,
@@ -112,28 +150,8 @@ impl CacheManager {
             self.metrics.memory_hits.fetch_add(1, Ordering::Relaxed);
             return Ok(component);
         }
-        if self.config.disk_enabled {
-            self.metrics.disk_reads.fetch_add(1, Ordering::Relaxed);
-            if let Some(serialized) = self.disk.try_read(key)? {
-                match unsafe { Component::deserialize(engine, &serialized) } {
-                    Ok(component) => {
-                        self.metrics.disk_hits.fetch_add(1, Ordering::Relaxed);
-                        let component = Arc::new(component);
-                        if self.config.memory_enabled {
-                            self.memory.insert(
-                                key.clone(),
-                                Arc::clone(&component),
-                                serialized.len(),
-                                false,
-                            );
-                        }
-                        return Ok(component);
-                    }
-                    Err(_) => {
-                        let _ = self.disk.delete(key);
-                    }
-                }
-            }
+        if let Some(component) = self.load_from_disk(engine, key)? {
+            return Ok(component);
         }
 
         let _guard = self.singleflight.acquire(key.clone()).await;
@@ -143,72 +161,107 @@ impl CacheManager {
             self.metrics.memory_hits.fetch_add(1, Ordering::Relaxed);
             return Ok(component);
         }
-        if self.config.disk_enabled {
-            self.metrics.disk_reads.fetch_add(1, Ordering::Relaxed);
-            if let Some(serialized) = self.disk.try_read(key)? {
-                match unsafe { Component::deserialize(engine, &serialized) } {
-                    Ok(component) => {
-                        self.metrics.disk_hits.fetch_add(1, Ordering::Relaxed);
-                        let component = Arc::new(component);
-                        if self.config.memory_enabled {
-                            self.memory.insert(
-                                key.clone(),
-                                Arc::clone(&component),
-                                serialized.len(),
-                                false,
-                            );
-                        }
-                        return Ok(component);
-                    }
-                    Err(_) => {
-                        let _ = self.disk.delete(key);
-                    }
-                }
-            }
+        if let Some(component) = self.load_from_disk(engine, key)? {
+            return Ok(component);
         }
 
         let bytes = wasm_bytes()?;
         self.metrics.compiles.fetch_add(1, Ordering::Relaxed);
         let component = Component::from_binary(engine, &bytes)?;
         let component = Arc::new(component);
-        if self.config.disk_enabled
-            && let Ok(serialized) = component.serialize()
-        {
-            let meta = ArtifactMetadata::new(
-                &self.profile,
-                key.wasm_digest.clone(),
-                serialized.len() as u64,
-            );
-            let _ = self.disk.write_atomic(key, &serialized, &meta);
+        // Memory accounting always uses the serialized size when it is known, so
+        // the estimate matches what a disk hit would record.
+        let mut size_estimate = bytes.len();
+        if self.config.disk_enabled {
+            match component.serialize() {
+                Ok(serialized) => {
+                    size_estimate = serialized.len();
+                    let meta = ArtifactMetadata::new(
+                        &self.profile,
+                        key.wasm_digest.clone(),
+                        serialized.len() as u64,
+                    );
+                    if let Err(err) = self.disk.write_atomic(key, &serialized, &meta) {
+                        tracing::warn!(error = %err, "failed to write component cache entry");
+                    }
+                }
+                Err(err) => {
+                    tracing::warn!(error = %err, "failed to serialize component for cache");
+                }
+            }
         }
         if self.config.memory_enabled {
             self.memory
-                .insert(key.clone(), Arc::clone(&component), bytes.len(), false);
+                .insert(key.clone(), Arc::clone(&component), size_estimate, false);
         }
         Ok(component)
     }
 
+    /// Preload entries that already exist in the disk cache into memory.
+    ///
+    /// This never compiles anything (items carry no wasm bytes): entries that
+    /// are not on disk are reported as `skipped`, and `WarmupMode::Strict`
+    /// turns any skipped item into an error.
     pub async fn warmup(
         &self,
-        _engine: &Engine,
+        engine: &Engine,
         items: &[WarmupItem],
-        _mode: WarmupMode,
+        mode: WarmupMode,
     ) -> Result<WarmupReport> {
-        Ok(WarmupReport {
-            warmed: items.len() as u64,
+        let mut report = WarmupReport {
+            warmed: 0,
             skipped: 0,
-        })
+        };
+        for item in items {
+            let in_memory = self.config.memory_enabled && self.memory.get(&item.key).is_some();
+            let present = if in_memory {
+                true
+            } else {
+                match self.load_from_disk(engine, &item.key) {
+                    Ok(found) => found.is_some(),
+                    Err(err) if matches!(mode, WarmupMode::BestEffort) => {
+                        tracing::warn!(
+                            error = %err,
+                            digest = %item.key.wasm_digest,
+                            "warmup: skipping entry after cache I/O error"
+                        );
+                        false
+                    }
+                    Err(err) => return Err(err),
+                }
+            };
+            if present {
+                report.warmed += 1;
+            } else {
+                report.skipped += 1;
+                if matches!(mode, WarmupMode::Strict) {
+                    anyhow::bail!(
+                        "warmup: no cached artifact for {} (strict mode)",
+                        item.key.wasm_digest
+                    );
+                }
+            }
+        }
+        Ok(report)
     }
 
+    /// Lightweight status report. `entries_checked` is the number of artifacts
+    /// currently present on disk; entries are validated lazily on read, not here.
     pub fn doctor(&self) -> CacheDoctorReport {
         CacheDoctorReport {
             disk_enabled: self.config.disk_enabled,
             memory_enabled: self.config.memory_enabled,
-            entries_checked: 0,
+            entries_checked: self.disk_stats().map(|s| s.artifact_count).unwrap_or(0),
         }
     }
 
     pub async fn prune_disk(&self, dry_run: bool) -> Result<PruneReport> {
+        if !self.config.disk_enabled {
+            return Ok(PruneReport {
+                removed_entries: 0,
+                removed_bytes: 0,
+            });
+        }
         self.disk.prune_to_limit(dry_run)
     }
 }

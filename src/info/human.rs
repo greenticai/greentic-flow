@@ -27,6 +27,10 @@ pub fn render(r: &InfoReport) -> String {
             "partial · {}/{} nodes resolved",
             r.resolve.resolved_nodes, r.resolve.total_nodes
         ),
+        "invalid" => format!(
+            "invalid · sidecar {} could not be read",
+            r.resolve.sidecar_path.as_deref().unwrap_or("")
+        ),
         _ => "unbound".to_string(),
     };
     kv(&mut s, "Resolve", &resolve_line);

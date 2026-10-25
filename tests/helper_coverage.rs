@@ -18,7 +18,53 @@ use greentic_types::schemas::component::v0_6_0::{
 use serde_json::{Map, json};
 use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
+use std::sync::{Mutex, MutexGuard, OnceLock};
 use tempfile::tempdir;
+
+/// Serializes tests that touch process-wide env vars and restores them on drop.
+struct EnvGuard {
+    _lock: MutexGuard<'static, ()>,
+    key: &'static str,
+    previous: Option<std::ffi::OsString>,
+}
+
+impl EnvGuard {
+    fn new(key: &'static str) -> Self {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        let lock = LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let previous = std::env::var_os(key);
+        Self {
+            _lock: lock,
+            key,
+            previous,
+        }
+    }
+
+    fn set(&self, value: &str) {
+        // SAFETY: env mutation is serialized by the guard's mutex within this test binary.
+        unsafe { std::env::set_var(self.key, value) };
+    }
+
+    fn unset(&self) {
+        // SAFETY: see `set`.
+        unsafe { std::env::remove_var(self.key) };
+    }
+}
+
+impl Drop for EnvGuard {
+    fn drop(&mut self) {
+        // SAFETY: see `set`; the lock is still held while fields drop after this body.
+        unsafe {
+            match &self.previous {
+                Some(value) => std::env::set_var(self.key, value),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
+}
 
 #[test]
 fn normalize_under_root_accepts_nested_files_and_rejects_escape_attempts() {
@@ -52,17 +98,17 @@ fn normalize_under_root_accepts_nested_files_and_rejects_escape_attempts() {
 
 #[test]
 fn schema_mode_uses_cli_and_environment_controls() {
-    unsafe { std::env::remove_var("GREENTIC_FLOW_STRICT") };
+    let env = EnvGuard::new("GREENTIC_FLOW_STRICT");
+    env.unset();
     assert_eq!(SchemaMode::resolve(false).unwrap(), SchemaMode::Strict);
     assert!(SchemaMode::resolve(true).unwrap().is_permissive());
 
-    unsafe { std::env::set_var("GREENTIC_FLOW_STRICT", "0") };
+    env.set("0");
     assert_eq!(SchemaMode::resolve(false).unwrap(), SchemaMode::Permissive);
 
-    unsafe { std::env::set_var("GREENTIC_FLOW_STRICT", "nope") };
+    env.set("nope");
     let err = SchemaMode::resolve(false).expect_err("invalid env value should fail");
     assert!(format!("{err}").contains("must be '0' or '1'"));
-    unsafe { std::env::remove_var("GREENTIC_FLOW_STRICT") };
 }
 
 #[test]
@@ -113,10 +159,14 @@ fn wizard_ops_convert_and_validate_answer_payloads() {
     .expect_err("non-string map keys should fail");
     assert!(format!("{err}").contains("non-string map key"));
 
+    // u64 values above i64::MAX stay numeric; only integers outside both ranges become strings.
     let wide = cbor_value_to_json(&CborValue::Integer(u64::MAX.into())).unwrap();
+    assert_eq!(wide, json!(u64::MAX));
+    let below_i64 = ciborium::value::Integer::try_from(i128::from(i64::MIN) - 1).unwrap();
+    let wide_negative = cbor_value_to_json(&CborValue::Integer(below_i64)).unwrap();
     assert!(
-        wide.is_string(),
-        "wide integers should round-trip as strings"
+        wide_negative.is_string(),
+        "integers outside i64/u64 should round-trip as strings"
     );
 
     let err = cbor_value_to_json(&CborValue::Float(f64::NAN)).expect_err("nan should fail");

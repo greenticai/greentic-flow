@@ -117,28 +117,50 @@ step "cargo fmt --all -- --check"
 if need cargo; then
   cargo fmt --all -- --check
 else
-  skip_step "cargo fmt requires cargo"
+  skip_step "cargo fmt requires cargo" 1
 fi
 
 step "cargo clippy --workspace --all-targets --all-features -D warnings"
 if need cargo; then
   cargo clippy -j "${LOCAL_CHECK_JOBS}" --workspace --all-targets --all-features -- -D warnings
 else
-  skip_step "cargo clippy requires cargo"
+  skip_step "cargo clippy requires cargo" 1
 fi
 
 step "cargo build --workspace --locked --all-features"
 if need cargo; then
   cargo build -j "${LOCAL_CHECK_JOBS}" --workspace --locked --all-features
 else
-  skip_step "cargo build requires cargo"
+  skip_step "cargo build requires cargo" 1
 fi
 
 step "cargo test --workspace --all-features"
 if need cargo; then
   cargo test -j "${LOCAL_CHECK_JOBS}" --workspace --all-features
 else
-  skip_step "cargo test requires cargo"
+  skip_step "cargo test requires cargo" 1
+fi
+
+# Opt-in: run #[ignore]d tests (network / real component fixtures) and make sibling-wasm
+# fixture tests fail instead of skipping. Enable with LOCAL_CHECK_IGNORED=1.
+# Requires network access plus ADD_STEP_REAL_MANIFEST and ADD_STEP_REAL_COMPONENT to be set
+# (consumed by the #[ignore]d add_step tests); the step fails fast when they are missing.
+if [[ "${LOCAL_CHECK_IGNORED:-0}" == "1" ]]; then
+  missing_env=()
+  for var in ADD_STEP_REAL_MANIFEST ADD_STEP_REAL_COMPONENT; do
+    [[ -n "${!var:-}" ]] || missing_env+=("$var")
+  done
+  if (( ${#missing_env[@]} > 0 )); then
+    echo "ERROR: LOCAL_CHECK_IGNORED=1 requires env var(s) (and network access): ${missing_env[*]}" >&2
+    exit 1
+  fi
+  step "cargo test --all-features (GREENTIC_REQUIRE_SIBLING_WASM=1) + --ignored"
+  if need cargo; then
+    GREENTIC_REQUIRE_SIBLING_WASM=1 cargo test -j "${LOCAL_CHECK_JOBS}" --workspace --all-features
+    GREENTIC_REQUIRE_SIBLING_WASM=1 cargo test -j "${LOCAL_CHECK_JOBS}" --workspace --all-features -- --ignored
+  else
+    skip_step "cargo test --ignored requires cargo" 1
+  fi
 fi
 
 step "greentic-flow doctor --json smoke test"

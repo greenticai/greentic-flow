@@ -38,13 +38,9 @@ pub fn generate_node_id<'a, I: Iterator<Item = &'a str>>(
     existing: I,
 ) -> String {
     let used: HashSet<String> = existing.map(|s| s.to_string()).collect();
-    let base = if !is_placeholder(hint) {
-        let slug = slugify(hint.unwrap());
-        if !slug.is_empty() {
-            slug
-        } else {
-            "node".to_string()
-        }
+    let base = if let Some(hint) = hint.filter(|h| !is_placeholder_value(h)) {
+        // `slugify` never returns an empty string.
+        slugify(hint)
     } else {
         let mut parts = vec!["node".to_string()];
         parts.push("after".to_string());

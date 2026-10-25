@@ -90,7 +90,7 @@ mod host {
     };
     use wasmtime::component::{Component, Linker};
     use wasmtime::component::{ResourceTable, Val};
-    use wasmtime::{Config, Engine, Store, StoreContextMut};
+    use wasmtime::{Config, Engine, Store, StoreContextMut, StoreLimits, StoreLimitsBuilder};
     use wasmtime_wasi::{WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
 
     mod runtime {
@@ -109,7 +109,20 @@ mod host {
         telemetry_logger: NoopTelemetryLogger,
         state_store: NoopStateStore,
         secrets_store: NoopSecretsStore,
+        limits: StoreLimits,
     }
+
+    /// Fuel budget for a single wizard call into a component (guards against infinite loops).
+    const WIZARD_FUEL: u64 = 10_000_000_000;
+    /// Upper bound on instances/tables/memories per store. Composed components instantiate many
+    /// nested core modules, so a tiny cap rejects valid components; total memory stays bounded by
+    /// `WIZARD_MAX_MEMORY_BYTES` and fuel.
+    const WIZARD_MAX_INSTANCES: usize = 1000;
+    /// Maximum linear memory a wizard component may allocate.
+    const WIZARD_MAX_MEMORY_BYTES: usize = 512 * 1024 * 1024;
+    /// Fingerprint of the engine configuration; bump when `build_engine` changes so cached
+    /// compiled artifacts from an incompatible configuration are not reused.
+    const WIZARD_ENGINE_FINGERPRINT: &str = "wizard-fuel-v1";
 
     struct NoopStateStore;
     struct NoopTelemetryLogger;
@@ -277,8 +290,24 @@ mod host {
                 telemetry_logger: NoopTelemetryLogger,
                 state_store: NoopStateStore,
                 secrets_store: NoopSecretsStore,
+                limits: StoreLimitsBuilder::new()
+                    .memory_size(WIZARD_MAX_MEMORY_BYTES)
+                    .instances(WIZARD_MAX_INSTANCES)
+                    .tables(WIZARD_MAX_INSTANCES)
+                    .memories(WIZARD_MAX_INSTANCES)
+                    .build(),
             }
         }
+    }
+
+    /// Create a store with resource limits and a fuel budget applied.
+    fn new_limited_store(engine: &Engine) -> Result<Store<HostState>> {
+        let mut store = Store::new(engine, HostState::new());
+        store.limiter(|state| &mut state.limits);
+        store
+            .set_fuel(WIZARD_FUEL)
+            .map_err(|err| anyhow!("set wasm fuel budget: {err}"))?;
+        Ok(store)
     }
 
     impl WasiView for HostState {
@@ -293,6 +322,7 @@ mod host {
     fn build_engine() -> Result<Engine> {
         let mut config = Config::new();
         config.wasm_component_model(true);
+        config.consume_fuel(true);
         Engine::new(&config).map_err(|err| anyhow!("init wasm engine: {err}"))
     }
 
@@ -308,8 +338,11 @@ mod host {
     impl WizardRuntimeCache {
         fn new() -> Result<Self> {
             let engine = build_engine()?;
-            let profile =
-                EngineProfile::from_engine(&engine, CpuPolicy::Native, "default".to_string());
+            let profile = EngineProfile::from_engine(
+                &engine,
+                CpuPolicy::Native,
+                WIZARD_ENGINE_FINGERPRINT.to_string(),
+            );
             let component_cache = CacheManager::new(CacheConfig::default(), profile);
             let async_runtime = tokio::runtime::Runtime::new()
                 .map_err(|err| anyhow!("init wizard cache async runtime: {err}"))?;
@@ -350,7 +383,18 @@ mod host {
             .component_cache
             .get_component(&runtime.engine, &key, || Ok(wasm_bytes.to_vec()));
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
-            tokio::task::block_in_place(|| handle.block_on(fut))
+            if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::CurrentThread {
+                // `block_in_place` panics on a current-thread runtime; drive the future on the
+                // dedicated cache runtime from a helper thread instead.
+                std::thread::scope(|scope| {
+                    scope
+                        .spawn(|| runtime.async_runtime.block_on(fut))
+                        .join()
+                        .map_err(|_| anyhow!("wizard component cache loader thread panicked"))?
+                })
+            } else {
+                tokio::task::block_in_place(|| handle.block_on(fut))
+            }
         } else {
             runtime.async_runtime.block_on(fut)
         }
@@ -464,9 +508,17 @@ mod host {
         {
             return Ok(());
         }
-        Err(anyhow!(
-            "component descriptor does not advertise required op 'setup.apply_answers'"
-        ))
+        Err(SetupApplyError::OpNotAdvertised.into())
+    }
+
+    /// Structured signals that `setup.apply_answers` cannot be used and the descriptor
+    /// (`component-qa.apply-answers`) fallback should be attempted.
+    #[derive(Debug, thiserror::Error)]
+    pub(super) enum SetupApplyError {
+        #[error("component descriptor does not advertise required op 'setup.apply_answers'")]
+        OpNotAdvertised,
+        #[error("invoke(setup.apply_answers) returned ok=false with no node error")]
+        NotOkWithoutError,
     }
 
     fn invoke_envelope(payload_cbor: Vec<u8>) -> runtime::node::InvocationEnvelope {
@@ -648,7 +700,7 @@ mod host {
         let mut linker: Linker<HostState> = Linker::new(engine);
         add_wasi_imports(&mut linker)?;
         add_control_imports(&mut linker)?;
-        let mut store = Store::new(engine, HostState::new());
+        let mut store = new_limited_store(engine)?;
         let api = runtime::RuntimeComponent::instantiate(&mut store, component.as_ref(), &linker)
             .map_err(|err| anyhow!("instantiate canonical component world: {err}"))?;
         let node = api.greentic_component_node();
@@ -666,21 +718,10 @@ mod host {
         } = result.map_err(|err| anyhow!("invoke returned node error: {}", err.message))?;
 
         if !ok {
-            return Err(anyhow!(
-                "invoke(setup.apply_answers) returned ok=false with no node error"
-            ));
+            return Err(SetupApplyError::NotOkWithoutError.into());
         }
 
         Ok(output_cbor)
-    }
-
-    pub(super) fn descriptor_mode_name(mode: WizardMode) -> &'static str {
-        match mode {
-            WizardMode::Default => "default",
-            WizardMode::Setup => "setup",
-            WizardMode::Update => "update",
-            WizardMode::Remove => "remove",
-        }
     }
 
     pub(super) fn is_missing_node_instance_error(err: &anyhow::Error) -> bool {
@@ -695,8 +736,40 @@ mod host {
             )
     }
 
+    /// True when `setup.apply_answers` is unavailable and the descriptor fallback applies.
+    ///
+    /// Matches (1) the typed [`SetupApplyError`] raised by this module, including `ok=false` with
+    /// no node error (an unsupported-op signal from components that cannot report a reason; the
+    /// fallback keeps the original error as context, so a real failure is not hidden), and (2)
+    /// node errors whose message specifically says the op itself is unknown/unsupported. Generic
+    /// words like "missing" or "not found" are deliberately not enough: they also appear in
+    /// component validation errors ("missing field ...") that must be surfaced to the user.
     pub(super) fn is_missing_setup_apply_error(err: &anyhow::Error) -> bool {
-        format!("{err:#}").contains("setup.apply_answers")
+        if err
+            .chain()
+            .any(|cause| cause.downcast_ref::<SetupApplyError>().is_some())
+        {
+            return true;
+        }
+        let msg = format!("{err:#}").to_ascii_lowercase();
+        if !msg.contains("setup.apply_answers") {
+            return false;
+        }
+        [
+            "unknown op",
+            "unknown operation",
+            "unsupported op",
+            "unsupported operation",
+            "operation not found",
+            "op not found",
+            "no such op",
+            "does not advertise required op",
+            "op not supported",
+            "operation not supported",
+            "operation not implemented",
+        ]
+        .iter()
+        .any(|marker| msg.contains(marker))
     }
 
     fn instantiate_root(
@@ -710,7 +783,7 @@ mod host {
         if add_control {
             add_control_imports(&mut linker)?;
         }
-        let mut store = Store::new(engine, HostState::new());
+        let mut store = new_limited_store(engine)?;
         let instance = linker
             .instantiate(&mut store, component.as_ref())
             .map_err(|err| anyhow!("instantiate component root world: {err}"))?;
@@ -790,7 +863,7 @@ mod host {
             &mut store,
             &instance,
             &qa_spec_export,
-            &[Val::Enum(descriptor_mode_name(mode).to_string())],
+            &[Val::Enum(mode.as_str().to_string())],
             "component-qa.qa-spec",
         )?;
 
@@ -836,7 +909,7 @@ mod host {
             &instance,
             &apply_export,
             &[
-                Val::Enum(descriptor_mode_name(mode).to_string()),
+                Val::Enum(mode.as_str().to_string()),
                 bytes_to_val(current_config),
                 bytes_to_val(answers),
             ],
@@ -877,13 +950,34 @@ mod host {
         val_to_bytes(&results[0]).map_err(|err| anyhow!("{label} returned invalid bytes: {err}"))
     }
 
-    pub fn fetch_wizard_spec(wasm_bytes: &[u8], _mode: WizardMode) -> Result<WizardSpecOutput> {
+    /// Run `work` on a thread without a tokio runtime context when the caller is inside one.
+    ///
+    /// Wasmtime's sync WASI host implementation calls `Handle::block_on` internally, which panics
+    /// ("cannot start a runtime from within a runtime") when executed on a runtime thread, so every
+    /// wasm execution (instantiate/describe/invoke/component-qa) must happen off-runtime.
+    fn off_runtime<T: Send>(work: impl FnOnce() -> Result<T> + Send) -> Result<T> {
+        if tokio::runtime::Handle::try_current().is_err() {
+            return work();
+        }
+        std::thread::scope(|scope| {
+            scope
+                .spawn(work)
+                .join()
+                .map_err(|_| anyhow!("wizard worker thread panicked"))?
+        })
+    }
+
+    pub fn fetch_wizard_spec(wasm_bytes: &[u8], mode: WizardMode) -> Result<WizardSpecOutput> {
+        off_runtime(|| fetch_wizard_spec_inner(wasm_bytes, mode))
+    }
+
+    fn fetch_wizard_spec_inner(wasm_bytes: &[u8], _mode: WizardMode) -> Result<WizardSpecOutput> {
         let engine = wizard_engine()?;
         let component = load_component_cached(wasm_bytes)?;
         let mut linker: Linker<HostState> = Linker::new(engine);
         add_wasi_imports(&mut linker)?;
         add_control_imports(&mut linker)?;
-        let mut store = Store::new(engine, HostState::new());
+        let mut store = new_limited_store(engine)?;
         let api =
             match runtime::RuntimeComponent::instantiate(&mut store, component.as_ref(), &linker) {
                 Ok(api) => api,
@@ -924,6 +1018,16 @@ mod host {
 
     pub fn apply_wizard_answers(
         wasm_bytes: &[u8],
+        abi: WizardAbi,
+        mode: WizardMode,
+        current_config: &[u8],
+        answers: &[u8],
+    ) -> Result<Vec<u8>> {
+        off_runtime(|| apply_wizard_answers_inner(wasm_bytes, abi, mode, current_config, answers))
+    }
+
+    fn apply_wizard_answers_inner(
+        wasm_bytes: &[u8],
         _abi: WizardAbi,
         mode: WizardMode,
         current_config: &[u8],
@@ -939,7 +1043,13 @@ mod host {
                     || is_missing_setup_apply_error(&err)
                     || is_setup_apply_descriptor_fallback_error(&err) =>
             {
-                apply_descriptor_answers(wasm_bytes, mode, current_config, answers)
+                apply_descriptor_answers(wasm_bytes, mode, current_config, answers).map_err(
+                    |fallback_err| {
+                        fallback_err.context(format!(
+                            "descriptor fallback failed after setup.apply_answers error: {err:#}"
+                        ))
+                    },
+                )
             }
             Err(err) => Err(err),
         }
@@ -995,9 +1105,18 @@ mod host {
         current_config: &[u8],
         answers: &[u8],
     ) -> Result<WizardOutput> {
-        let spec = fetch_wizard_spec(wasm_bytes, mode)?;
+        off_runtime(|| run_wizard_ops_inner(wasm_bytes, mode, current_config, answers))
+    }
+
+    fn run_wizard_ops_inner(
+        wasm_bytes: &[u8],
+        mode: WizardMode,
+        current_config: &[u8],
+        answers: &[u8],
+    ) -> Result<WizardOutput> {
+        let spec = fetch_wizard_spec_inner(wasm_bytes, mode)?;
         let config_cbor =
-            apply_wizard_answers(wasm_bytes, spec.abi, mode, current_config, answers)?;
+            apply_wizard_answers_inner(wasm_bytes, spec.abi, mode, current_config, answers)?;
         Ok(WizardOutput {
             abi: spec.abi,
             describe_cbor: spec.describe_cbor,
@@ -1363,22 +1482,6 @@ mod tests {
 
     #[test]
     fn wizard_host_error_classifiers_match_expected_messages() {
-        assert_eq!(
-            super::host::descriptor_mode_name(super::WizardMode::Default),
-            "default"
-        );
-        assert_eq!(
-            super::host::descriptor_mode_name(super::WizardMode::Setup),
-            "setup"
-        );
-        assert_eq!(
-            super::host::descriptor_mode_name(super::WizardMode::Update),
-            "update"
-        );
-        assert_eq!(
-            super::host::descriptor_mode_name(super::WizardMode::Remove),
-            "remove"
-        );
         assert!(super::host::is_missing_node_instance_error(
             &anyhow::anyhow!("no exported instance named `greentic:component/node@0.6.0`")
         ));
@@ -1386,7 +1489,7 @@ mod tests {
             &anyhow::anyhow!("component descriptor missing setup.qa-spec")
         ));
         assert!(super::host::is_missing_setup_apply_error(&anyhow::anyhow!(
-            "missing setup.apply_answers function"
+            "unknown operation: setup.apply_answers"
         )));
     }
 
@@ -1477,6 +1580,62 @@ mod tests {
     }
 
     #[test]
+    fn setup_apply_missing_classifier_is_narrow() {
+        // Real failures inside the op must not trigger the descriptor fallback.
+        // ok=false without a node error is an unsupported-op signal: fall back (original error
+        // stays attached as context).
+        assert!(super::host::is_missing_setup_apply_error(
+            &anyhow::Error::from(super::host::SetupApplyError::NotOkWithoutError)
+        ));
+        // Component validation errors that merely mention "missing"/"not found" must not match.
+        assert!(!super::host::is_missing_setup_apply_error(
+            &anyhow::anyhow!(
+                "invoke returned node error: missing field `name` in setup.apply_answers"
+            )
+        ));
+        assert!(!super::host::is_missing_setup_apply_error(
+            &anyhow::anyhow!(
+                "invoke returned node error: secret not found while running setup.apply_answers"
+            )
+        ));
+        assert!(!super::host::is_missing_setup_apply_error(
+            &anyhow::anyhow!(
+                "invoke returned node error: bad answers while running setup.apply_answers"
+            )
+        ));
+        assert!(super::host::is_missing_setup_apply_error(&anyhow::anyhow!(
+            "component descriptor does not advertise required op 'setup.apply_answers'"
+        )));
+        assert!(super::host::is_missing_setup_apply_error(&anyhow::anyhow!(
+            "unknown op setup.apply_answers"
+        )));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn wizard_entrypoints_do_not_panic_on_current_thread_runtime() {
+        // `block_in_place` panics on a current-thread runtime; invalid bytes must yield an Err.
+        assert!(super::fetch_wizard_spec(b"not-a-component", super::WizardMode::Default).is_err());
+    }
+
+    #[test]
+    fn cbor_integers_above_i64_max_stay_numeric() {
+        let big = ciborium::value::Value::Integer(u64::MAX.into());
+        let json = super::cbor_value_to_json(&big).expect("convert");
+        assert_eq!(json, serde_json::json!(u64::MAX));
+        let huge = ciborium::value::Value::Integer(
+            ciborium::value::Integer::try_from(-(i64::MAX as i128) - 5).expect("int"),
+        );
+        assert!(super::cbor_value_to_json(&huge).is_ok());
+    }
+
+    #[test]
+    fn decode_qa_spec_error_keeps_cbor_failure_context() {
+        let err = super::decode_component_qa_spec(&[0xff, 0xff], super::WizardMode::Default)
+            .expect_err("garbage must fail");
+        assert!(format!("{err:#}").contains("decode qa-spec cbor"));
+    }
+
+    #[test]
     fn public_wizard_entrypoints_fail_cleanly_for_invalid_component_bytes() {
         assert!(super::fetch_wizard_spec(b"not-a-component", super::WizardMode::Default).is_err());
         assert!(
@@ -1507,11 +1666,10 @@ pub fn run_wizard_ops(
 }
 
 pub fn decode_component_qa_spec(qa_spec_cbor: &[u8], mode: WizardMode) -> Result<ComponentQaSpec> {
-    let decoded: Result<ComponentQaSpec> =
-        canonical::from_cbor(qa_spec_cbor).map_err(|err| anyhow!("decode qa-spec cbor: {err}"));
-    if let Ok(spec) = decoded {
-        return Ok(spec);
-    }
+    let cbor_err = match canonical::from_cbor::<ComponentQaSpec>(qa_spec_cbor) {
+        Ok(spec) => return Ok(spec),
+        Err(err) => anyhow!("decode qa-spec cbor: {err}"),
+    };
 
     let legacy_json = std::str::from_utf8(qa_spec_cbor)
         .ok()
@@ -1523,13 +1681,16 @@ pub fn decode_component_qa_spec(qa_spec_cbor: &[u8], mode: WizardMode) -> Result
                 mode.as_qa_mode(),
                 raw,
             )
-            .map_err(|err| anyhow!("adapt legacy qa-spec json: {err}"))?;
-        let spec: ComponentQaSpec = canonical::from_cbor(adapted.as_slice())
-            .map_err(|err| anyhow!("decode adapted qa-spec: {err}"))?;
+            .map_err(|err| {
+                anyhow!("adapt legacy qa-spec json: {err} (cbor decode failed first: {cbor_err})")
+            })?;
+        let spec: ComponentQaSpec = canonical::from_cbor(adapted.as_slice()).map_err(|err| {
+            anyhow!("decode adapted qa-spec: {err} (cbor decode failed first: {cbor_err})")
+        })?;
         return Ok(spec);
     }
 
-    Err(anyhow!("qa-spec payload is not valid CBOR or legacy JSON"))
+    Err(cbor_err.context("qa-spec payload is not valid CBOR or legacy JSON"))
 }
 
 pub fn answers_to_cbor(answers: &HashMap<String, JsonValue>) -> Result<Vec<u8>> {
@@ -1562,6 +1723,8 @@ pub fn cbor_value_to_json(value: &ciborium::value::Value) -> Result<JsonValue> {
         CValue::Bool(b) => JsonValue::Bool(*b),
         CValue::Integer(i) => {
             if let Ok(v) = i64::try_from(*i) {
+                JsonValue::Number(v.into())
+            } else if let Ok(v) = u64::try_from(*i) {
                 JsonValue::Number(v.into())
             } else {
                 let wide: i128 = (*i).into();
@@ -1600,6 +1763,24 @@ pub fn cbor_value_to_json(value: &ciborium::value::Value) -> Result<JsonValue> {
     })
 }
 
+/// Convert a CBOR default into JSON, logging (instead of silently dropping) values that cannot be
+/// represented.
+pub fn cbor_default_to_json(
+    question_id: &str,
+    value: &ciborium::value::Value,
+) -> Option<JsonValue> {
+    match cbor_value_to_json(value) {
+        Ok(json) => Some(json),
+        Err(err) => {
+            tracing::warn!(
+                question = question_id,
+                "ignoring default that cannot be converted to JSON: {err}"
+            );
+            None
+        }
+    }
+}
+
 pub fn qa_spec_to_questions(
     spec: &ComponentQaSpec,
     catalog: &I18nCatalog,
@@ -1611,7 +1792,7 @@ pub fn qa_spec_to_questions(
         let default = question
             .default
             .as_ref()
-            .and_then(|value| cbor_value_to_json(value).ok());
+            .and_then(|value| cbor_default_to_json(&question.id, value));
 
         let (kind, choices) = match &question.kind {
             QuestionKind::Text => (crate::questions::QuestionKind::String, Vec::new()),
@@ -1647,7 +1828,7 @@ pub fn merge_default_answers(spec: &ComponentQaSpec, seed: &mut HashMap<String, 
         if seed.contains_key(key) {
             continue;
         }
-        if let Ok(json_value) = cbor_value_to_json(value) {
+        if let Some(json_value) = cbor_default_to_json(key, value) {
             seed.insert(key.clone(), json_value);
         }
     }

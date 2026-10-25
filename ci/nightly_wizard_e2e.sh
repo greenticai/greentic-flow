@@ -5,7 +5,6 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 FLOW_BIN="${FLOW_BIN:-$ROOT_DIR/target/debug/greentic-flow}"
 CATALOG_PATH="${CATALOG_PATH:-$ROOT_DIR/frequent-components.json}"
 FIXTURES_DIR="${FIXTURES_DIR:-$ROOT_DIR/tests/e2e/frequent-components}"
-TMP_ROOT="${TMPDIR:-/tmp}/greentic-flow-nightly-wizard-e2e"
 
 require_cmd() {
   if ! command -v "$1" >/dev/null 2>&1; then
@@ -27,8 +26,7 @@ if [[ ! -f "$CATALOG_PATH" ]]; then
   exit 1
 fi
 
-rm -rf "$TMP_ROOT"
-mkdir -p "$TMP_ROOT"
+TMP_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/greentic-flow-nightly-wizard-e2e.XXXXXX")"
 trap 'rm -rf "$TMP_ROOT"' EXIT
 
 log() {
@@ -38,7 +36,7 @@ log() {
 flow_doctor_assert_ok() {
   local flow_path="$1"
   local doctor_json
-  doctor_json="$("$FLOW_BIN" doctor --json "$flow_path")"
+  doctor_json="$("$FLOW_BIN" doctor --json "$flow_path" </dev/null)"
   python3 - "$doctor_json" <<'PY'
 import json
 import sys
@@ -55,12 +53,12 @@ create_pack_with_main_flow() {
   local pack_dir="$root/pack"
   local flow_path="$pack_dir/flows/global/messaging/main.ygtc"
   mkdir -p "$root"
-  greentic-pack new --dir "$pack_dir" "ai.greentic.nightly.$slug" >/dev/null
+  greentic-pack new --dir "$pack_dir" "ai.greentic.nightly.$slug" </dev/null >/dev/null
   "$FLOW_BIN" new \
     --flow "$flow_path" \
     --id main \
     --type messaging \
-    --force >/dev/null
+    --force </dev/null >/dev/null
   printf '%s\n' "$flow_path"
 }
 
@@ -93,7 +91,15 @@ materialize_answers_fixture() {
   local out_dir="$TMP_ROOT/materialized-fixtures/$component_id"
   local out_path="$out_dir/$mode_name.answers.json"
   mkdir -p "$out_dir"
-  sed "s|__ROOT_DIR__|$ROOT_DIR|g" "$fixture_path" >"$out_path"
+  # python avoids sed delimiter/escape problems when ROOT_DIR has special chars.
+  python3 - "$fixture_path" "$out_path" "$ROOT_DIR" <<'PY'
+import pathlib
+import sys
+
+src, dst, root = sys.argv[1:4]
+text = pathlib.Path(src).read_text(encoding="utf-8")
+pathlib.Path(dst).write_text(text.replace("__ROOT_DIR__", root), encoding="utf-8")
+PY
   printf '%s\n' "$out_path"
 }
 
@@ -182,7 +188,7 @@ run_add_step_case() {
       --component "$component_ref" \
       --wizard-mode "$wizard_mode" \
       --answers-file "$fixture_path" \
-      --routing-out
+      --routing-out </dev/null
   fi
 
   assert_flow_contains_component "$flow_path" "$node_id" "$component_ref"
@@ -215,12 +221,32 @@ run_wizard_menu_smoke() {
 main() {
   run_wizard_menu_smoke
 
+  local rows
+  rows="$(component_rows)" || {
+    echo "failed to read components from $CATALOG_PATH" >&2
+    exit 1
+  }
+  if [[ -z "$rows" ]]; then
+    echo "no components found in $CATALOG_PATH" >&2
+    exit 1
+  fi
+
+  local count=0
   while IFS=$'\t' read -r component_id component_ref; do
     run_add_step_case "$component_id" "$component_ref" "default" "interactive"
     run_add_step_case "$component_id" "$component_ref" "default" "answers-file"
     run_add_step_case "$component_id" "$component_ref" "personalised" "interactive"
     run_add_step_case "$component_id" "$component_ref" "personalised" "answers-file"
-  done < <(component_rows)
+    count=$((count + 1))
+  done <<<"$rows"
+
+  local expected
+  expected="$(printf '%s\n' "$rows" | wc -l)"
+  if [[ "$count" -ne "$expected" ]]; then
+    echo "processed $count components, expected $expected" >&2
+    exit 1
+  fi
+  log "processed $count components"
 }
 
 main "$@"

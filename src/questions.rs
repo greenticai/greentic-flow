@@ -45,6 +45,10 @@ impl std::fmt::Display for MissingRequired {
 
 impl std::error::Error for MissingRequired {}
 
+/// Merge CLI answers with file answers (file answers win).
+#[deprecated(
+    note = "answers are merged by the CLI layer; this helper is kept for API compatibility"
+)]
 pub fn merge_answers(cli_answers: Option<Answers>, file_answers: Option<Answers>) -> Answers {
     let mut merged = Answers::new();
     if let Some(cli) = cli_answers {
@@ -118,7 +122,8 @@ pub fn run_interactive_with_io<R: Read, W: Write>(
                     answers.insert(question.id.clone(), value);
                     break;
                 }
-                Err(_) => {
+                Err(err) => {
+                    writeln!(writer, "{err}").context("write prompt")?;
                     continue;
                 }
             }
@@ -204,7 +209,9 @@ fn write_prompt<W: Write>(
 }
 
 fn read_line<R: Read>(reader: &mut R, buf: &mut String) -> Result<bool> {
-    let mut bytes = Vec::new();
+    // The line is edited as a sequence of chars so multi-byte UTF-8 characters are moved and
+    // deleted as a unit instead of being split byte by byte.
+    let mut chars: Vec<char> = Vec::new();
     let mut cursor = 0usize;
     let mut byte = [0u8; 1];
     let mut read_any = false;
@@ -217,28 +224,53 @@ fn read_line<R: Read>(reader: &mut R, buf: &mut String) -> Result<bool> {
             0x08 | 0x7f => {
                 if cursor > 0 {
                     cursor -= 1;
-                    bytes.remove(cursor);
+                    chars.remove(cursor);
                 }
             }
             // Ctrl+A / Ctrl+E.
             0x01 => cursor = 0,
-            0x05 => cursor = bytes.len(),
+            0x05 => cursor = chars.len(),
             // ANSI escape sequence (arrow keys/home/end/delete).
-            0x1b => consume_escape_sequence(reader, &mut bytes, &mut cursor)?,
+            0x1b => consume_escape_sequence(reader, &mut chars, &mut cursor)?,
             b if b.is_ascii_control() => {}
             b => {
-                bytes.insert(cursor, b);
+                let ch = read_utf8_char(reader, b)?;
+                chars.insert(cursor, ch);
                 cursor += 1;
             }
         }
     }
-    *buf = String::from_utf8(bytes).context("parse input as UTF-8")?;
+    *buf = chars.into_iter().collect();
     Ok(read_any)
+}
+
+/// Decode one UTF-8 char whose first byte has already been read.
+fn read_utf8_char<R: Read>(reader: &mut R, first: u8) -> Result<char> {
+    let extra = match first {
+        0x00..=0x7f => 0,
+        0xc0..=0xdf => 1,
+        0xe0..=0xef => 2,
+        0xf0..=0xf7 => 3,
+        _ => return Err(anyhow!("parse input as UTF-8: invalid leading byte")),
+    };
+    let mut encoded = [0u8; 4];
+    encoded[0] = first;
+    for slot in encoded.iter_mut().skip(1).take(extra) {
+        let mut next = [0u8; 1];
+        if reader.read(&mut next).context("read input")? != 1 {
+            return Err(anyhow!("parse input as UTF-8: truncated character"));
+        }
+        *slot = next[0];
+    }
+    let text = std::str::from_utf8(&encoded[..=extra]).context("parse input as UTF-8")?;
+    text.chars()
+        .next()
+        .ok_or_else(|| anyhow!("parse input as UTF-8: empty character"))
 }
 
 fn consume_escape_sequence<R: Read>(
     reader: &mut R,
-    bytes: &mut Vec<u8>,
+    chars: &mut Vec<char>,
     cursor: &mut usize,
 ) -> Result<()> {
     let mut next = [0u8; 1];
@@ -268,13 +300,13 @@ fn consume_escape_sequence<R: Read>(
         [b'D'] if *cursor > 0 => {
             *cursor -= 1;
         }
-        [b'C'] if *cursor < bytes.len() => {
+        [b'C'] if *cursor < chars.len() => {
             *cursor += 1;
         }
         [b'H'] | [b'1', b'~'] | [b'7', b'~'] => *cursor = 0,
-        [b'F'] | [b'4', b'~'] | [b'8', b'~'] => *cursor = bytes.len(),
-        [b'3', b'~'] if *cursor < bytes.len() => {
-            bytes.remove(*cursor);
+        [b'F'] | [b'4', b'~'] | [b'8', b'~'] => *cursor = chars.len(),
+        [b'3', b'~'] if *cursor < chars.len() => {
+            chars.remove(*cursor);
         }
         _ => {}
     }
@@ -366,6 +398,9 @@ pub fn extract_answers_from_payload(questions: &[Question], payload: &Value) -> 
     answers
 }
 
+/// Upper bound for array indexes in `writes_to` paths; protects against huge allocations.
+const MAX_WRITES_TO_INDEX: usize = 1024;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum PathToken {
     Key(String),
@@ -388,15 +423,25 @@ fn parse_path_tokens(path: &str) -> Result<Vec<PathToken>> {
                     tokens.push(PathToken::Key(std::mem::take(&mut buf)));
                 }
                 let mut idx_buf = String::new();
+                let mut closed = false;
                 for c in chars.by_ref() {
                     if c == ']' {
+                        closed = true;
                         break;
                     }
                     idx_buf.push(c);
                 }
+                if !closed {
+                    return Err(anyhow!("unclosed '[' in writes_to path '{path}'"));
+                }
                 let idx = idx_buf
                     .parse::<usize>()
-                    .map_err(|_| anyhow!("invalid index in writes_to path"))?;
+                    .map_err(|_| anyhow!("invalid index in writes_to path '{path}'"))?;
+                if idx > MAX_WRITES_TO_INDEX {
+                    return Err(anyhow!(
+                        "index {idx} in writes_to path '{path}' exceeds maximum of {MAX_WRITES_TO_INDEX}"
+                    ));
+                }
                 tokens.push(PathToken::Index(idx));
             }
             _ => buf.push(ch),
@@ -427,7 +472,9 @@ fn set_value_at_path(target: &mut Value, tokens: &[PathToken], value: Value) {
                 if !current.is_object() {
                     *current = Value::Object(serde_json::Map::new());
                 }
-                let obj = current.as_object_mut().unwrap();
+                let Some(obj) = current.as_object_mut() else {
+                    return;
+                };
                 if last {
                     obj.insert(key.clone(), value);
                     return;
@@ -438,7 +485,9 @@ fn set_value_at_path(target: &mut Value, tokens: &[PathToken], value: Value) {
                 if !current.is_array() {
                     *current = Value::Array(Vec::new());
                 }
-                let arr = current.as_array_mut().unwrap();
+                let Some(arr) = current.as_array_mut() else {
+                    return;
+                };
                 ensure_array_len(arr, *index);
                 if last {
                     arr[*index] = value;
@@ -502,7 +551,7 @@ fn template_for_questions(questions: &[Question], answers: &Answers) -> Value {
     Value::Object(obj)
 }
 
-fn question_visible(question: &Question, answers: &Answers) -> bool {
+pub(crate) fn question_visible(question: &Question, answers: &Answers) -> bool {
     let Some(show_if) = &question.show_if else {
         return true;
     };
@@ -807,5 +856,95 @@ mod tests {
         let read_any = read_line(&mut input, &mut buf).expect("read line");
         assert!(read_any);
         assert_eq!(buf, "*aXcd!");
+    }
+
+    #[test]
+    fn read_line_edits_multibyte_chars_as_units() {
+        // "café", Left x2, Backspace removes 'a', then insert X; no byte-level corruption.
+        let mut input = Cursor::new("caf\u{e9}\x1b[D\x1b[D\x7fX\n".as_bytes().to_vec());
+        let mut buf = String::new();
+        read_line(&mut input, &mut buf).expect("read line");
+        assert_eq!(buf, "cXf\u{e9}");
+
+        // Backspace directly over a multi-byte char.
+        let mut input = Cursor::new("a\u{e9}\x7fb\n".as_bytes().to_vec());
+        let mut buf = String::new();
+        read_line(&mut input, &mut buf).expect("read line");
+        assert_eq!(buf, "ab");
+
+        // Left arrow over a multi-byte char then insert.
+        let mut input = Cursor::new("\u{4f60}\u{597d}\x1b[DX\n".as_bytes().to_vec());
+        let mut buf = String::new();
+        read_line(&mut input, &mut buf).expect("read line");
+        assert_eq!(buf, "\u{4f60}X\u{597d}");
+    }
+
+    #[test]
+    fn writes_to_rejects_huge_index() {
+        let q = |path: &str| Question {
+            id: "x".to_string(),
+            prompt: "x".to_string(),
+            kind: QuestionKind::String,
+            required: true,
+            default: None,
+            choices: Vec::new(),
+            show_if: None,
+            writes_to: Some(path.to_string()),
+        };
+        let mut answers = Answers::new();
+        answers.insert("x".to_string(), Value::String("v".to_string()));
+        let base = || Value::Object(Default::default());
+        let err = apply_writes_to(base(), &[q("a[18446744073709551615]")], &answers)
+            .expect_err("overflowing index must error");
+        assert!(err.to_string().contains("exceeds maximum"));
+        assert!(apply_writes_to(base(), &[q("a[999999999999]")], &answers).is_err());
+        assert!(apply_writes_to(base(), &[q("a[1024]")], &answers).is_ok());
+    }
+
+    #[test]
+    fn writes_to_rejects_unclosed_bracket() {
+        let questions = vec![Question {
+            id: "x".to_string(),
+            prompt: "x".to_string(),
+            kind: QuestionKind::String,
+            required: true,
+            default: None,
+            choices: Vec::new(),
+            show_if: None,
+            writes_to: Some("a[0".to_string()),
+        }];
+        let mut answers = Answers::new();
+        answers.insert("x".to_string(), Value::String("v".to_string()));
+        let err = apply_writes_to(Value::Object(Default::default()), &questions, &answers)
+            .expect_err("unclosed bracket must error");
+        assert!(err.to_string().contains("unclosed"));
+    }
+
+    #[test]
+    fn interactive_prints_parse_error_before_reprompt() {
+        let question = Question {
+            id: "count".to_string(),
+            prompt: "Count?".to_string(),
+            kind: QuestionKind::Int,
+            required: true,
+            default: None,
+            choices: Vec::new(),
+            show_if: None,
+            writes_to: None,
+        };
+        let mut output = Vec::new();
+        let answers = run_interactive_with_io(
+            &[question],
+            Answers::new(),
+            Cursor::new("abc\n7\n"),
+            &mut output,
+        )
+        .unwrap();
+        assert_eq!(answers.get("count"), Some(&Value::Number(7.into())));
+        assert!(
+            String::from_utf8(output)
+                .unwrap()
+                .contains("invalid integer")
+        );
     }
 }

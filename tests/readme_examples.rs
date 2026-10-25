@@ -2,8 +2,8 @@ use greentic_flow::{flow_ir::FlowIr, loader::load_ygtc_from_path};
 
 #[test]
 fn example_hello_flow_is_valid() {
-    let path = std::path::Path::new("docs/examples/hello.ygtc");
-    let doc = load_ygtc_from_path(path).expect("load example hello");
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/examples/hello.ygtc");
+    let doc = load_ygtc_from_path(&path).expect("load example hello");
     let ir = FlowIr::from_doc(doc).expect("to ir");
     assert_eq!(ir.id, "hello-flow");
     let start = ir.entrypoints.get("default").cloned().unwrap_or_default();
@@ -15,8 +15,9 @@ fn example_hello_flow_is_valid() {
 
 #[test]
 fn example_component_flow_is_valid() {
-    let path = std::path::Path::new("docs/examples/hello_with_component.ygtc");
-    let doc = load_ygtc_from_path(path).expect("load component example");
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("docs/examples/hello_with_component.ygtc");
+    let doc = load_ygtc_from_path(&path).expect("load component example");
     let ir = FlowIr::from_doc(doc).expect("to ir");
     assert_eq!(ir.id, "hello-component");
     let node = ir.nodes.get("hello-world").expect("hello-world node");

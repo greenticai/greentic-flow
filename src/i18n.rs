@@ -126,7 +126,12 @@ pub fn resolve_keys(
     for key in keys {
         let text = I18nText::new(key.as_str(), None);
         let value = resolve_text(&text, catalog, locale);
-        if value.is_empty() {
+        // `resolve_text` falls back to the key itself, so emptiness never
+        // signals a miss; check the catalog for the translation instead.
+        let translated = locale_fallback_chain(locale)
+            .iter()
+            .any(|candidate| catalog.get(key.as_str(), candidate.as_str()).is_some());
+        if !translated {
             return Err(FlowError::Internal {
                 message: format!("missing translation for key '{key}'"),
                 location: FlowErrorLocation::new(None, None, None),

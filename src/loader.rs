@@ -5,26 +5,41 @@ use crate::{
     path_safety::normalize_under_root,
 };
 use serde::Deserialize;
-use serde_json::Value as JsonValue;
 use serde_json::Value;
 use serde_yaml_bw::Location as YamlLocation;
 use std::{
+    collections::HashMap,
     fs, io,
     path::{Path, PathBuf},
-    sync::OnceLock,
+    sync::{Arc, Mutex, OnceLock},
 };
+
+/// Node keys that are never treated as the component/operation key.
+pub(crate) const RESERVED_NODE_KEYS: &[&str] = &[
+    "routing",
+    "telemetry",
+    "output",
+    "in_map",
+    "out_map",
+    "err_map",
+    "retry",
+    "timeout",
+    "when",
+    "annotations",
+    "meta",
+    "operation",
+];
 
 const INLINE_SOURCE: &str = "<inline>";
 const DEFAULT_SCHEMA_LABEL: &str = "https://raw.githubusercontent.com/greenticai/greentic-flow/refs/heads/master/schemas/ygtc.flow.schema.json";
-const EMBEDDED_SCHEMA: &str = include_str!("../schemas/ygtc.flow.schema.json");
+pub(crate) const EMBEDDED_SCHEMA: &str = include_str!("../schemas/ygtc.flow.schema.json");
 fn schema_file_valid(path: &Path) -> bool {
     let Ok(text) = fs::read_to_string(path) else {
         return false;
     };
-    if text.trim().is_empty() {
-        return false;
-    }
-    serde_json::from_str::<JsonValue>(&text).is_ok()
+    // Content must match the embedded schema exactly: a predictable path in the
+    // shared temp dir may have been pre-created by someone else.
+    text == EMBEDDED_SCHEMA
 }
 
 fn write_schema_atomically(path: &Path) -> io::Result<()> {
@@ -54,7 +69,52 @@ fn write_schema_atomically(path: &Path) -> io::Result<()> {
     }
 }
 
+/// Directory for the on-disk schema copy: a per-user `0700` directory under the
+/// temp dir. A pre-existing directory is only reused when it is a real
+/// directory owned by the current user with no group/world access; otherwise a
+/// fresh uniquely named directory is created, so another local user can neither
+/// hijack nor block the location (sticky-bit `/tmp` squatting).
+fn private_schema_dir() -> io::Result<PathBuf> {
+    let base = std::env::temp_dir();
+    fs::create_dir_all(&base)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{DirBuilderExt, MetadataExt};
+        let uid = rustix::process::geteuid().as_raw();
+        let preferred = base.join(format!("greentic-flow-{uid}"));
+        match fs::DirBuilder::new().mode(0o700).create(&preferred) {
+            Ok(()) => return Ok(preferred),
+            Err(err) if err.kind() == io::ErrorKind::AlreadyExists => {
+                let usable = fs::symlink_metadata(&preferred)
+                    .map(|m| m.is_dir() && m.uid() == uid && m.mode() & 0o077 == 0)
+                    .unwrap_or(false);
+                if usable {
+                    return Ok(preferred);
+                }
+            }
+            Err(err) => return Err(err),
+        }
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let fallback = base.join(format!(
+            "greentic-flow-{uid}-{}-{nanos}",
+            std::process::id()
+        ));
+        fs::DirBuilder::new().mode(0o700).create(&fallback)?;
+        Ok(fallback)
+    }
+    #[cfg(not(unix))]
+    {
+        Ok(base)
+    }
+}
+
 /// Ensure a temporary copy of the embedded flow schema exists and return its path.
+///
+/// Prefer [`load_ygtc_from_str_with_embedded_schema`] /
+/// [`load_ygtc_from_str_with_schema_text`], which need no file at all.
 pub fn ensure_config_schema_path() -> io::Result<PathBuf> {
     static CONFIG_SCHEMA_PATH: OnceLock<PathBuf> = OnceLock::new();
     if let Some(path) = CONFIG_SCHEMA_PATH.get() {
@@ -63,14 +123,11 @@ pub fn ensure_config_schema_path() -> io::Result<PathBuf> {
         }
         return Ok(path.clone());
     }
-    let mut path = std::env::temp_dir();
+    let mut path = private_schema_dir()?;
     path.push(format!(
         "greentic-flow-config-schema-{}.json",
         env!("CARGO_PKG_VERSION")
     ));
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
     if !schema_file_valid(&path) {
         write_schema_atomically(&path)?;
     }
@@ -82,10 +139,7 @@ pub fn ensure_config_schema_path() -> io::Result<PathBuf> {
     }
     match CONFIG_SCHEMA_PATH.set(path.clone()) {
         Ok(()) => Ok(path),
-        Err(_) => Ok(CONFIG_SCHEMA_PATH
-            .get()
-            .expect("config schema path set")
-            .clone()),
+        Err(existing) => Ok(CONFIG_SCHEMA_PATH.get().cloned().unwrap_or(existing)),
     }
 }
 
@@ -123,7 +177,7 @@ pub fn load_ygtc_from_path(path: &Path) -> Result<FlowDoc> {
     )
 }
 
-fn canonicalize_user_path(path: &Path) -> io::Result<PathBuf> {
+pub(crate) fn canonicalize_user_path(path: &Path) -> io::Result<PathBuf> {
     if path.as_os_str().is_empty() {
         return Err(io::Error::new(io::ErrorKind::InvalidInput, "path is empty"));
     }
@@ -140,6 +194,33 @@ fn canonicalize_user_path(path: &Path) -> io::Result<PathBuf> {
         ));
     }
     Ok(canonical)
+}
+
+/// Load YGTC YAML from a string using the embedded schema, labelling errors
+/// with `source_label`. No schema file is needed.
+pub fn load_ygtc_from_str_with_embedded_schema(
+    yaml: &str,
+    source_label: impl Into<String>,
+) -> Result<FlowDoc> {
+    load_with_schema_text(
+        yaml,
+        EMBEDDED_SCHEMA,
+        DEFAULT_SCHEMA_LABEL.to_string(),
+        None,
+        source_label,
+        None,
+    )
+}
+
+/// Load YGTC YAML from a string using an in-memory schema document.
+/// `schema_label` is only used in diagnostics (relative `$ref`s are not resolved).
+pub fn load_ygtc_from_str_with_schema_text(
+    yaml: &str,
+    schema_text: &str,
+    schema_label: impl Into<String>,
+    source_label: impl Into<String>,
+) -> Result<FlowDoc> {
+    load_with_schema_text(yaml, schema_text, schema_label, None, source_label, None)
 }
 
 /// Load YGTC YAML from a string using a schema file on disk.
@@ -211,20 +292,6 @@ pub(crate) fn load_with_schema_text(
         .and_then(Value::as_object)
         .map(|m| m.is_empty())
         .unwrap_or(false);
-    let reserved_for_count = [
-        "routing",
-        "telemetry",
-        "output",
-        "in_map",
-        "out_map",
-        "err_map",
-        "retry",
-        "timeout",
-        "when",
-        "annotations",
-        "meta",
-        "operation",
-    ];
     if v_json.get("type").is_none() {
         return Err(FlowError::Schema {
             message: format!("{source_label}/type: missing required property 'type'"),
@@ -249,7 +316,7 @@ pub(crate) fn load_with_schema_text(
             };
             let op_count = obj
                 .keys()
-                .filter(|k| !reserved_for_count.contains(&k.as_str()))
+                .filter(|k| !RESERVED_NODE_KEYS.contains(&k.as_str()))
                 .count();
             let is_component_exec = obj.contains_key("component.exec");
             let component_combo = is_component_exec && op_count == 2;
@@ -300,24 +367,10 @@ pub(crate) fn load_with_schema_text(
             message: format!("node '{id}' missing after load"),
             location: node_location(&source_label, source_path, id),
         })?;
-        let reserved = [
-            "routing",
-            "telemetry",
-            "output",
-            "in_map",
-            "out_map",
-            "err_map",
-            "retry",
-            "timeout",
-            "when",
-            "annotations",
-            "meta",
-            "operation",
-        ];
         let op_count = node
             .raw
             .keys()
-            .filter(|k| !reserved.contains(&k.as_str()))
+            .filter(|k| !RESERVED_NODE_KEYS.contains(&k.as_str()))
             .count();
         let is_component_exec = node.raw.contains_key("component.exec");
         let component_combo = is_component_exec && op_count == 2;
@@ -336,7 +389,7 @@ pub(crate) fn load_with_schema_text(
         if let Some((comp_key, config)) = node
             .raw
             .iter()
-            .find(|(k, _)| !reserved.contains(&k.as_str()))
+            .find(|(k, _)| !RESERVED_NODE_KEYS.contains(&k.as_str()))
             && comp_key.as_str() == crate::ir::MCP_COMPONENT
         {
             crate::ir::validate_mcp_config(id, config).map_err(|err| match err {
@@ -479,44 +532,61 @@ fn validate_json(
     Ok(())
 }
 
-fn validator_for_schema<'a>(
-    schema_text: &'a str,
+type ValidatorCache = Mutex<HashMap<(Option<PathBuf>, String), Arc<jsonschema::Validator>>>;
+
+fn validator_for_schema(
+    schema_text: &str,
     schema_label: &str,
     schema_path: Option<&Path>,
-) -> Result<&'a jsonschema::Validator> {
+) -> Result<Arc<jsonschema::Validator>> {
+    let schema_error = |message: String| FlowError::Internal {
+        message,
+        location: FlowErrorLocation::at_path(schema_label.to_string())
+            .with_source_path(schema_path),
+    };
+
     if schema_path.is_none() && schema_text == EMBEDDED_SCHEMA {
-        static EMBEDDED_VALIDATOR: OnceLock<std::result::Result<jsonschema::Validator, String>> =
-            OnceLock::new();
-        let validator = EMBEDDED_VALIDATOR
+        static EMBEDDED_VALIDATOR: OnceLock<
+            std::result::Result<Arc<jsonschema::Validator>, String>,
+        > = OnceLock::new();
+        return EMBEDDED_VALIDATOR
             .get_or_init(|| {
                 let schema: Value = serde_json::from_str(EMBEDDED_SCHEMA)
                     .map_err(|e| format!("schema parse for {DEFAULT_SCHEMA_LABEL}: {e}"))?;
                 jsonschema_options_with_base(None)
                     .build(&schema)
+                    .map(Arc::new)
                     .map_err(|e| format!("schema compile for {DEFAULT_SCHEMA_LABEL}: {e}"))
             })
-            .as_ref()
-            .map_err(|message| FlowError::Internal {
-                message: message.clone(),
-                location: FlowErrorLocation::at_path(schema_label.to_string())
-                    .with_source_path(schema_path),
-            })?;
-        return Ok(validator);
+            .clone()
+            .map_err(schema_error);
     }
 
-    let schema: Value = serde_json::from_str(schema_text).map_err(|e| FlowError::Internal {
-        message: format!("schema parse for {schema_label}: {e}"),
-        location: FlowErrorLocation::at_path(schema_label.to_string())
-            .with_source_path(schema_path),
-    })?;
-    let validator = jsonschema_options_with_base(schema_path)
-        .build(&schema)
-        .map_err(|e| FlowError::Internal {
-            message: format!("schema compile for {schema_label}: {e}"),
-            location: FlowErrorLocation::at_path(schema_label.to_string())
-                .with_source_path(schema_path),
-        })?;
-    Ok(Box::leak(Box::new(validator)))
+    // Custom schemas are compiled once per (path, text) and cached, instead of
+    // leaking a fresh validator on every call.
+    static CUSTOM_VALIDATORS: OnceLock<ValidatorCache> = OnceLock::new();
+    let cache = CUSTOM_VALIDATORS.get_or_init(|| Mutex::new(HashMap::new()));
+    let key = (schema_path.map(Path::to_path_buf), schema_text.to_string());
+    if let Some(found) = cache
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(&key)
+    {
+        return Ok(Arc::clone(found));
+    }
+
+    let schema: Value = serde_json::from_str(schema_text)
+        .map_err(|e| schema_error(format!("schema parse for {schema_label}: {e}")))?;
+    let validator = Arc::new(
+        jsonschema_options_with_base(schema_path)
+            .build(&schema)
+            .map_err(|e| schema_error(format!("schema compile for {schema_label}: {e}")))?,
+    );
+    cache
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(key, Arc::clone(&validator));
+    Ok(validator)
 }
 
 fn ensure_nodes_mapping(doc: &mut serde_yaml_bw::Value) {

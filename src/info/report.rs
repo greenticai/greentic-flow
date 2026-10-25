@@ -1,6 +1,6 @@
 use anyhow::Result;
-use greentic_types::Flow;
 use greentic_types::flow_resolve::{FlowResolveV1, read_flow_resolve, sidecar_path_for_flow};
+use greentic_types::{Flow, FlowKind};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
@@ -53,17 +53,35 @@ pub struct ParameterInfo {
 impl InfoReport {
     pub fn from_flow(flow: &Flow, flow_path: &Path) -> Result<Self> {
         let sidecar_path = sidecar_path_for_flow(flow_path);
+        let mut sidecar_corrupt = false;
         let sidecar: Option<FlowResolveV1> = if sidecar_path.exists() {
-            read_flow_resolve(&sidecar_path).ok()
+            match read_flow_resolve(&sidecar_path) {
+                Ok(sidecar) => Some(sidecar),
+                Err(err) => {
+                    tracing::warn!(
+                        path = %sidecar_path.display(),
+                        error = %err,
+                        "resolve sidecar is unreadable or corrupt"
+                    );
+                    sidecar_corrupt = true;
+                    None
+                }
+            }
         } else {
             None
         };
 
         let total = flow.nodes.len() as u32;
         let (status, resolved) = match &sidecar {
+            None if sidecar_corrupt => ("invalid".to_string(), 0u32),
             None => ("unbound".to_string(), 0u32),
             Some(s) => {
-                let r = s.nodes.len() as u32;
+                // Only sidecar entries for nodes that still exist count as resolved.
+                let r = flow
+                    .nodes
+                    .keys()
+                    .filter(|id| s.nodes.contains_key(id.as_str()))
+                    .count() as u32;
                 if r == total {
                     ("bound".to_string(), r)
                 } else {
@@ -75,13 +93,14 @@ impl InfoReport {
         Ok(Self {
             info_schema_version: 1,
             id: flow.id.as_str().to_string(),
-            kind: format!("{:?}", flow.kind).to_lowercase(),
+            kind: kind_label(&flow.kind),
             title: flow.metadata.title.clone(),
             description: flow.metadata.description.clone(),
             tags: flow.metadata.tags.iter().cloned().collect(),
             resolve: ResolveStatus {
                 status,
-                sidecar_path: sidecar.as_ref().map(|_| sidecar_path.display().to_string()),
+                sidecar_path: (sidecar.is_some() || sidecar_corrupt)
+                    .then(|| sidecar_path.display().to_string()),
                 resolved_nodes: resolved,
                 total_nodes: total,
             },
@@ -112,6 +131,19 @@ impl InfoReport {
     }
 }
 
+/// Flow kind as it is spelled in `.ygtc` (`component-config`, not `componentconfig`).
+fn kind_label(kind: &FlowKind) -> String {
+    match kind {
+        FlowKind::Messaging => "messaging".to_string(),
+        FlowKind::Event => "event".to_string(),
+        FlowKind::ComponentConfig => "component-config".to_string(),
+        FlowKind::Job => "job".to_string(),
+        FlowKind::Http => "http".to_string(),
+        #[allow(unreachable_patterns)]
+        other => format!("{other:?}").to_lowercase(),
+    }
+}
+
 fn parameters_from_extra(extra: &serde_json::Value) -> Vec<ParameterInfo> {
     // metadata.extra is expected to be a JSON object where keys are parameter
     // names and values are small schema objects with "type" and optional "required".
@@ -121,6 +153,9 @@ fn parameters_from_extra(extra: &serde_json::Value) -> Vec<ParameterInfo> {
         None => return vec![],
     };
     map.iter()
+        // Reserved `greentic.*` keys carry tooling metadata (e.g. the slot
+        // schema), not user-facing flow parameters.
+        .filter(|(name, _)| !name.starts_with("greentic."))
         .map(|(name, v)| ParameterInfo {
             name: name.clone(),
             ty: v
@@ -160,6 +195,40 @@ mod tests {
         let v: serde_json::Value = serde_json::to_value(&r).unwrap();
         assert_eq!(v["info_schema_version"], 1);
         assert_eq!(v["kind"], "messaging");
+    }
+
+    #[test]
+    fn kind_label_uses_yaml_spelling() {
+        assert_eq!(kind_label(&FlowKind::ComponentConfig), "component-config");
+        assert_eq!(kind_label(&FlowKind::Messaging), "messaging");
+    }
+
+    #[test]
+    fn reserved_metadata_keys_are_not_parameters() {
+        let extra = serde_json::json!({
+            "greentic.slot_schema": {"type": "object"},
+            "days": {"type": "integer"}
+        });
+        let params = parameters_from_extra(&extra);
+        assert_eq!(params.len(), 1);
+        assert_eq!(params[0].name, "days");
+    }
+
+    #[test]
+    fn corrupt_sidecar_is_reported_invalid() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path().join("flow.ygtc");
+        std::fs::write(
+            &path,
+            "id: ex\ntype: messaging\nnodes:\n  in:\n    qa.process:\n      welcome: hi\n    routing:\n      - out: true\n",
+        )
+        .unwrap();
+        let flow = crate::compile_ygtc_file(&path).expect("compile");
+        let sidecar_path = sidecar_path_for_flow(&path);
+        std::fs::write(&sidecar_path, "{ not json").unwrap();
+        let info = InfoReport::from_flow(&flow, &path).expect("from_flow");
+        assert_eq!(info.resolve.status, "invalid");
+        assert!(info.resolve.sidecar_path.is_some());
     }
 
     #[test]

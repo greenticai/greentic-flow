@@ -1,6 +1,6 @@
 use serde_json::Value;
 
-use crate::questions::{Question, QuestionKind};
+use crate::questions::{Question, QuestionKind, question_visible};
 
 pub fn example_for_questions(questions: &[Question]) -> Value {
     let mut answers = std::collections::HashMap::new();
@@ -166,31 +166,6 @@ fn json_type_for_value(value: &Value) -> Option<String> {
         Value::Array(_) => Some("array".to_string()),
         Value::Object(_) => Some("object".to_string()),
         Value::Null => None,
-    }
-}
-
-fn question_visible(
-    question: &Question,
-    answers: &std::collections::HashMap<String, Value>,
-) -> bool {
-    let Some(show_if) = &question.show_if else {
-        return true;
-    };
-    match show_if {
-        Value::Bool(value) => *value,
-        Value::Object(map) => {
-            let Some(id) = map.get("id").and_then(Value::as_str) else {
-                return true;
-            };
-            let Some(expected) = map.get("equals") else {
-                return true;
-            };
-            let Some(actual) = answers.get(id) else {
-                return false;
-            };
-            actual == expected
-        }
-        _ => true,
     }
 }
 

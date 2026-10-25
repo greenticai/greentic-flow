@@ -20,10 +20,32 @@ pub struct WizardStepState {
     pub updated_at: u64,
 }
 
+/// Makes a flow id safe to use as a single file-name component: every character outside
+/// `[A-Za-z0-9._-]` is percent-escaped, and `.`/`..`/empty ids are escaped entirely, so
+/// an id read from an untrusted flow document can never traverse out of the cache dir.
+fn sanitize_flow_id_for_file_name(flow_id: &str) -> String {
+    if matches!(flow_id, "" | "." | "..") {
+        return flow_id
+            .bytes()
+            .map(|b| format!("%{b:02X}"))
+            .collect::<String>()
+            + "%00";
+    }
+    let mut out = String::with_capacity(flow_id.len());
+    for byte in flow_id.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-') {
+            out.push(char::from(byte));
+        } else {
+            out.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    out
+}
+
 pub fn wizard_state_path(flow_path: &Path, flow_id: &str) -> PathBuf {
     let base = flow_path.parent().unwrap_or_else(|| Path::new("."));
     base.join(".greentic/cache/flow_wizard")
-        .join(format!("{flow_id}.cbor"))
+        .join(format!("{}.cbor", sanitize_flow_id_for_file_name(flow_id)))
 }
 
 pub fn load_wizard_state(flow_path: &Path, flow_id: &str) -> Result<Option<WizardState>> {
@@ -105,4 +127,28 @@ fn now_epoch_secs() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn state_path_never_escapes_cache_dir() {
+        let flow = Path::new("/pack/flows/a.ygtc");
+        let base = Path::new("/pack/flows/.greentic/cache/flow_wizard");
+        for id in ["../../x", "a/b", "..", ".", "", "a\\b"] {
+            let path = wizard_state_path(flow, id);
+            assert_eq!(path.parent(), Some(base), "id {id:?} -> {path:?}");
+            assert!(
+                path.components()
+                    .all(|c| !matches!(c, std::path::Component::ParentDir)),
+                "{path:?}"
+            );
+        }
+        assert_eq!(
+            wizard_state_path(flow, "plain-id_1.2"),
+            base.join("plain-id_1.2.cbor")
+        );
+    }
 }

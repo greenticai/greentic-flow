@@ -278,19 +278,6 @@ pub fn parse_flow_to_ir(yaml: &str) -> Result<FlowIr> {
 }
 
 fn extract_operation(node: &NodeDoc, node_id: &str) -> Result<(String, Value)> {
-    let reserved = [
-        "routing",
-        "telemetry",
-        "output",
-        "in_map",
-        "out_map",
-        "err_map",
-        "retry",
-        "timeout",
-        "when",
-        "annotations",
-        "meta",
-    ];
     if let Some(exec) = node.raw.get("component.exec") {
         let op = node
             .raw
@@ -309,7 +296,7 @@ fn extract_operation(node: &NodeDoc, node_id: &str) -> Result<(String, Value)> {
     let mut op_key: Option<String> = None;
     let mut payload: Option<Value> = None;
     for (k, v) in &node.raw {
-        if reserved.contains(&k.as_str()) {
+        if crate::loader::RESERVED_NODE_KEYS.contains(&k.as_str()) {
             continue;
         }
         if op_key.is_some() {

@@ -39,13 +39,36 @@ pub fn rewrite_placeholder_routes(
         );
     }
 
-    if !replaced && require_placeholder {
-        for f in fallback {
-            if !allow_cycles && f.to.as_deref() == Some(anchor) {
-                return Err("routing would introduce a cycle back to anchor".to_string());
-            }
+    Ok(out)
+}
+
+/// Routing for a node inserted before the entrypoint target (`anchor`).
+///
+/// The placeholder resolves to the anchor itself (the old entrypoint); any other explicit routes
+/// are preserved as provided.
+pub fn rewrite_routes_before_entrypoint(
+    provided: Vec<Route>,
+    anchor: &str,
+    require_placeholder: bool,
+) -> std::result::Result<Vec<Route>, String> {
+    let mut out = Vec::new();
+    let mut replaced = false;
+    for route in provided {
+        if route.to.as_deref() == Some(NEXT_NODE_PLACEHOLDER) {
+            replaced = true;
+            out.push(Route {
+                to: Some(anchor.to_string()),
+                ..Route::default()
+            });
+        } else {
+            out.push(route);
         }
-        out.extend_from_slice(fallback);
+    }
+    if !replaced && require_placeholder {
+        return Err(
+            "Config flow output missing NEXT_NODE_PLACEHOLDER; cannot preserve anchor routing semantics."
+                .to_string(),
+        );
     }
     Ok(out)
 }

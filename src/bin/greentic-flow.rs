@@ -9,7 +9,7 @@ use std::{
     io::{self, Read, Write},
     net::{IpAddr, Ipv6Addr},
     path::{Path, PathBuf},
-    sync::{Mutex, OnceLock},
+    sync::{Mutex, OnceLock, PoisonError},
 };
 
 const EMBEDDED_FLOW_SCHEMA: &str = include_str!(concat!(
@@ -331,6 +331,13 @@ fn validate_wizard_generated_payload_against_contract(
     )
 }
 
+/// Resolver override from the environment; empty/whitespace-only values are ignored.
+fn wizard_resolver_from_env() -> Option<String> {
+    env::var("GREENTIC_FLOW_WIZARD_RESOLVER")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+}
+
 fn bytes_to_hex(bytes: &[u8]) -> String {
     let mut out = String::with_capacity(bytes.len() * 2);
     for byte in bytes {
@@ -600,20 +607,23 @@ fn hex_to_bytes(hex: &str) -> Result<Vec<u8>> {
         anyhow::bail!("hex payload has odd length");
     }
     let mut out = Vec::with_capacity(trimmed.len() / 2);
-    let chars: Vec<char> = trimmed.chars().collect();
-    let mut idx = 0;
-    while idx < chars.len() {
-        let hi = chars[idx];
-        let lo = chars[idx + 1];
-        let byte = u8::from_str_radix(&format!("{hi}{lo}"), 16)
-            .map_err(|err| anyhow!("decode hex: {err}"))?;
+    for pair in trimmed.as_bytes().chunks(2) {
+        if !pair.iter().all(u8::is_ascii_hexdigit) {
+            anyhow::bail!("decode hex: payload contains non-hex characters");
+        }
+        let text = std::str::from_utf8(pair).map_err(|err| anyhow!("decode hex: {err}"))?;
+        let byte = u8::from_str_radix(text, 16).map_err(|err| anyhow!("decode hex: {err}"))?;
         out.push(byte);
-        idx += 2;
     }
     Ok(out)
 }
 #[derive(Parser, Debug)]
-#[command(name = "greentic-flow", about = "Flow scaffolding helpers", version)]
+#[command(
+    name = "greentic-flow",
+    about = "Flow scaffolding helpers",
+    version,
+    after_help = "Environment:\n  GREENTIC_FLOW_ALLOW_PROXY=1  Let remote asset/catalog fetches use a proxy from the environment\n                               (HTTPS_PROXY/https_proxy, then ALL_PROXY/all_proxy; HTTP_PROXY is not\n                               used because fetches are https-only; the first variable that is set\n                               wins, empty means none; NO_PROXY is honoured). By default the proxy\n                               environment is ignored so DNS answers can be validated and pinned.\n                               When a proxy really applies to the host, the private-address DNS check\n                               and DNS pinning are both skipped (left to the proxy). Without an\n                               applicable proxy the default checks still run."
+)]
 struct Cli {
     /// Enable permissive schema handling (default: strict).
     #[arg(long, global = true)]
@@ -938,8 +948,8 @@ struct UpdateStepArgs {
     /// Directory for wizard answers artifacts.
     #[arg(long = "answers-dir")]
     answers_dir: Option<PathBuf>,
-    /// Overwrite existing answers artifacts.
-    #[arg(long = "overwrite-answers")]
+    /// Deprecated and ignored: update/delete always overwrite their answers artifacts.
+    #[arg(long = "overwrite-answers", hide = true)]
     overwrite_answers: bool,
     /// Force re-asking wizard questions even if answers exist.
     #[arg(long = "reask")]
@@ -1029,8 +1039,8 @@ struct DeleteStepArgs {
     /// Directory for wizard answers artifacts.
     #[arg(long = "answers-dir")]
     answers_dir: Option<PathBuf>,
-    /// Overwrite existing answers artifacts.
-    #[arg(long = "overwrite-answers")]
+    /// Deprecated and ignored: update/delete always overwrite their answers artifacts.
+    #[arg(long = "overwrite-answers", hide = true)]
     overwrite_answers: bool,
     /// Force re-asking wizard questions even if answers exist.
     #[arg(long = "reask")]
@@ -1198,6 +1208,8 @@ struct WizardSession {
     config: WizardRunConfig,
     actions: Vec<WizardPlanAction>,
     answers_output_path: Option<PathBuf>,
+    /// Answers file that exists but could not be loaded; never overwritten by the wizard.
+    protected_answers_path: Option<PathBuf>,
 }
 
 #[cfg(test)]
@@ -1238,7 +1250,24 @@ fn run_wizard_menu_impl<R: Read, W: Write>(
     if try_execute_wizard_plan_from_config(pack_dir, &config, &mut writer)? {
         return Ok(());
     }
+    let mut config = config;
+    let mut protected_answers_path = None;
+    if wizard_answers_file_exists(pack_dir, &config) {
+        protected_answers_path = config.answers_path.as_ref().map(|p| {
+            if p.is_absolute() {
+                p.clone()
+            } else {
+                pack_dir.join(p)
+            }
+        });
+        // The answers file exists but could not be loaded (otherwise the plan would have
+        // been executed above). Never use it as the plan output path: that would
+        // overwrite the user's (possibly just malformed) file with a fresh plan.
+        config.answers_path = None;
+    }
     let staged_pack_dir = create_wizard_staging_pack(pack_dir)?;
+    // Ensures the staging directory is removed on every exit path (EOF, `?`, panic unwind).
+    let _staging_guard = WizardStagingGuard::new(staged_pack_dir.clone());
     let mut session = WizardSession {
         real_pack_dir: pack_dir.to_path_buf(),
         staged_pack_dir,
@@ -1246,7 +1275,127 @@ fn run_wizard_menu_impl<R: Read, W: Write>(
         config,
         actions: Vec::new(),
         answers_output_path: None,
+        protected_answers_path,
     };
+    match run_wizard_menu_loop(&mut session, &mut reader, &mut writer) {
+        Err(err) if err.is::<WizardEof>() => {
+            wizard_handle_eof_with_unsaved_changes(&mut session, &mut reader, &mut writer);
+            Err(err)
+        }
+        other => other,
+    }
+}
+
+/// Records the outcome of an interactive wizard action. Returns `true` when the action
+/// completed and was recorded. A cancelled action (`Ok(None)`) never marks the session
+/// dirty; a failed action marks it dirty only if it already mutated the staged files
+/// (`mutated_on_error`), so partial edits are not silently dropped from the save prompt.
+fn wizard_record_action_result<W: Write>(
+    session: &mut WizardSession,
+    writer: &mut W,
+    result: Result<Option<WizardPlanAction>>,
+    mutated_on_error: bool,
+) -> bool {
+    match result {
+        Ok(Some(action)) => {
+            session.actions.push(action);
+            session.dirty = true;
+            true
+        }
+        Ok(None) => false,
+        Err(err) => {
+            writeln!(writer, "{}", err).ok();
+            if mutated_on_error {
+                session.dirty = true;
+            }
+            false
+        }
+    }
+}
+
+/// Fingerprint of the staged pack state (flows, i18n, sidecars, pack.yaml by content;
+/// components/assets by name and size) used to detect partial edits of failed actions.
+fn wizard_stage_fingerprint(staged: &Path) -> u64 {
+    use std::hash::{Hash, Hasher};
+    fn walk(dir: &Path, content: bool, hasher: &mut std::collections::hash_map::DefaultHasher) {
+        let Ok(read) = fs::read_dir(dir) else {
+            return;
+        };
+        let mut entries: Vec<_> = read.filter_map(|e| e.ok()).collect();
+        entries.sort_by_key(|e| e.file_name());
+        for entry in entries {
+            let path = entry.path();
+            let Ok(meta) = fs::symlink_metadata(&path) else {
+                continue;
+            };
+            entry.file_name().hash(hasher);
+            if meta.is_dir() {
+                walk(&path, content, hasher);
+            } else if content {
+                fs::read(&path).ok().hash(hasher);
+            } else {
+                meta.len().hash(hasher);
+            }
+        }
+    }
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    for (name, content) in [
+        ("flows", true),
+        ("i18n", true),
+        ("components", false),
+        ("assets", false),
+    ] {
+        name.hash(&mut hasher);
+        walk(&staged.join(name), content, &mut hasher);
+    }
+    fs::read(staged.join("pack.yaml")).ok().hash(&mut hasher);
+    hasher.finish()
+}
+
+/// Removes the wizard staging directory when dropped.
+#[derive(Debug)]
+struct WizardStagingGuard {
+    path: PathBuf,
+}
+
+impl WizardStagingGuard {
+    fn new(path: PathBuf) -> Self {
+        Self { path }
+    }
+}
+
+impl Drop for WizardStagingGuard {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.path);
+    }
+}
+
+/// Called when input ends while the wizard is still running. Offers to save pending
+/// changes; if the input is exhausted (no answer possible) the changes are discarded
+/// with an explicit message instead of being dropped silently.
+fn wizard_handle_eof_with_unsaved_changes<R: Read, W: Write>(
+    session: &mut WizardSession,
+    reader: &mut R,
+    writer: &mut W,
+) {
+    if !session.dirty {
+        return;
+    }
+    let save = wizard_confirm_yes_no_default_yes(reader, writer).unwrap_or(false);
+    if save {
+        if let Err(err) = wizard_save_staged_changes(session, reader, writer) {
+            writeln!(writer, "{}", err).ok();
+        }
+    } else {
+        writeln!(writer, "{}", wizard_t("wizard.save.discarded")).ok();
+    }
+}
+
+fn run_wizard_menu_loop<R: Read, W: Write>(
+    session: &mut WizardSession,
+    mut reader: R,
+    mut writer: W,
+) -> Result<()> {
     let mut screen = WizardScreen::MainMenu;
     loop {
         match screen.clone() {
@@ -1260,47 +1409,41 @@ fn run_wizard_menu_impl<R: Read, W: Write>(
                 )?;
                 match answer.as_str() {
                     "1" => {
-                        if let Err(err) = wizard_add_flow_action_with_io(
+                        let snapshot = wizard_stage_fingerprint(&session.staged_pack_dir);
+                        let result = wizard_add_flow_action_with_io(
                             &session.staged_pack_dir,
                             &mut reader,
                             &mut writer,
-                        )
-                        .map(|action| {
-                            if let Some(action) = action {
-                                session.actions.push(action);
-                            }
-                        }) {
-                            writeln!(writer, "{}", err).ok();
-                        } else {
-                            session.dirty = true;
-                        }
+                        );
+                        let mutated =
+                            wizard_stage_fingerprint(&session.staged_pack_dir) != snapshot;
+                        wizard_record_action_result(session, &mut writer, result, mutated);
                     }
                     "2" => {
                         screen = WizardScreen::FlowSelect;
                     }
                     "3" => {
-                        if let Err(err) = wizard_generate_translations_action_with_io(
+                        let snapshot = wizard_stage_fingerprint(&session.staged_pack_dir);
+                        let result = wizard_generate_translations_action_with_io(
                             &session.staged_pack_dir,
                             &mut reader,
                             &mut writer,
                         )
-                        .map(|action| session.actions.push(action))
-                        {
-                            writeln!(writer, "{}", err).ok();
-                        } else {
-                            session.dirty = true;
-                        }
+                        .map(Some);
+                        let mutated =
+                            wizard_stage_fingerprint(&session.staged_pack_dir) != snapshot;
+                        wizard_record_action_result(session, &mut writer, result, mutated);
                     }
                     "4" => {
                         if let Err(err) =
-                            wizard_save_staged_changes(&mut session, &mut reader, &mut writer)
+                            wizard_save_staged_changes(session, &mut reader, &mut writer)
                         {
                             writeln!(writer, "{}", err).ok();
                         }
                     }
                     "5" => {
                         if let Err(err) =
-                            wizard_export_plan_with_io(&mut session, &mut reader, &mut writer)
+                            wizard_export_plan_with_io(session, &mut reader, &mut writer)
                         {
                             writeln!(writer, "{}", err).ok();
                         }
@@ -1310,11 +1453,9 @@ fn run_wizard_menu_impl<R: Read, W: Write>(
                             let save_before_exit =
                                 wizard_confirm_yes_no_default_yes(&mut reader, &mut writer)?;
                             if save_before_exit {
-                                if let Err(err) = wizard_save_staged_changes(
-                                    &mut session,
-                                    &mut reader,
-                                    &mut writer,
-                                ) {
+                                if let Err(err) =
+                                    wizard_save_staged_changes(session, &mut reader, &mut writer)
+                                {
                                     writeln!(writer, "{}", err).ok();
                                     continue;
                                 }
@@ -1324,12 +1465,10 @@ fn run_wizard_menu_impl<R: Read, W: Write>(
                         }
 
                         if session.config.answers_path.as_ref().is_some()
-                            && let Err(err) =
-                                persist_wizard_plan(&mut session, &mut reader, &mut writer)
+                            && let Err(err) = persist_wizard_plan(session, &mut reader, &mut writer)
                         {
                             writeln!(writer, "{}", err).ok();
                         }
-                        let _ = fs::remove_dir_all(&session.staged_pack_dir);
                         return Ok(());
                     }
                     _ => {}
@@ -1393,20 +1532,15 @@ fn run_wizard_menu_impl<R: Read, W: Write>(
                     "0" => screen = WizardScreen::FlowSelect,
                     "M" => screen = WizardScreen::MainMenu,
                     "1" => {
-                        if let Err(err) = wizard_edit_flow_summary_action_with_io(
+                        let snapshot = wizard_stage_fingerprint(&session.staged_pack_dir);
+                        let result = wizard_edit_flow_summary_action_with_io(
                             &flow_path,
                             &mut reader,
                             &mut writer,
-                        )
-                        .map(|action| {
-                            if let Some(action) = action {
-                                session.actions.push(action);
-                            }
-                        }) {
-                            writeln!(writer, "{}", err).ok();
-                        } else {
-                            session.dirty = true;
-                        }
+                        );
+                        let mutated =
+                            wizard_stage_fingerprint(&session.staged_pack_dir) != snapshot;
+                        wizard_record_action_result(session, &mut writer, result, mutated);
                     }
                     "2" => {
                         if let Err(err) = wizard_list_steps_with_io(&flow_path, &mut writer) {
@@ -1414,74 +1548,56 @@ fn run_wizard_menu_impl<R: Read, W: Write>(
                         }
                     }
                     "3" => {
-                        if let Err(err) = wizard_add_step_action_with_io(
+                        let snapshot = wizard_stage_fingerprint(&session.staged_pack_dir);
+                        let result = wizard_add_step_action_with_io(
                             &session.staged_pack_dir,
                             &flow_path,
                             &mut reader,
                             &mut writer,
-                        )
-                        .map(|action| {
-                            if let Some(action) = action {
-                                session.actions.push(action);
-                            }
-                        }) {
-                            writeln!(writer, "{}", err).ok();
-                        } else {
-                            session.dirty = true;
-                        }
+                        );
+                        let mutated =
+                            wizard_stage_fingerprint(&session.staged_pack_dir) != snapshot;
+                        wizard_record_action_result(session, &mut writer, result, mutated);
                     }
                     "4" => {
-                        if let Err(err) = wizard_update_step_action_with_io(
+                        let snapshot = wizard_stage_fingerprint(&session.staged_pack_dir);
+                        let result = wizard_update_step_action_with_io(
                             &session.staged_pack_dir,
                             &flow_path,
                             &mut reader,
                             &mut writer,
-                        )
-                        .map(|action| {
-                            if let Some(action) = action {
-                                session.actions.push(action);
-                            }
-                        }) {
-                            writeln!(writer, "{}", err).ok();
-                        } else {
-                            session.dirty = true;
-                        }
+                        );
+                        let mutated =
+                            wizard_stage_fingerprint(&session.staged_pack_dir) != snapshot;
+                        wizard_record_action_result(session, &mut writer, result, mutated);
                     }
                     "5" => {
-                        if let Err(err) =
-                            wizard_delete_step_action_with_io(&flow_path, &mut reader, &mut writer)
-                                .map(|action| {
-                                    if let Some(action) = action {
-                                        session.actions.push(action);
-                                    }
-                                })
-                        {
-                            writeln!(writer, "{}", err).ok();
-                        } else {
-                            session.dirty = true;
-                        }
+                        let snapshot = wizard_stage_fingerprint(&session.staged_pack_dir);
+                        let result =
+                            wizard_delete_step_action_with_io(&flow_path, &mut reader, &mut writer);
+                        let mutated =
+                            wizard_stage_fingerprint(&session.staged_pack_dir) != snapshot;
+                        wizard_record_action_result(session, &mut writer, result, mutated);
                     }
                     "6" => {
-                        if let Err(err) = wizard_delete_flow_action_with_io(
+                        let snapshot = wizard_stage_fingerprint(&session.staged_pack_dir);
+                        let result = wizard_delete_flow_action_with_io(
                             &session.staged_pack_dir,
                             &flow_path,
                             &mut reader,
                             &mut writer,
-                        )
-                        .map(|action| {
-                            if let Some(action) = action {
-                                session.actions.push(action);
-                            }
-                        }) {
-                            writeln!(writer, "{}", err).ok();
-                        } else {
-                            session.dirty = true;
+                        );
+                        let mutated =
+                            wizard_stage_fingerprint(&session.staged_pack_dir) != snapshot;
+                        let applied =
+                            wizard_record_action_result(session, &mut writer, result, mutated);
+                        if applied {
                             screen = WizardScreen::FlowSelect;
                         }
                     }
                     "7" => {
                         if let Err(err) =
-                            wizard_save_staged_changes(&mut session, &mut reader, &mut writer)
+                            wizard_save_staged_changes(session, &mut reader, &mut writer)
                         {
                             writeln!(writer, "{}", err).ok();
                         }
@@ -1494,6 +1610,10 @@ fn run_wizard_menu_impl<R: Read, W: Write>(
 }
 
 fn create_wizard_staging_pack(pack_dir: &Path) -> Result<PathBuf> {
+    create_wizard_staging_pack_in(pack_dir, &env::temp_dir())
+}
+
+fn create_wizard_staging_pack_in(pack_dir: &Path, temp_base: &Path) -> Result<PathBuf> {
     if !pack_dir.exists() {
         anyhow::bail!(
             "{}",
@@ -1511,21 +1631,104 @@ fn create_wizard_staging_pack(pack_dir: &Path) -> Result<PathBuf> {
             .map(|d| d.as_nanos())
             .unwrap_or_default()
     );
-    let stage_root = env::temp_dir().join(unique);
+    let pack_root = fs::canonicalize(pack_dir)
+        .with_context(|| format!("resolve pack directory {}", pack_dir.display()))?;
+    ensure_top_level_dirs_disjoint(pack_dir)?;
+    let stage_root = temp_base.join(unique);
     fs::create_dir_all(&stage_root)
         .with_context(|| format!("create directory {}", stage_root.display()))?;
     for entry in ["flows", "i18n", "components", "assets"] {
         let src = pack_dir.join(entry);
         let dst = stage_root.join(entry);
-        if src.exists() {
-            copy_dir_recursive(&src, &dst)?;
+        if fs::symlink_metadata(&src).is_ok()
+            && let Err(err) = copy_tree_within_root(&src, &dst, &pack_root, 0)
+        {
+            let _ = fs::remove_dir_all(&stage_root);
+            return Err(err);
         }
+    }
+    // pack.yaml must be staged too, otherwise pack entry upserts/removals performed by
+    // wizard actions would silently be no-ops in interactive mode.
+    let pack_yaml_src = pack_dir.join("pack.yaml");
+    if pack_yaml_src.is_file()
+        && let Err(err) = fs::copy(&pack_yaml_src, stage_root.join("pack.yaml"))
+            .with_context(|| format!("stage pack manifest {}", pack_yaml_src.display()))
+    {
+        let _ = fs::remove_dir_all(&stage_root);
+        return Err(err);
     }
     Ok(stage_root)
 }
 
+/// Rejects packs whose top-level `flows`/`i18n`/`components`/`assets` directories (after
+/// resolving symlinks) overlap or nest in each other: syncing one back would overwrite
+/// edits made through another, silently losing them.
+fn ensure_top_level_dirs_disjoint(pack_dir: &Path) -> Result<()> {
+    let mut resolved: Vec<(&str, PathBuf)> = Vec::new();
+    for name in ["flows", "i18n", "components", "assets"] {
+        let path = pack_dir.join(name);
+        if fs::symlink_metadata(&path).is_err() {
+            continue;
+        }
+        let canonical = fs::canonicalize(&path)
+            .with_context(|| format!("resolve {} (dangling symlink?)", path.display()))?;
+        resolved.push((name, canonical));
+    }
+    for (i, (name_a, a)) in resolved.iter().enumerate() {
+        for (j, (name_b, b)) in resolved.iter().enumerate() {
+            if i != j && a.starts_with(b) {
+                anyhow::bail!(
+                    "pack directories '{name_a}' ({}) and '{name_b}' ({}) overlap; the wizard \
+                     would lose edits when syncing them back, so it refuses to continue",
+                    a.display(),
+                    b.display()
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Maximum number of symlink hops followed while copying a tree (cycle guard).
+const MAX_SYMLINK_DEPTH: usize = 16;
+
+/// Copies `src` to `dst`, following symlinks whose canonical target stays inside
+/// `src` (the copy is materialised as regular files/dirs). Symlinks that escape the
+/// tree, dangle, or form a cycle are rejected with an explicit error instead of being
+/// skipped: skipping would make the later "replace real dir with staged copy" sync
+/// silently delete them.
 fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
-    if src.is_file() {
+    let root = fs::canonicalize(src).with_context(|| format!("resolve {}", src.display()))?;
+    copy_tree_within_root(src, dst, &root, 0)
+}
+
+fn copy_tree_within_root(src: &Path, dst: &Path, root: &Path, depth: usize) -> Result<()> {
+    let src_meta = fs::symlink_metadata(src).with_context(|| format!("stat {}", src.display()))?;
+    if src_meta.file_type().is_symlink() {
+        if depth >= MAX_SYMLINK_DEPTH {
+            anyhow::bail!(
+                "symlink {} nests deeper than {MAX_SYMLINK_DEPTH} levels (cycle?); \
+                 the wizard cannot safely stage it",
+                src.display()
+            );
+        }
+        let canonical = fs::canonicalize(src).with_context(|| {
+            format!(
+                "symlink {} is dangling; fix or remove it before using the wizard",
+                src.display()
+            )
+        })?;
+        if !canonical.starts_with(root) {
+            anyhow::bail!(
+                "symlink {} points outside the pack ({}); the wizard would lose it on save, \
+                 so it refuses to continue",
+                src.display(),
+                canonical.display()
+            );
+        }
+        return copy_tree_within_root(&canonical, dst, root, depth + 1);
+    }
+    if src_meta.is_file() {
         if let Some(parent) = dst.parent() {
             fs::create_dir_all(parent)
                 .with_context(|| format!("create directory {}", parent.display()))?;
@@ -1537,15 +1740,7 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
     fs::create_dir_all(dst).with_context(|| format!("create directory {}", dst.display()))?;
     for entry in fs::read_dir(src).with_context(|| format!("read directory {}", src.display()))? {
         let entry = entry.with_context(|| format!("read entry under {}", src.display()))?;
-        let src_path = entry.path();
-        let dst_path = dst.join(entry.file_name());
-        if src_path.is_dir() {
-            copy_dir_recursive(&src_path, &dst_path)?;
-        } else {
-            fs::copy(&src_path, &dst_path).with_context(|| {
-                format!("copy file {} -> {}", src_path.display(), dst_path.display())
-            })?;
-        }
+        copy_tree_within_root(&entry.path(), &dst.join(entry.file_name()), root, depth)?;
     }
     Ok(())
 }
@@ -1560,15 +1755,37 @@ fn wizard_save_staged_changes<R: Read, W: Write>(
         return Ok(());
     }
 
+    wizard_validate_staged_flows(&session.staged_pack_dir.join("flows"))?;
+
+    // Persist the plan only once the staged flows passed validation.
     if !session.actions.is_empty() {
-        persist_wizard_plan(session, reader, writer)?;
+        match persist_wizard_plan(session, reader, writer) {
+            Ok(()) => {}
+            Err(err) if err.is::<ProtectedAnswersPath>() => {
+                // Keep the user's unloadable file intact; the pack changes are still saved.
+                writeln!(writer, "{err}").ok();
+            }
+            Err(err) => return Err(err),
+        }
     }
 
-    let flows_target = session.staged_pack_dir.join("flows");
-    if wizard_has_empty_flow_nodes(&flows_target)? {
+    if !session.config.dry_run {
+        sync_staged_pack_back(session)?;
+        session.dirty = false;
+        writeln!(writer, "{}", wizard_t("wizard.save.done")).ok();
+    } else {
+        session.dirty = false;
+        writeln!(writer, "{}", wizard_t("wizard.save.dry_run_done")).ok();
+    }
+    Ok(())
+}
+
+/// Runs the same checks the interactive save performs (empty flows + doctor/lint).
+fn wizard_validate_staged_flows(flows_target: &Path) -> Result<()> {
+    if wizard_has_empty_flow_nodes(flows_target)? {
         anyhow::bail!("{}", wizard_t("wizard.save.empty_flow"));
     }
-    if let Err(err) = wizard_validate_flows(&flows_target) {
+    if let Err(err) = wizard_validate_flows(flows_target) {
         let details = err.to_string();
         if details.contains("start_node_exists: invalid start node ''")
             || details.contains("NodeId must not be empty")
@@ -1580,14 +1797,64 @@ fn wizard_save_staged_changes<R: Read, W: Write>(
             wizard_t("wizard.save.doctor_failed")
         ));
     }
+    Ok(())
+}
 
-    if !session.config.dry_run {
-        sync_staged_pack_back(session)?;
-        session.dirty = false;
-        writeln!(writer, "{}", wizard_t("wizard.save.done")).ok();
-    } else {
-        session.dirty = false;
-        writeln!(writer, "{}", wizard_t("wizard.save.dry_run_done")).ok();
+/// Executes a wizard plan against a throw-away staging copy of the pack; the real pack
+/// directory is never modified.
+///
+/// Parity with a real run: a real run executes the actions and performs no extra flow
+/// validation, so the dry-run fails only when an action itself fails. The save-time
+/// checks (empty flow / strict lint) are reported as warnings instead of errors, so a
+/// plan that a real run accepts (e.g. `add-flow` leaving `nodes: {}`) is not rejected.
+fn execute_wizard_plan_dry_run<W: Write>(
+    pack_dir: &Path,
+    plan: &WizardPlan,
+    writer: &mut W,
+) -> Result<()> {
+    let staged = create_wizard_staging_pack(pack_dir)?;
+    let _guard = WizardStagingGuard::new(staged.clone());
+    stage_plan_local_wasms(pack_dir, &staged, plan)?;
+    execute_wizard_plan(&staged, plan)?;
+    if let Err(err) = wizard_validate_staged_flows(&staged.join("flows")) {
+        writeln!(writer, "warning: dry-run validation: {err:#}").ok();
+    }
+    Ok(())
+}
+
+/// Copies local wasm files referenced by the plan that live outside the staged
+/// directories (flows/i18n/components/assets) so the dry-run can resolve them.
+fn stage_plan_local_wasms(pack_dir: &Path, staged: &Path, plan: &WizardPlan) -> Result<()> {
+    for action in &plan.actions {
+        if !matches!(
+            action.action.as_str(),
+            "add-step" | "update-step" | "delete-step"
+        ) {
+            continue;
+        }
+        let Some(component) = action.component.as_deref() else {
+            continue;
+        };
+        let (Some(rel), _) = split_component_schema_source(component) else {
+            continue;
+        };
+        // Same resolution as the real execution (including the `name-sha256:x.wasm` ->
+        // `name.wasm` fallback); unsafe paths are reported by the action itself.
+        let Ok(src) = resolve_plan_local_wasm(pack_dir, rel) else {
+            continue;
+        };
+        let Ok(rel_resolved) = src.strip_prefix(pack_dir) else {
+            continue;
+        };
+        let dst = staged.join(rel_resolved);
+        if src.is_file() && !dst.exists() {
+            if let Some(parent) = dst.parent() {
+                fs::create_dir_all(parent)
+                    .with_context(|| format!("create directory {}", parent.display()))?;
+            }
+            fs::copy(&src, &dst)
+                .with_context(|| format!("stage wasm {} -> {}", src.display(), dst.display()))?;
+        }
     }
     Ok(())
 }
@@ -1645,12 +1912,44 @@ fn wizard_validate_flows(target: &Path) -> Result<()> {
         schema_mode: SchemaMode::Strict,
     };
     let mut failures = 0usize;
-    lint_path(target, &lint_ctx, false, &mut failures)?;
+    let mut failed_files = Vec::new();
+    lint_path(target, &lint_ctx, false, &mut failures, &mut failed_files)?;
     if failures == 0 {
         Ok(())
     } else {
         anyhow::bail!("{failures} flow(s) failed validation");
     }
+}
+
+/// The requested plan output path is the (unloadable) answers file the user supplied.
+#[derive(Debug)]
+struct ProtectedAnswersPath(PathBuf);
+
+impl std::fmt::Display for ProtectedAnswersPath {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{} exists but could not be loaded; it will not be overwritten. \
+             Choose another path with the export option.",
+            self.0.display()
+        )
+    }
+}
+
+impl std::error::Error for ProtectedAnswersPath {}
+
+fn wizard_check_plan_path_not_protected(session: &WizardSession, path: &Path) -> Result<()> {
+    let Some(protected) = session.protected_answers_path.as_ref() else {
+        return Ok(());
+    };
+    let same = match (fs::canonicalize(protected), fs::canonicalize(path)) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => protected == path,
+    };
+    if same {
+        return Err(ProtectedAnswersPath(protected.clone()).into());
+    }
+    Ok(())
 }
 
 fn wizard_plan_output_path<R: Read, W: Write>(
@@ -1659,6 +1958,7 @@ fn wizard_plan_output_path<R: Read, W: Write>(
     _writer: &mut W,
 ) -> Result<PathBuf> {
     if let Some(path) = session.answers_output_path.clone() {
+        wizard_check_plan_path_not_protected(session, &path)?;
         return Ok(path);
     }
     let path = session
@@ -1671,6 +1971,7 @@ fn wizard_plan_output_path<R: Read, W: Write>(
     } else {
         session.real_pack_dir.join(path)
     };
+    wizard_check_plan_path_not_protected(session, &resolved)?;
     session.answers_output_path = Some(resolved.clone());
     Ok(resolved)
 }
@@ -1711,6 +2012,7 @@ fn wizard_plan_output_path_interactive<R: Read, W: Write>(
     } else {
         session.real_pack_dir.join(path)
     };
+    wizard_check_plan_path_not_protected(session, &resolved)?;
     session.answers_output_path = Some(resolved.clone());
     Ok(resolved)
 }
@@ -1738,6 +2040,16 @@ fn wizard_export_plan_with_io<R: Read, W: Write>(
     Ok(())
 }
 
+fn wizard_answers_file_exists(pack_dir: &Path, config: &WizardRunConfig) -> bool {
+    config.answers_path.as_ref().is_some_and(|path| {
+        if path.is_absolute() {
+            path.exists()
+        } else {
+            pack_dir.join(path).exists()
+        }
+    })
+}
+
 fn try_execute_wizard_plan_from_config<W: Write>(
     pack_dir: &Path,
     config: &WizardRunConfig,
@@ -1756,7 +2068,12 @@ fn try_execute_wizard_plan_from_config<W: Write>(
     }
     match load_wizard_plan(&resolved) {
         Ok(plan) => {
-            execute_wizard_plan(pack_dir, &plan)?;
+            if config.dry_run {
+                execute_wizard_plan_dry_run(pack_dir, &plan, writer)?;
+                writeln!(writer, "{}", wizard_t("wizard.save.dry_run_done")).ok();
+            } else {
+                execute_wizard_plan(pack_dir, &plan)?;
+            }
             if config.emit_schema {
                 print_wizard_plan_schema(writer, pack_dir, &plan)?;
             }
@@ -2238,25 +2555,100 @@ fn apply_wizard_plan_update_step_routing(
 }
 
 fn sync_staged_pack_back(session: &mut WizardSession) -> Result<()> {
+    ensure_top_level_dirs_disjoint(&session.real_pack_dir)?;
     sync_staged_dir(session, "flows")?;
     sync_staged_dir(session, "i18n")?;
     sync_staged_dir(session, "components")?;
     sync_staged_dir(session, "assets")?;
+    sync_staged_pack_yaml(session)?;
     Ok(())
 }
 
+fn sync_staged_pack_yaml(session: &WizardSession) -> Result<()> {
+    let staged = session.staged_pack_dir.join("pack.yaml");
+    if !staged.is_file() {
+        return Ok(());
+    }
+    let real = session.real_pack_dir.join("pack.yaml");
+    let tmp = real.with_file_name(format!(".pack.yaml.greentic-sync-{}", std::process::id()));
+    if let Err(err) = fs::copy(&staged, &tmp) {
+        let _ = fs::remove_file(&tmp);
+        return Err(err).with_context(|| format!("copy {} -> {}", staged.display(), tmp.display()));
+    }
+    fs::rename(&tmp, &real).with_context(|| {
+        let _ = fs::remove_file(&tmp);
+        format!("replace {}", real.display())
+    })?;
+    Ok(())
+}
+
+/// Replaces `<real>/<name>` with the staged copy without ever leaving the real directory
+/// missing or half-written: the staged tree is copied into a sibling temp dir first, then
+/// swapped in via renames (with rollback if the final rename fails).
 fn sync_staged_dir(session: &WizardSession, name: &str) -> Result<()> {
     let staged_dir = session.staged_pack_dir.join(name);
-    let real_dir = session.real_pack_dir.join(name);
-    if real_dir.exists() {
-        fs::remove_dir_all(&real_dir)
-            .with_context(|| format!("remove directory {}", real_dir.display()))?;
+    let mut real_dir = session.real_pack_dir.join(name);
+    // If the real directory is itself a symlink (verified in-pack at staging time),
+    // replace the link target's content instead of swapping the link for a real dir.
+    if fs::symlink_metadata(&real_dir).is_ok_and(|m| m.file_type().is_symlink()) {
+        let pack_root = fs::canonicalize(&session.real_pack_dir)
+            .with_context(|| format!("resolve {}", session.real_pack_dir.display()))?;
+        let target = fs::canonicalize(&real_dir)
+            .with_context(|| format!("resolve symlink {}", real_dir.display()))?;
+        if !target.starts_with(&pack_root) || target == pack_root {
+            anyhow::bail!(
+                "directory {} is a symlink to {}, outside the pack; refusing to replace it",
+                real_dir.display(),
+                target.display()
+            );
+        }
+        real_dir = target;
     }
+    let parent = real_dir
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| session.real_pack_dir.clone());
+    let leaf = real_dir
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| name.to_string());
+    let pid = std::process::id();
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or_default();
+    let new_dir = parent.join(format!(".{leaf}.greentic-new-{pid}-{nonce}"));
+    let old_dir = parent.join(format!(".{leaf}.greentic-old-{pid}-{nonce}"));
     if staged_dir.exists() {
-        copy_dir_recursive(&staged_dir, &real_dir)?;
+        if let Err(err) = copy_dir_recursive(&staged_dir, &new_dir) {
+            let _ = fs::remove_dir_all(&new_dir);
+            return Err(err);
+        }
     } else {
-        fs::create_dir_all(&real_dir)
-            .with_context(|| format!("create directory {}", real_dir.display()))?;
+        fs::create_dir_all(&new_dir)
+            .with_context(|| format!("create directory {}", new_dir.display()))?;
+    }
+    let had_real = real_dir.exists();
+    if had_real {
+        fs::rename(&real_dir, &old_dir).with_context(|| {
+            let _ = fs::remove_dir_all(&new_dir);
+            format!("move aside directory {}", real_dir.display())
+        })?;
+    }
+    if let Err(err) = fs::rename(&new_dir, &real_dir) {
+        let mut note = String::new();
+        if had_real && let Err(restore_err) = fs::rename(&old_dir, &real_dir) {
+            note = format!(
+                "; restoring the original failed ({restore_err}), your original content is \
+                 preserved at {}",
+                old_dir.display()
+            );
+        }
+        let _ = fs::remove_dir_all(&new_dir);
+        return Err(err).with_context(|| format!("replace directory {}{note}", real_dir.display()));
+    }
+    if had_real {
+        let _ = fs::remove_dir_all(&old_dir);
     }
     Ok(())
 }
@@ -3351,19 +3743,371 @@ fn parse_and_validate_outbound_url(raw: &str, label: &str) -> Result<reqwest::Ur
     if allow_test_local_http {
         return Ok(parsed);
     }
-    let Some(host) = parsed.host_str() else {
+    let Some(host) = parsed.host() else {
         anyhow::bail!("{label} URL missing host");
     };
-    let host_lc = host.to_ascii_lowercase();
-    if matches!(host_lc.as_str(), "localhost" | "localhost.localdomain") {
-        anyhow::bail!("{label} URL host is not allowed: {host}");
-    }
-    if let Ok(ip) = host.parse::<IpAddr>()
-        && is_private_or_local_ip(ip)
-    {
-        anyhow::bail!("{label} URL host is not allowed: {host}");
+    match host {
+        url::Host::Ipv4(v4) => {
+            if is_private_or_local_ip(IpAddr::V4(v4)) {
+                anyhow::bail!("{label} URL host is not allowed: {v4}");
+            }
+        }
+        url::Host::Ipv6(v6) => {
+            // Covers IPv4-mapped (::ffff:a.b.c.d) addresses via `is_private_or_local_ip`.
+            if is_private_or_local_ip(IpAddr::V6(v6)) {
+                anyhow::bail!("{label} URL host is not allowed: [{v6}]");
+            }
+        }
+        url::Host::Domain(domain) => {
+            let host_lc = domain.trim_end_matches('.').to_ascii_lowercase();
+            if matches!(host_lc.as_str(), "localhost" | "localhost.localdomain")
+                || host_lc.ends_with(".localhost")
+            {
+                anyhow::bail!("{label} URL host is not allowed: {domain}");
+            }
+        }
     }
     Ok(parsed)
+}
+
+/// Resolver used to turn a domain into socket addresses (injectable for tests).
+type HostResolver = dyn Fn(&str, u16) -> std::io::Result<Vec<std::net::SocketAddr>>;
+
+/// Time budgets for one outbound fetch. The blocking system DNS lookup runs *before* and
+/// outside the HTTP client's `.timeout(..)`, so the worst case is `dns + http`, not `http`.
+#[derive(Debug, Clone, Copy)]
+struct FetchBudget {
+    /// Upper bound for the DNS lookup (see `system_host_resolver`).
+    dns: Duration,
+    /// Overall request timeout passed to `reqwest`'s `.timeout(..)`.
+    http: Duration,
+}
+
+impl FetchBudget {
+    #[cfg(test)]
+    fn worst_case(self) -> Duration {
+        self.dns + self.http
+    }
+}
+
+const CATALOG_BUDGET: FetchBudget = FetchBudget {
+    dns: Duration::from_secs(3),
+    http: Duration::from_secs(3),
+};
+const ASSET_BUDGET: FetchBudget = FetchBudget {
+    dns: Duration::from_secs(30),
+    http: Duration::from_secs(30),
+};
+
+/// Opt-in env var that lets outbound fetches use the proxy environment (HTTPS_PROXY/ALL_PROXY).
+const ALLOW_PROXY_ENV: &str = "GREENTIC_FLOW_ALLOW_PROXY";
+
+/// Appended to connection/resolve errors so users on proxy-only networks know why the
+/// proxy environment was not used and how to opt in.
+const PROXY_IGNORED_NOTE: &str = " (the proxy environment (HTTPS_PROXY/ALL_PROXY) is intentionally ignored for SSRF-checked hosts; \
+     set GREENTIC_FLOW_ALLOW_PROXY=1 to use the proxy, which skips the private-address DNS check and DNS pinning)";
+
+fn allow_proxy_from_env() -> bool {
+    std::env::var(ALLOW_PROXY_ENV).is_ok_and(|v| v.trim() == "1")
+}
+
+/// Network-hardening decision for one outbound request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct OutboundNetPolicy {
+    /// Honour the proxy environment (HTTPS_PROXY/ALL_PROXY).
+    use_proxy: bool,
+    /// Resolve locally, reject private answers and pin them in the client.
+    pin_dns: bool,
+}
+
+/// Environment variables that take part in proxy selection (snapshotted once per client so
+/// the decision and the connection behaviour cannot diverge).
+const PROXY_ENV_KEYS: [&str; 9] = [
+    "REQUEST_METHOD",
+    "HTTPS_PROXY",
+    "https_proxy",
+    "ALL_PROXY",
+    "all_proxy",
+    "NO_PROXY",
+    "no_proxy",
+    "HTTP_PROXY",
+    "http_proxy",
+];
+
+/// First variable in `keys` that is *set* wins, even when empty (an empty value means
+/// "no proxy", it does not fall through to the next variable). Mirrors hyper-util.
+fn first_set_env(keys: &[&str], env: &dyn Fn(&str) -> Option<String>) -> Option<String> {
+    keys.iter().find_map(|key| env(key))
+}
+
+/// Parses a proxy env value like hyper-util: schemeless means `http`, only `http`/`https`
+/// are usable here (SOCKS is not compiled into this build, so it is "unsupported" and never
+/// counted as an applicable proxy), and a host is required.
+fn parse_proxy_url(value: &str) -> Option<reqwest::Url> {
+    let value = value.trim();
+    if value.is_empty() {
+        return None;
+    }
+    let candidate = if value.contains("://") {
+        value.to_string()
+    } else {
+        format!("http://{value}")
+    };
+    let url = reqwest::Url::parse(&candidate).ok()?;
+    if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
+        return None;
+    }
+    Some(url)
+}
+
+/// `NO_PROXY` matching (case-insensitive): `*`, exact host, or domain suffix, with an
+/// optional leading `.`/`*.`; trailing dots on entry and host are ignored; an entry
+/// `host:port` only matches that port.
+fn no_proxy_matches(list: &str, host: &str, port: u16) -> bool {
+    let host = host.trim_end_matches('.').to_ascii_lowercase();
+    list.split(',').any(|raw| {
+        let entry = raw.trim().to_ascii_lowercase();
+        if entry == "*" {
+            return true;
+        }
+        let (name, entry_port) = split_no_proxy_port(&entry);
+        if entry_port.is_some_and(|p| p != port) {
+            return false;
+        }
+        let name = name
+            .trim_start_matches("*.")
+            .trim_start_matches('.')
+            .trim_end_matches('.');
+        !name.is_empty() && (host == name || host.ends_with(&format!(".{name}")))
+    })
+}
+
+/// Splits `host:port` / `[v6]:port`; a bare IPv6 (several colons, no brackets) has no port.
+fn split_no_proxy_port(entry: &str) -> (&str, Option<u16>) {
+    if let Some(rest) = entry.strip_prefix('[') {
+        if let Some((inner, tail)) = rest.split_once(']') {
+            return (inner, tail.strip_prefix(':').and_then(|p| p.parse().ok()));
+        }
+        return (entry, None);
+    }
+    if entry.matches(':').count() == 1
+        && let Some((name, port)) = entry.split_once(':')
+        && let Ok(port) = port.parse()
+    {
+        return (name, Some(port));
+    }
+    (entry, None)
+}
+
+/// The single source of truth for outbound proxying of an https request to `host:port`:
+/// returns the proxy URL to use, or `None` for a direct connection. Semantics follow
+/// hyper-util (what reqwest would use): `REQUEST_METHOD` set disables proxies; the first
+/// *set* of `HTTPS_PROXY`/`https_proxy` is used (empty means none); if that is unusable
+/// the first set of `ALL_PROXY`/`all_proxy` is tried; `NO_PROXY` exclusions win.
+fn select_proxy(
+    host: &str,
+    port: u16,
+    env: &dyn Fn(&str) -> Option<String>,
+) -> Option<reqwest::Url> {
+    if env("REQUEST_METHOD").is_some() {
+        return None;
+    }
+    let proxy = first_set_env(&["HTTPS_PROXY", "https_proxy"], env)
+        .and_then(|v| parse_proxy_url(&v))
+        .or_else(|| {
+            first_set_env(&["ALL_PROXY", "all_proxy"], env).and_then(|v| parse_proxy_url(&v))
+        })?;
+    let excluded = first_set_env(&["NO_PROXY", "no_proxy"], env)
+        .is_some_and(|list| no_proxy_matches(&list, host, port));
+    (!excluded).then_some(proxy)
+}
+
+fn proxy_env_snapshot() -> std::collections::HashMap<&'static str, String> {
+    PROXY_ENV_KEYS
+        .iter()
+        .filter_map(|key| std::env::var(key).ok().map(|value| (*key, value)))
+        .collect()
+}
+
+/// Proxy selection for a concrete URL; only https targets are fetched, anything else is
+/// never proxied.
+fn select_proxy_for_url(
+    url: &reqwest::Url,
+    env: &dyn Fn(&str) -> Option<String>,
+) -> Option<reqwest::Url> {
+    if url.scheme() != "https" {
+        return None;
+    }
+    select_proxy(url.host_str()?, url.port_or_known_default()?, env)
+}
+
+/// Pure decision: proxies and DNS pinning are mutually exclusive because a proxy resolves
+/// and connects to the target itself. Default is no proxy + pinned DNS. The explicit
+/// opt-in only takes effect when a proxy would really be used for the request
+/// (`proxy_applies`); otherwise the full default path (private-address check + pinning)
+/// still runs. With a proxy, both the DNS check and the pin are skipped (static URL
+/// validation still applies).
+fn outbound_net_policy(
+    allow_unchecked_test_host: bool,
+    allow_proxy: bool,
+    proxy_applies: bool,
+) -> OutboundNetPolicy {
+    if allow_unchecked_test_host || (allow_proxy && proxy_applies) {
+        OutboundNetPolicy {
+            use_proxy: true,
+            pin_dns: false,
+        }
+    } else {
+        OutboundNetPolicy {
+            use_proxy: false,
+            pin_dns: true,
+        }
+    }
+}
+
+/// Context suffix for outbound failures: explains the ignored proxy env unless opted in.
+fn proxy_note(allow_unchecked_test_host: bool) -> &'static str {
+    if allow_unchecked_test_host || allow_proxy_from_env() {
+        ""
+    } else {
+        PROXY_IGNORED_NOTE
+    }
+}
+
+/// Runs a blocking lookup on a helper thread and gives up after `timeout`. The helper
+/// thread is detached on timeout (std offers no way to cancel `getaddrinfo`).
+fn resolve_with_timeout<F>(
+    host: &str,
+    timeout: Duration,
+    lookup: F,
+) -> std::io::Result<Vec<std::net::SocketAddr>>
+where
+    F: FnOnce() -> std::io::Result<Vec<std::net::SocketAddr>> + Send + 'static,
+{
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::Builder::new()
+        .name("greentic-dns-resolve".to_string())
+        .spawn(move || {
+            let _ = tx.send(lookup());
+        })?;
+    match rx.recv_timeout(timeout) {
+        Ok(result) => result,
+        Err(_) => Err(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            format!(
+                "DNS resolution of {host} timed out after {}s",
+                timeout.as_secs()
+            ),
+        )),
+    }
+}
+
+fn system_host_resolver(
+    host: &str,
+    port: u16,
+    timeout: Duration,
+) -> std::io::Result<Vec<std::net::SocketAddr>> {
+    use std::net::ToSocketAddrs;
+    let owned = host.to_string();
+    resolve_with_timeout(host, timeout, move || {
+        Ok((owned.as_str(), port).to_socket_addrs()?.collect())
+    })
+}
+
+/// Resolves the host of an already statically validated URL and rejects it if any
+/// resolved address is private/local (DNS-based SSRF). Returns the addresses so the
+/// caller can pin them in the HTTP client, closing the resolve-then-connect gap.
+/// IP-literal hosts return no addresses (nothing to pin).
+fn resolve_outbound_host(
+    url: &reqwest::Url,
+    label: &str,
+    resolver: &HostResolver,
+) -> Result<Vec<std::net::SocketAddr>> {
+    let Some(url::Host::Domain(domain)) = url.host() else {
+        return Ok(Vec::new());
+    };
+    let port = url.port_or_known_default().unwrap_or(443);
+    let addrs = resolver(domain, port)
+        .with_context(|| format!("resolve {label} host {domain}{}", proxy_note(false)))?;
+    if addrs.is_empty() {
+        anyhow::bail!("{label} host {domain} did not resolve to any address");
+    }
+    if let Some(bad) = addrs.iter().find(|a| is_private_or_local_ip(a.ip())) {
+        anyhow::bail!(
+            "{label} host {domain} resolves to a disallowed address ({})",
+            bad.ip()
+        );
+    }
+    Ok(addrs)
+}
+
+/// Builds a blocking client for `url` with redirects disabled and, for non-test hosts,
+/// the validated DNS answers pinned.
+fn outbound_client_builder(
+    url: &reqwest::Url,
+    label: &str,
+    resolver: &HostResolver,
+    allow_unchecked_test_host: bool,
+    allow_proxy: bool,
+) -> Result<reqwest::blocking::ClientBuilder> {
+    let mut builder = BlockingHttpClient::builder().redirect(reqwest::redirect::Policy::none());
+    if allow_unchecked_test_host {
+        return Ok(builder);
+    }
+    // One snapshot drives both the "does a proxy apply" decision and the proxy installed in
+    // the client, so the SSRF-check bypass can never disagree with the real connection.
+    let env_snapshot = proxy_env_snapshot();
+    let env_lookup = |key: &str| env_snapshot.get(key).cloned();
+    let selected_proxy = if allow_proxy {
+        select_proxy_for_url(url, &env_lookup)
+    } else {
+        None
+    };
+    let policy = outbound_net_policy(false, allow_proxy, selected_proxy.is_some());
+    // Never let reqwest read the environment itself: either no proxy at all (default, so the
+    // validated/pinned DNS answers are used), or exactly the proxy chosen above.
+    builder = builder.no_proxy();
+    if policy.use_proxy {
+        builder = builder.proxy(reqwest::Proxy::custom(move |target| {
+            select_proxy_for_url(target, &|key| env_snapshot.get(key).cloned())
+        }));
+    }
+    if !policy.pin_dns {
+        warn_dns_pinning_skipped_once();
+        return Ok(builder);
+    }
+    let addrs = resolve_outbound_host(url, label, resolver)?;
+    if let (Some(url::Host::Domain(domain)), false) = (url.host(), addrs.is_empty()) {
+        builder = builder.resolve_to_addrs(domain, &addrs);
+    }
+    Ok(builder)
+}
+
+fn warn_dns_pinning_skipped_once() {
+    static WARNED: std::sync::Once = std::sync::Once::new();
+    WARNED.call_once(|| {
+        eprintln!(
+            "warning: {ALLOW_PROXY_ENV}=1 set: using the proxy environment; the \
+             private-address DNS check and DNS pinning are both skipped, so SSRF/DNS-rebinding \
+             protection is delegated to the proxy"
+        );
+    });
+}
+
+/// Fails on 3xx: redirects are disabled for SSRF safety, so a redirect response must not
+/// be mistaken for a successful download.
+fn reject_redirect_response(
+    status: reqwest::StatusCode,
+    label: &str,
+    url: &reqwest::Url,
+) -> Result<()> {
+    if status.is_redirection() {
+        anyhow::bail!(
+            "{label} {url} answered with redirect {status}; redirects are not followed \
+             (use the final https URL directly)"
+        );
+    }
+    Ok(())
 }
 
 fn is_private_or_local_ip(ip: IpAddr) -> bool {
@@ -3377,6 +4121,10 @@ fn is_private_or_local_ip(ip: IpAddr) -> bool {
                 || v4.is_unspecified()
                 || v4.octets()[0] == 0
                 || v4.octets()[0] >= 224
+                // 100.64.0.0/10 (carrier-grade NAT, shared address space)
+                || (v4.octets()[0] == 100 && (v4.octets()[1] & 0xc0) == 0x40)
+                // 198.18.0.0/15 (benchmarking)
+                || (v4.octets()[0] == 198 && (v4.octets()[1] & 0xfe) == 18)
         }
         IpAddr::V6(v6) => {
             v6.is_loopback()
@@ -3461,25 +4209,56 @@ fn prompt_asset_conflict_stdin(target: &Path) -> Result<AssetConflictChoice> {
     }
 }
 
+const MAX_REMOTE_ASSET_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_FREQUENT_CATALOG_BYTES: u64 = 1024 * 1024;
+
+/// Reads at most `max_bytes` from an HTTP response, failing (instead of buffering without
+/// bound) when the body is larger.
+fn read_http_body_limited<R: Read>(response: R, max_bytes: u64) -> Result<Vec<u8>> {
+    let mut body = Vec::new();
+    response
+        .take(max_bytes.saturating_add(1))
+        .read_to_end(&mut body)
+        .context("read response body")?;
+    if body.len() as u64 > max_bytes {
+        anyhow::bail!("response body exceeds the {max_bytes} byte limit");
+    }
+    Ok(body)
+}
+
 fn fetch_remote_asset(reference: &str) -> Result<(Vec<u8>, String)> {
     if reference.starts_with("https://") || is_test_local_http_reference(reference) {
         let validated_url = parse_and_validate_outbound_url(reference, "remote asset")?;
-        let client = BlockingHttpClient::builder()
-            .timeout(Duration::from_secs(30))
-            .build()
-            .context("build HTTP client")?;
+        // Redirects are disabled: a validated public host must not be able to bounce the
+        // request to an internal address (SSRF).
+        let client = outbound_client_builder(
+            &validated_url,
+            "remote asset",
+            &|host, port| system_host_resolver(host, port, ASSET_BUDGET.dns),
+            is_test_local_http_reference(reference),
+            allow_proxy_from_env(),
+        )?
+        .timeout(ASSET_BUDGET.http)
+        .build()
+        .context("build HTTP client")?;
         let response = client
             .get(validated_url.clone())
             .header(reqwest::header::USER_AGENT, "greentic-flow")
             .send()
-            .with_context(|| format!("download remote asset {validated_url}"))?
+            .with_context(|| {
+                format!(
+                    "download remote asset {validated_url}{}",
+                    proxy_note(is_test_local_http_reference(reference))
+                )
+            })?;
+        reject_redirect_response(response.status(), "remote asset", &validated_url)?;
+        let response = response
             .error_for_status()
             .with_context(|| format!("download remote asset {validated_url}"))?;
         let file_name = file_name_from_https_reference(validated_url.as_str())?;
-        let bytes = response
-            .bytes()
+        let bytes = read_http_body_limited(response, MAX_REMOTE_ASSET_BYTES)
             .with_context(|| format!("read remote asset response body {validated_url}"))?;
-        return Ok((bytes.to_vec(), file_name));
+        return Ok((bytes, file_name));
     }
 
     let client = DistClient::new(Default::default());
@@ -3508,10 +4287,12 @@ fn is_test_local_http_reference(reference: &str) -> bool {
     if url.scheme() != "http" {
         return false;
     }
-    matches!(
-        url.host_str(),
-        Some("localhost") | Some("127.0.0.1") | Some("::1")
-    )
+    match url.host() {
+        Some(url::Host::Domain(d)) => d == "localhost",
+        Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
+        Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
+        None => false,
+    }
 }
 
 fn materialize_remote_asset_answer(
@@ -4729,8 +5510,14 @@ fn write_pack_translation(flow_path: &Path, key: &str, value: &str) -> Result<()
     let mut map = if i18n_path.exists() {
         let text = fs::read_to_string(&i18n_path)
             .with_context(|| format!("read translation file {}", i18n_path.display()))?;
-        serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&text)
-            .unwrap_or_default()
+        serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&text).with_context(
+            || {
+                format!(
+                    "parse translation file {} as a JSON object",
+                    i18n_path.display()
+                )
+            },
+        )?
     } else {
         serde_json::Map::new()
     };
@@ -4771,6 +5558,38 @@ fn infer_pack_root_from_flow_path(flow_path: &Path) -> Result<PathBuf> {
     )
 }
 
+/// Path of the wizard state file belonging to exactly this flow (resolved before the flow
+/// file is deleted, because the flow id lives inside the document).
+fn flow_wizard_state_file(flow_path: &Path) -> Option<PathBuf> {
+    let doc = match load_ygtc_from_path(flow_path) {
+        Ok(doc) => doc,
+        Err(err) => {
+            eprintln!(
+                "warning: could not parse {} to locate its wizard state ({err}); any cached state is left in place",
+                flow_path.display()
+            );
+            return None;
+        }
+    };
+    if let Err(err) = validate_storage_segment("flow id", &doc.id) {
+        eprintln!(
+            "warning: {err}; wizard state of {} is not removed",
+            flow_path.display()
+        );
+        return None;
+    }
+    Some(wizard_state::wizard_state_path(flow_path, &doc.id))
+}
+
+/// Removes only the given flow's wizard state; state of sibling flows is left untouched.
+fn remove_flow_wizard_state_file(state_file: Option<&Path>) {
+    if let Some(path) = state_file
+        && path.is_file()
+    {
+        let _ = fs::remove_file(path);
+    }
+}
+
 fn wizard_delete_flow_with_io<R: Read, W: Write>(
     flow_path: &Path,
     reader: &mut R,
@@ -4801,18 +5620,13 @@ fn wizard_delete_flow_with_io<R: Read, W: Write>(
     }
 
     let sidecar_path = sidecar_path_for_flow(flow_path);
-    let wizard_state_path = {
-        let base = flow_path.parent().unwrap_or_else(|| Path::new("."));
-        base.join(".greentic/cache/flow_wizard")
-    };
+    let wizard_state_file = flow_wizard_state_file(flow_path);
 
     fs::remove_file(flow_path).with_context(|| format!("delete flow {}", flow_path.display()))?;
     if sidecar_path.exists() {
         let _ = fs::remove_file(&sidecar_path);
     }
-    if wizard_state_path.exists() {
-        let _ = fs::remove_dir_all(&wizard_state_path);
-    }
+    remove_flow_wizard_state_file(wizard_state_file.as_deref());
 
     writeln!(
         writer,
@@ -4973,7 +5787,7 @@ struct WizardStepSourceSelection {
     pin: bool,
 }
 
-#[derive(Debug, Clone, serde::Deserialize)]
+#[derive(Debug, Clone, Default, serde::Deserialize)]
 struct FrequentComponentsCatalog {
     #[serde(default)]
     schema_version: u32,
@@ -5001,95 +5815,6 @@ struct FrequentComponentChoice {
     component_ref: String,
 }
 
-#[cfg(test)]
-#[allow(dead_code)]
-fn wizard_add_step_with_io<R: Read, W: Write>(
-    pack_dir: &Path,
-    flow_path: &Path,
-    reader: &mut R,
-    writer: &mut W,
-) -> Result<()> {
-    let doc = load_ygtc_from_path(flow_path)?;
-    let flow_ir = FlowIr::from_doc(doc)?;
-    let after = wizard_select_add_step_anchor_with_io(&flow_ir, &mut *reader, &mut *writer)?;
-
-    let source = match wizard_select_step_source(pack_dir, reader, writer, true)? {
-        Some(source) => source,
-        None => {
-            writeln!(writer, "{}", wizard_t("wizard.step.add.cancelled")).ok();
-            return Ok(());
-        }
-    };
-    let wizard_mode = wizard_select_setup_mode(reader, writer, "add")?;
-    let Some(wizard_mode) = wizard_mode else {
-        writeln!(writer, "{}", wizard_t("wizard.step.add.cancelled")).ok();
-        return Ok(());
-    };
-
-    let resolver = env::var("GREENTIC_FLOW_WIZARD_RESOLVER")
-        .ok()
-        .filter(|value| !value.trim().is_empty());
-    let mut qa_io = QaInteractiveIo {
-        reader: &mut *reader,
-        writer: &mut *writer,
-    };
-    handle_add_step_with_qa_io(
-        AddStepArgs {
-            component_id: None,
-            flow_path: flow_path.to_path_buf(),
-            after,
-            mode: AddStepMode::Default,
-            pack_alias: None,
-            wizard_mode: Some(wizard_mode),
-            operation: None,
-            payload: "{}".to_string(),
-            routing_out: true,
-            routing_reply: false,
-            routing_next: None,
-            routing_multi_to: None,
-            routing_json: None,
-            routing_to_anchor: false,
-            config_flow: None,
-            answers: None,
-            answers_file: None,
-            answers_dir: None,
-            overwrite_answers: false,
-            reask: false,
-            locale: None,
-            interactive: true,
-            allow_cycles: false,
-            dry_run: false,
-            write: false,
-            validate_only: false,
-            manifests: Vec::new(),
-            node_id: None,
-            component_ref: source.component_ref,
-            local_wasm: source.local_wasm,
-            distributor_url: None,
-            auth_token: None,
-            tenant: None,
-            env: None,
-            pack: None,
-            component_version: None,
-            abi_version: None,
-            resolver,
-            pin: source.pin,
-            allow_contract_change: false,
-            in_map: None,
-            out_map: None,
-            err_map: None,
-            routing_inline_json: None,
-        },
-        SchemaMode::Strict,
-        OutputFormat::Human,
-        false,
-        Some(&mut qa_io),
-        None,
-    )?;
-    writeln!(writer, "{}", wizard_t("wizard.step.add.done")).ok();
-    Ok(())
-}
-
 fn wizard_add_step_action_with_io<R: Read, W: Write>(
     pack_dir: &Path,
     flow_path: &Path,
@@ -5111,9 +5836,7 @@ fn wizard_add_step_action_with_io<R: Read, W: Write>(
         return Ok(None);
     };
 
-    let resolver = env::var("GREENTIC_FLOW_WIZARD_RESOLVER")
-        .ok()
-        .filter(|value| !value.trim().is_empty());
+    let resolver = wizard_resolver_from_env();
     let mut qa_io = QaInteractiveIo { reader, writer };
     let mut captured_answers = serde_json::Map::new();
     handle_add_step_with_qa_io(
@@ -5288,9 +6011,7 @@ fn wizard_update_step_with_io<R: Read, W: Write>(
         return Ok(());
     };
 
-    let resolver = env::var("GREENTIC_FLOW_WIZARD_RESOLVER")
-        .ok()
-        .filter(|value| !value.trim().is_empty());
+    let resolver = wizard_resolver_from_env();
     let mut qa_io = QaInteractiveIo {
         reader: &mut *reader,
         writer: &mut *writer,
@@ -5411,9 +6132,7 @@ fn wizard_update_step_action_with_io<R: Read, W: Write>(
         return Ok(None);
     };
 
-    let resolver = env::var("GREENTIC_FLOW_WIZARD_RESOLVER")
-        .ok()
-        .filter(|value| !value.trim().is_empty());
+    let resolver = wizard_resolver_from_env();
     let mut qa_io = QaInteractiveIo { reader, writer };
     let mut captured_answers = serde_json::Map::new();
     handle_update_step_with_qa_io(
@@ -5578,31 +6297,49 @@ fn load_frequent_components_catalog_from_location(
         } else {
             let validated_url =
                 parse_and_validate_outbound_url(trimmed, "frequent component catalog")?;
-            let client = BlockingHttpClient::builder()
-                .timeout(Duration::from_secs(3))
-                .build()
-                .context("build HTTP client for frequent-components.json")?;
+            let client = outbound_client_builder(
+                &validated_url,
+                "frequent component catalog",
+                &|host, port| system_host_resolver(host, port, CATALOG_BUDGET.dns),
+                is_test_local_http_reference(trimmed),
+                allow_proxy_from_env(),
+            )?
+            .timeout(CATALOG_BUDGET.http)
+            .build()
+            .context("build HTTP client for frequent-components.json")?;
             let response = client
                 .get(validated_url.clone())
                 .header(reqwest::header::USER_AGENT, "greentic-flow")
                 .send()
-                .with_context(|| format!("download frequent component catalog {validated_url}"))?;
-            response
-                .error_for_status()
-                .with_context(|| format!("download frequent component catalog {validated_url}"))?
-                .text()
                 .with_context(|| {
-                    format!("read frequent component catalog response {validated_url}")
-                })?
+                    format!(
+                        "download frequent component catalog {validated_url}{}",
+                        proxy_note(is_test_local_http_reference(trimmed))
+                    )
+                })?;
+            reject_redirect_response(
+                response.status(),
+                "frequent component catalog",
+                &validated_url,
+            )?;
+            let response = response
+                .error_for_status()
+                .with_context(|| format!("download frequent component catalog {validated_url}"))?;
+            let body = read_http_body_limited(response, MAX_FREQUENT_CATALOG_BYTES).with_context(
+                || format!("read frequent component catalog response {validated_url}"),
+            )?;
+            String::from_utf8(body).with_context(|| {
+                format!("frequent component catalog {validated_url} is not valid UTF-8")
+            })?
         }
     };
 
     parse_frequent_components_catalog(&text)
 }
 
-fn embedded_frequent_components_catalog() -> FrequentComponentsCatalog {
+fn embedded_frequent_components_catalog() -> Result<FrequentComponentsCatalog> {
     parse_frequent_components_catalog(EMBEDDED_FREQUENT_COMPONENTS_JSON)
-        .expect("embedded frequent-components.json must be valid")
+        .context("parse embedded frequent-components.json")
 }
 
 fn frequent_component_catalog_is_newer(
@@ -5635,7 +6372,10 @@ fn load_frequent_components_catalog() -> FrequentComponentsCatalog {
         return catalog;
     }
 
-    let embedded = embedded_frequent_components_catalog();
+    let embedded = embedded_frequent_components_catalog().unwrap_or_else(|err| {
+        eprintln!("WARN {err:#}; using an empty frequent component catalog");
+        FrequentComponentsCatalog::default()
+    });
     let latest = frequent_components_latest_url();
     if let Ok(catalog) = load_frequent_components_catalog_from_location(&latest)
         && frequent_component_catalog_is_newer(&catalog, &embedded)
@@ -5818,6 +6558,7 @@ fn execute_delete_flow_plan_action(pack_dir: &Path, action: &WizardPlanAction) -
         .as_deref()
         .ok_or_else(|| anyhow!("delete-flow action missing flow"))?;
     let flow_path = resolve_wizard_plan_flow_path(pack_dir, flow, "delete-flow action flow path")?;
+    let wizard_state_file = flow_wizard_state_file(&flow_path);
     if flow_path.exists() {
         fs::remove_file(&flow_path)
             .with_context(|| format!("delete flow {}", flow_path.display()))?;
@@ -5826,13 +6567,7 @@ fn execute_delete_flow_plan_action(pack_dir: &Path, action: &WizardPlanAction) -
     if sidecar_path.exists() {
         let _ = fs::remove_file(&sidecar_path);
     }
-    let wizard_state_path = flow_path
-        .parent()
-        .unwrap_or_else(|| Path::new("."))
-        .join(".greentic/cache/flow_wizard");
-    if wizard_state_path.exists() {
-        let _ = fs::remove_dir_all(&wizard_state_path);
-    }
+    remove_flow_wizard_state_file(wizard_state_file.as_deref());
     remove_pack_flow_entry(pack_dir, flow)?;
     Ok(())
 }
@@ -6488,7 +7223,7 @@ fn build_add_flow_relative_path(
 fn wizard_catalog_for_locale(locale: &str) -> I18nCatalog {
     static CATALOGS: OnceLock<Mutex<HashMap<String, I18nCatalog>>> = OnceLock::new();
     let catalogs = CATALOGS.get_or_init(|| Mutex::new(HashMap::new()));
-    let mut guard = catalogs.lock().expect("wizard catalogs lock");
+    let mut guard = catalogs.lock().unwrap_or_else(PoisonError::into_inner);
     if let Some(cached) = guard.get(locale) {
         return cached.clone();
     }
@@ -6512,7 +7247,9 @@ fn wizard_resolved_map_for_locale(locale: &str) -> std::collections::BTreeMap<St
     static RESOLVED: OnceLock<Mutex<HashMap<String, std::collections::BTreeMap<String, String>>>> =
         OnceLock::new();
     let resolved_cache = RESOLVED.get_or_init(|| Mutex::new(HashMap::new()));
-    let mut guard = resolved_cache.lock().expect("wizard resolved map lock");
+    let mut guard = resolved_cache
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
     if let Some(cached) = guard.get(locale) {
         return cached.clone();
     }
@@ -6597,6 +7334,57 @@ fn wizard_t_with(key: &str, replacements: &[(&str, &str)]) -> String {
     value
 }
 
+/// Recursively collects `.ygtc` files under `root` (sorted, symlinks are not followed).
+fn collect_ygtc_files_recursive(root: &Path) -> Result<Vec<PathBuf>> {
+    let mut out = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        for entry in
+            fs::read_dir(&dir).with_context(|| format!("read directory {}", dir.display()))?
+        {
+            let entry = entry.with_context(|| format!("read entry under {}", dir.display()))?;
+            let file_type = entry
+                .file_type()
+                .with_context(|| format!("stat {}", entry.path().display()))?;
+            if file_type.is_symlink() {
+                continue;
+            }
+            let path = entry.path();
+            if file_type.is_dir() {
+                stack.push(path);
+            } else if path.extension() == Some(OsStr::new("ygtc")) {
+                out.push(path);
+            }
+        }
+    }
+    out.sort();
+    Ok(out)
+}
+
+/// Prints contract diagnostics for one flow; returns `true` when any is an error.
+fn report_contract_diagnostics(flow_path: &Path, online: bool) -> Result<bool> {
+    let mut contract_diags = validate_contracts_for_flow(flow_path, online)?;
+    contract_diags.sort_by(|a, b| {
+        a.node_id
+            .cmp(&b.node_id)
+            .then_with(|| a.severity.cmp(&b.severity))
+            .then_with(|| a.code.cmp(b.code))
+    });
+    for diag in &contract_diags {
+        match diag.severity {
+            ContractSeverity::Error => {
+                eprintln!("error: {} ({}:{})", diag.message, diag.node_id, diag.code)
+            }
+            ContractSeverity::Warning => {
+                eprintln!("warning: {} ({}:{})", diag.message, diag.node_id, diag.code)
+            }
+        }
+    }
+    Ok(contract_diags
+        .iter()
+        .any(|d| matches!(d.severity, ContractSeverity::Error)))
+}
+
 fn handle_doctor(args: DoctorArgs, schema_mode: SchemaMode) -> Result<()> {
     if args.stdin && !args.json {
         anyhow::bail!("--stdin currently requires --json");
@@ -6649,30 +7437,27 @@ fn handle_doctor(args: DoctorArgs, schema_mode: SchemaMode) -> Result<()> {
 
     let mut failures = 0usize;
     for target in &args.targets {
-        lint_path(target, &lint_ctx, true, &mut failures)?;
-        if target.is_file() {
-            let mut contract_diags = validate_contracts_for_flow(target, args.online)?;
-            contract_diags.sort_by(|a, b| {
-                a.node_id
-                    .cmp(&b.node_id)
-                    .then_with(|| a.severity.cmp(&b.severity))
-                    .then_with(|| a.code.cmp(b.code))
-            });
-            for diag in &contract_diags {
-                match diag.severity {
-                    ContractSeverity::Error => {
-                        eprintln!("error: {} ({}:{})", diag.message, diag.node_id, diag.code)
-                    }
-                    ContractSeverity::Warning => {
-                        eprintln!("warning: {} ({}:{})", diag.message, diag.node_id, diag.code)
-                    }
-                }
+        let mut failed_files = Vec::new();
+        lint_path(target, &lint_ctx, true, &mut failures, &mut failed_files)?;
+        let contract_targets = if target.is_dir() {
+            collect_ygtc_files_recursive(target)?
+        } else if target.is_file() {
+            vec![target.clone()]
+        } else {
+            Vec::new()
+        };
+        for flow_path in &contract_targets {
+            // Already reported as failed by lint: do not count the same file twice.
+            if failed_files.contains(flow_path) {
+                continue;
             }
-            if contract_diags
-                .iter()
-                .any(|d| matches!(d.severity, ContractSeverity::Error))
-            {
-                failures += 1;
+            match report_contract_diagnostics(flow_path, args.online) {
+                Ok(true) => failures += 1,
+                Ok(false) => {}
+                Err(err) => {
+                    failures += 1;
+                    eprintln!("ERR {}: {err:#}", flow_path.display());
+                }
             }
         }
     }
@@ -6895,7 +7680,7 @@ fn validate_contracts_for_flow(flow_path: &Path, online: bool) -> Result<Vec<Con
             continue;
         };
 
-        let Some(sidecar) = read_flow_resolve(flow_path).ok() else {
+        let Some(sidecar) = read_flow_resolve(&sidecar_path_for_flow(flow_path)).ok() else {
             diags.push(ContractDiagnostic {
                 code: "FLOW_MISSING_SIDECAR",
                 severity: ContractSeverity::Error,
@@ -7352,7 +8137,7 @@ fn execute_add_step_plan_action(pack_dir: &Path, action: &WizardPlanAction) -> R
         pack: None,
         component_version: None,
         abi_version: None,
-        resolver: env::var("GREENTIC_FLOW_WIZARD_RESOLVER").ok(),
+        resolver: wizard_resolver_from_env(),
         pin: false,
         allow_contract_change: false,
         in_map: action.in_map.clone(),
@@ -7416,7 +8201,7 @@ fn execute_update_step_plan_action(pack_dir: &Path, action: &WizardPlanAction) -
         pack: None,
         component_version: None,
         abi_version: None,
-        resolver: env::var("GREENTIC_FLOW_WIZARD_RESOLVER").ok(),
+        resolver: wizard_resolver_from_env(),
         dry_run: false,
         write: false,
         allow_contract_change: false,
@@ -7474,7 +8259,7 @@ fn execute_delete_step_plan_action(pack_dir: &Path, action: &WizardPlanAction) -
             pack: None,
             component_version: None,
             abi_version: None,
-            resolver: env::var("GREENTIC_FLOW_WIZARD_RESOLVER").ok(),
+            resolver: wizard_resolver_from_env(),
             strategy: "splice".to_string(),
             multi_pred: "error".to_string(),
             assume_yes: true,
@@ -7482,7 +8267,8 @@ fn execute_delete_step_plan_action(pack_dir: &Path, action: &WizardPlanAction) -
         },
         OutputFormat::Human,
         false,
-    )
+    )?;
+    sync_pack_assets_for_flow(pack_dir, flow)
 }
 
 fn handle_update(args: UpdateArgs, backup: bool) -> Result<()> {
@@ -7547,21 +8333,43 @@ struct LintContext<'a> {
     schema_mode: SchemaMode,
 }
 
+/// Lints a file or directory tree. A malformed/unreadable file is reported as `ERR`,
+/// counted in `failures`, and recorded in `failed_files`; the walk then continues with
+/// the remaining files instead of aborting at the first one.
 fn lint_path(
     path: &Path,
     ctx: &LintContext<'_>,
     interactive: bool,
     failures: &mut usize,
+    failed_files: &mut Vec<PathBuf>,
 ) -> Result<()> {
     if path.is_file() {
-        lint_file(path, ctx, interactive, failures)?;
+        let before = *failures;
+        if let Err(err) = lint_file(path, ctx, interactive, failures) {
+            if path.extension() == Some(OsStr::new("ygtc")) {
+                *failures += 1;
+                eprintln!("ERR {}: {err:#}", path.display());
+            } else {
+                return Err(err);
+            }
+        }
+        if *failures > before {
+            failed_files.push(path.to_path_buf());
+        }
     } else if path.is_dir() {
         let entries = fs::read_dir(path)
             .with_context(|| format!("failed to read directory {}", path.display()))?;
         for entry in entries {
             let entry = entry
                 .with_context(|| format!("failed to read directory entry in {}", path.display()))?;
-            lint_path(&entry.path(), ctx, interactive, failures)?;
+            // Do not follow symlinks while walking: avoids cycles and escaping the lint root.
+            let file_type = entry.file_type().with_context(|| {
+                format!("failed to stat directory entry {}", entry.path().display())
+            })?;
+            if file_type.is_symlink() {
+                continue;
+            }
+            lint_path(&entry.path(), ctx, interactive, failures, failed_files)?;
         }
     }
     Ok(())
@@ -7794,9 +8602,18 @@ fn lint_component_configs(
         let Some(entry) = sidecar.nodes.get(node_key) else {
             continue;
         };
+        // ext:// sources are resolved by packc at pack-build time; no local manifest to lint.
+        if matches!(entry.source, ComponentSourceRefV1::Ext { .. }) {
+            continue;
+        }
         let manifest_path = match resolve_component_manifest_path(&entry.source, flow_path) {
             Ok(path) => path,
-            Err(_) => continue,
+            Err(err) => {
+                eprintln!(
+                    "WARN component_config: node '{node_key}' manifest could not be resolved ({err}); skipping component config lint for this node"
+                );
+                continue;
+            }
         };
         let operation = node.component.operation.as_deref().unwrap_or("unknown");
         let schema_resolution = match resolve_input_schema(&manifest_path, operation) {
@@ -8021,6 +8838,1126 @@ fn write_stdout_line(line: &str) -> Result<()> {
 }
 
 #[cfg(test)]
+mod audit_wizard_tests {
+    use super::*;
+    use crate::tests::env_test_lock;
+    use std::io::Cursor;
+    use tempfile::tempdir;
+
+    fn seed_flow(root: &Path, rel: &str, id: &str) -> PathBuf {
+        let flow_path = root.join(rel);
+        if let Some(parent) = flow_path.parent() {
+            fs::create_dir_all(parent).expect("create flow dir");
+        }
+        fs::write(
+            &flow_path,
+            format!("id: {id}\ntype: messaging\nschema_version: 2\nnodes: {{}}\n"),
+        )
+        .expect("write flow");
+        flow_path
+    }
+
+    fn test_session(real: &Path, staged: &Path) -> WizardSession {
+        WizardSession {
+            real_pack_dir: real.to_path_buf(),
+            staged_pack_dir: staged.to_path_buf(),
+            dirty: false,
+            config: WizardRunConfig::default(),
+            actions: Vec::new(),
+            answers_output_path: None,
+            protected_answers_path: None,
+        }
+    }
+
+    #[test]
+    fn hex_to_bytes_rejects_non_ascii_and_signs_without_panicking() {
+        assert_eq!(hex_to_bytes("00ff").expect("valid hex"), vec![0x00, 0xff]);
+        assert!(hex_to_bytes("é1").is_err(), "non-ASCII must be an error");
+        assert!(hex_to_bytes("+f").is_err(), "sign characters are not hex");
+        assert!(hex_to_bytes("abc").is_err(), "odd length");
+    }
+
+    #[test]
+    fn write_pack_translation_refuses_to_overwrite_corrupt_json() {
+        let dir = tempdir().expect("temp dir");
+        let flow_path = seed_flow(dir.path(), "flows/main.ygtc", "main");
+        let i18n_path = dir.path().join("i18n/en-GB.json");
+        fs::create_dir_all(dir.path().join("i18n")).expect("i18n dir");
+        fs::write(&i18n_path, "{ not json").expect("write corrupt i18n");
+
+        let err = write_pack_translation(&flow_path, "k", "v").expect_err("must fail");
+        assert!(format!("{err:#}").contains("en-GB.json"));
+        assert_eq!(fs::read_to_string(&i18n_path).expect("read"), "{ not json");
+    }
+
+    #[test]
+    fn wizard_answers_dry_run_does_not_modify_real_pack() {
+        let dir = tempdir().expect("temp dir");
+        let flow_path = seed_flow(dir.path(), "flows/main.ygtc", "main");
+        let answers_path = dir.path().join("plan.json");
+        let plan = WizardPlan::from_actions(&[WizardPlanAction {
+            action: "delete-flow".to_string(),
+            flow: Some("flows/main.ygtc".to_string()),
+            ..WizardPlanAction::default()
+        }]);
+        write_wizard_plan_file(&answers_path, &plan).expect("write plan");
+
+        let config = WizardRunConfig {
+            answers_path: Some(answers_path),
+            emit_schema: false,
+            dry_run: true,
+        };
+        let mut out = Vec::new();
+        let handled = try_execute_wizard_plan_from_config(dir.path(), &config, &mut out)
+            .expect("dry-run plan");
+        assert!(handled);
+        assert!(flow_path.exists(), "dry-run must not delete the real flow");
+    }
+
+    #[test]
+    fn wizard_answers_without_dry_run_applies_plan() {
+        let dir = tempdir().expect("temp dir");
+        let flow_path = seed_flow(dir.path(), "flows/main.ygtc", "main");
+        let answers_path = dir.path().join("plan.json");
+        let plan = WizardPlan::from_actions(&[WizardPlanAction {
+            action: "delete-flow".to_string(),
+            flow: Some("flows/main.ygtc".to_string()),
+            ..WizardPlanAction::default()
+        }]);
+        write_wizard_plan_file(&answers_path, &plan).expect("write plan");
+        let config = WizardRunConfig {
+            answers_path: Some(answers_path),
+            emit_schema: false,
+            dry_run: false,
+        };
+        let mut out = Vec::new();
+        assert!(
+            try_execute_wizard_plan_from_config(dir.path(), &config, &mut out).expect("apply plan")
+        );
+        assert!(!flow_path.exists());
+    }
+
+    #[test]
+    fn delete_flow_removes_only_its_own_wizard_state() {
+        let dir = tempdir().expect("temp dir");
+        let doomed = seed_flow(dir.path(), "flows/a.ygtc", "a");
+        let sibling = seed_flow(dir.path(), "flows/b.ygtc", "b");
+        let state_a = wizard_state::wizard_state_path(&doomed, "a");
+        let state_b = wizard_state::wizard_state_path(&sibling, "b");
+        fs::create_dir_all(state_a.parent().expect("state dir")).expect("state dir");
+        fs::write(&state_a, b"a").expect("state a");
+        fs::write(&state_b, b"b").expect("state b");
+
+        let action = WizardPlanAction {
+            action: "delete-flow".to_string(),
+            flow: Some("flows/a.ygtc".to_string()),
+            ..WizardPlanAction::default()
+        };
+        execute_delete_flow_plan_action(dir.path(), &action).expect("delete flow");
+        assert!(!doomed.exists());
+        assert!(!state_a.exists(), "own state must be removed");
+        assert!(state_b.exists(), "sibling flow state must survive");
+    }
+
+    #[test]
+    fn staging_includes_pack_yaml_and_syncs_it_back() {
+        let dir = tempdir().expect("temp dir");
+        seed_flow(dir.path(), "flows/main.ygtc", "main");
+        fs::write(dir.path().join("pack.yaml"), "flows: []\n").expect("pack yaml");
+        let staged = create_wizard_staging_pack(dir.path()).expect("stage");
+        let _guard = WizardStagingGuard::new(staged.clone());
+        assert!(staged.join("pack.yaml").is_file());
+
+        fs::write(staged.join("pack.yaml"), "flows: [changed]\n").expect("edit staged");
+        let mut session = test_session(dir.path(), &staged);
+        sync_staged_pack_back(&mut session).expect("sync");
+        assert_eq!(
+            fs::read_to_string(dir.path().join("pack.yaml")).expect("read"),
+            "flows: [changed]\n"
+        );
+    }
+
+    #[test]
+    fn sync_staged_dir_replaces_content_and_leaves_no_temp_dirs() {
+        let real = tempdir().expect("real");
+        let staged = tempdir().expect("staged");
+        fs::create_dir_all(real.path().join("flows")).expect("real flows");
+        fs::write(real.path().join("flows/old.ygtc"), "old").expect("old");
+        fs::create_dir_all(staged.path().join("flows")).expect("staged flows");
+        fs::write(staged.path().join("flows/new.ygtc"), "new").expect("new");
+
+        let session = test_session(real.path(), staged.path());
+        sync_staged_dir(&session, "flows").expect("sync");
+        assert!(!real.path().join("flows/old.ygtc").exists());
+        assert_eq!(
+            fs::read_to_string(real.path().join("flows/new.ygtc")).expect("read"),
+            "new"
+        );
+        let leftovers: Vec<_> = fs::read_dir(real.path())
+            .expect("read dir")
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .filter(|name| name.starts_with('.'))
+            .collect();
+        assert!(leftovers.is_empty(), "temp dirs left behind: {leftovers:?}");
+    }
+
+    #[test]
+    fn staging_guard_removes_directory_on_drop() {
+        let dir = tempdir().expect("temp dir");
+        let staged = dir.path().join("stage");
+        fs::create_dir_all(staged.join("x")).expect("stage dir");
+        {
+            let _guard = WizardStagingGuard::new(staged.clone());
+        }
+        assert!(!staged.exists());
+    }
+
+    #[test]
+    fn unloadable_answers_file_is_not_overwritten_on_exit() {
+        let dir = tempdir().expect("temp dir");
+        let answers_path = dir.path().join("answers.json");
+        fs::write(&answers_path, "{ broken").expect("write broken answers");
+        let mut output = Vec::new();
+        run_wizard_menu_with_config(
+            dir.path(),
+            Cursor::new("0\n"),
+            &mut output,
+            WizardRunConfig {
+                answers_path: Some(answers_path.clone()),
+                emit_schema: false,
+                dry_run: false,
+            },
+        )
+        .expect("wizard exit");
+        assert_eq!(fs::read_to_string(&answers_path).expect("read"), "{ broken");
+    }
+
+    #[test]
+    fn cancelled_action_does_not_mark_session_dirty() {
+        let dir = tempdir().expect("temp dir");
+        let mut session = test_session(dir.path(), dir.path());
+        let mut out = Vec::new();
+        assert!(!wizard_record_action_result(
+            &mut session,
+            &mut out,
+            Ok(None),
+            false
+        ));
+        assert!(!session.dirty);
+
+        wizard_record_action_result(&mut session, &mut out, Err(anyhow!("boom")), false);
+        assert!(!session.dirty, "failure without mutation stays clean");
+        wizard_record_action_result(&mut session, &mut out, Err(anyhow!("boom")), true);
+        assert!(session.dirty, "failure after mutation must be saveable");
+    }
+
+    #[test]
+    fn eof_with_unsaved_changes_reports_discard() {
+        let dir = tempdir().expect("temp dir");
+        let mut session = test_session(dir.path(), dir.path());
+        session.dirty = true;
+        let mut out = Vec::new();
+        wizard_handle_eof_with_unsaved_changes(&mut session, &mut Cursor::new(""), &mut out);
+        let rendered = String::from_utf8(out).expect("utf8");
+        assert!(rendered.contains(&wizard_t("wizard.save.discarded")));
+    }
+
+    #[test]
+    fn ygtc_collection_is_recursive_and_skips_symlinks() {
+        let dir = tempdir().expect("temp dir");
+        let nested = seed_flow(dir.path(), "a/b/nested.ygtc", "nested");
+        fs::write(dir.path().join("a/readme.txt"), "x").expect("txt");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(dir.path().join("a"), dir.path().join("loop")).expect("symlink");
+        let found = collect_ygtc_files_recursive(dir.path()).expect("collect");
+        assert_eq!(found, vec![nested]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn copy_dir_recursive_follows_in_pack_symlinks_and_rejects_escapes() {
+        let src = tempdir().expect("src");
+        fs::create_dir_all(src.path().join("shared")).expect("shared");
+        fs::write(src.path().join("shared/foo.wasm"), "wasm").expect("wasm");
+        fs::create_dir_all(src.path().join("components")).expect("components");
+        std::os::unix::fs::symlink("../shared/foo.wasm", src.path().join("components/foo.wasm"))
+            .expect("symlink");
+        let dst = tempdir().expect("dst");
+        let target = dst.path().join("copy");
+        let root = fs::canonicalize(src.path()).expect("root");
+        copy_tree_within_root(&src.path().join("components"), &target, &root, 0).expect("copy");
+        assert_eq!(
+            fs::read_to_string(target.join("foo.wasm")).expect("read"),
+            "wasm"
+        );
+
+        let outside = tempdir().expect("outside");
+        fs::write(outside.path().join("secret.txt"), "secret").expect("secret");
+        std::os::unix::fs::symlink(outside.path(), src.path().join("components/esc"))
+            .expect("symlink");
+        let err = copy_dir_recursive(&src.path().join("components"), &dst.path().join("c2"))
+            .expect_err("escape rejected");
+        assert!(err.to_string().contains("outside the pack"), "{err:#}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn staging_keeps_symlinked_flows_dir_and_save_preserves_content() {
+        let pack = tempdir().expect("pack");
+        let shared = pack.path().join("shared_flows");
+        fs::create_dir_all(&shared).expect("shared");
+        fs::write(shared.join("a.ygtc"), "a").expect("flow");
+        std::os::unix::fs::symlink("shared_flows", pack.path().join("flows")).expect("link");
+        let staged = create_wizard_staging_pack(pack.path()).expect("stage");
+        let _guard = WizardStagingGuard::new(staged.clone());
+        assert_eq!(
+            fs::read_to_string(staged.join("flows/a.ygtc")).expect("read"),
+            "a"
+        );
+        fs::write(staged.join("flows/b.ygtc"), "b").expect("new flow");
+        let session = test_session(pack.path(), &staged);
+        sync_staged_dir(&session, "flows").expect("sync");
+        assert!(shared.join("a.ygtc").exists() && shared.join("b.ygtc").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn staging_rejects_symlink_cycles() {
+        let pack = tempdir().expect("pack");
+        fs::create_dir_all(pack.path().join("flows")).expect("flows");
+        std::os::unix::fs::symlink("..", pack.path().join("flows/loop")).expect("link");
+        let err = create_wizard_staging_pack(pack.path()).expect_err("cycle rejected");
+        assert!(
+            format!("{err:#}").to_lowercase().contains("cycle"),
+            "{err:#}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn staging_and_sync_reject_overlapping_top_level_dirs() {
+        let pack = tempdir().expect("pack");
+        fs::create_dir_all(pack.path().join("assets/flows")).expect("assets/flows");
+        fs::write(pack.path().join("assets/flows/a.ygtc"), "a").expect("flow");
+        std::os::unix::fs::symlink("assets/flows", pack.path().join("flows")).expect("link");
+        let err = create_wizard_staging_pack(pack.path()).expect_err("overlap rejected");
+        assert!(format!("{err:#}").contains("overlap"), "{err:#}");
+
+        // Overlap introduced after staging is caught before the first sync write.
+        let clean = tempdir().expect("clean");
+        fs::create_dir_all(clean.path().join("flows")).expect("flows");
+        fs::create_dir_all(clean.path().join("assets/flows")).expect("assets/flows");
+        let staged_base = tempdir().expect("base");
+        let staged =
+            create_wizard_staging_pack_in(clean.path(), staged_base.path()).expect("stage");
+        fs::remove_dir_all(clean.path().join("flows")).expect("rm flows");
+        std::os::unix::fs::symlink("assets/flows", clean.path().join("flows")).expect("link");
+        let mut session = test_session(clean.path(), &staged);
+        let err = sync_staged_pack_back(&mut session).expect_err("sync overlap rejected");
+        assert!(format!("{err:#}").contains("overlap"), "{err:#}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn staging_cleans_stage_root_when_pack_yaml_copy_fails() {
+        use std::os::unix::fs::PermissionsExt;
+        let pack = tempdir().expect("pack");
+        let manifest = pack.path().join("pack.yaml");
+        fs::write(&manifest, "name: x\n").expect("pack.yaml");
+        fs::set_permissions(&manifest, fs::Permissions::from_mode(0o000)).expect("chmod");
+        if fs::read(&manifest).is_ok() {
+            // Running as a user that bypasses permissions (e.g. root): cannot provoke the error.
+            return;
+        }
+        let base = tempdir().expect("base");
+        let result = create_wizard_staging_pack_in(pack.path(), base.path());
+        fs::set_permissions(&manifest, fs::Permissions::from_mode(0o644)).expect("restore");
+        assert!(result.is_err());
+        let leftovers: Vec<_> = fs::read_dir(base.path()).expect("read base").collect();
+        assert!(leftovers.is_empty(), "stage root leaked: {leftovers:?}");
+    }
+
+    pub(crate) struct DigestEnvGuard(Option<String>);
+    impl DigestEnvGuard {
+        pub(crate) fn set(value: &str) -> Self {
+            let previous = env::var("GREENTIC_FLOW_TEST_DIGEST").ok();
+            unsafe {
+                env::set_var("GREENTIC_FLOW_TEST_DIGEST", value);
+            }
+            Self(previous)
+        }
+    }
+    impl Drop for DigestEnvGuard {
+        fn drop(&mut self) {
+            unsafe {
+                match self.0.take() {
+                    Some(v) => env::set_var("GREENTIC_FLOW_TEST_DIGEST", v),
+                    None => env::remove_var("GREENTIC_FLOW_TEST_DIGEST"),
+                }
+            }
+        }
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    fn update_step_source_keeps_or_repins_pinned_remote() {
+        let _lock = env_test_lock();
+        let old_digest = format!("sha256:{}", "a".repeat(64));
+        let new_digest = format!("sha256:{}", "b".repeat(64));
+        let old = NodeResolveV1 {
+            source: ComponentSourceRefV1::Oci {
+                r#ref: "oci://ghcr.io/acme/comp:1".to_string(),
+                digest: Some(old_digest),
+            },
+            mode: Some(ResolveModeV1::Pinned),
+        };
+        let flow = Path::new("flow.ygtc");
+        let _guard = DigestEnvGuard::set(&new_digest);
+
+        // Same reference: existing pin kept untouched.
+        let same = "oci://ghcr.io/acme/comp:1".to_string();
+        assert!(
+            resolve_update_step_source(Some(&old), None, Some(&same), true, flow)
+                .expect("same ref")
+                .is_none()
+        );
+
+        // Different reference: re-pinned, not silently dropped.
+        let other = "oci://ghcr.io/acme/comp:2".to_string();
+        let entry = resolve_update_step_source(Some(&old), None, Some(&other), true, flow)
+            .expect("other ref")
+            .expect("replaced");
+        assert!(matches!(entry.mode, Some(ResolveModeV1::Pinned)));
+        assert!(
+            matches!(
+                &entry.source,
+                ComponentSourceRefV1::Oci { r#ref, digest }
+                    if *r#ref == other && digest.as_deref() == Some(new_digest.as_str())
+            ),
+            "unexpected source {:?}",
+            entry.source
+        );
+
+        // Pinned local -> remote is re-pinned as well.
+        let old_local = NodeResolveV1 {
+            source: ComponentSourceRefV1::Local {
+                path: "a.wasm".to_string(),
+                digest: Some(format!("sha256:{}", "c".repeat(64))),
+            },
+            mode: Some(ResolveModeV1::Pinned),
+        };
+        let entry = resolve_update_step_source(Some(&old_local), None, Some(&other), true, flow)
+            .expect("local to remote")
+            .expect("replaced");
+        assert!(matches!(entry.mode, Some(ResolveModeV1::Pinned)));
+
+        // Unpinned old source stays unpinned.
+        let unpinned = NodeResolveV1 {
+            source: ComponentSourceRefV1::Oci {
+                r#ref: "oci://ghcr.io/acme/comp:1".to_string(),
+                digest: None,
+            },
+            mode: None,
+        };
+        let entry = resolve_update_step_source(Some(&unpinned), None, Some(&other), true, flow)
+            .expect("unpinned")
+            .expect("replaced");
+        assert!(entry.mode.is_none());
+    }
+
+    /// Previews (`--dry-run`, `--validate-only`, `bind-component` without `--write`) resolve
+    /// the digest only: the artifact fetcher (which fills the cache) must not be called.
+    #[test]
+    fn pin_preview_resolves_digest_without_fetching() {
+        let _lock = env_test_lock();
+        let _digest_off = {
+            let previous = env::var("GREENTIC_FLOW_TEST_DIGEST").ok();
+            unsafe {
+                env::remove_var("GREENTIC_FLOW_TEST_DIGEST");
+            }
+            DigestEnvGuard(previous)
+        };
+        let digest = format!("sha256:{}", "d".repeat(64));
+        let flow = Path::new("flow.ygtc");
+        let reference = "oci://ghcr.io/acme/comp:3".to_string();
+        let fetch_calls = std::cell::Cell::new(0u32);
+        let fetch = |_reference: &str| -> Result<(PathBuf, String)> {
+            fetch_calls.set(fetch_calls.get() + 1);
+            Err(anyhow!("fetcher must not be called in preview"))
+        };
+        let resolve = |_reference: &str| -> Result<String> { Ok(digest.clone()) };
+        let ops = RemoteOps {
+            fetch: &fetch,
+            resolve_digest: &resolve,
+        };
+
+        let (source, mode) =
+            resolve_component_source_inputs_with(None, Some(&reference), true, false, flow, &ops)
+                .expect("preview pin");
+        assert_eq!(fetch_calls.get(), 0, "preview must not fetch the artifact");
+        assert!(matches!(mode, Some(ResolveModeV1::Pinned)));
+        assert!(matches!(
+            &source,
+            ComponentSourceRefV1::Oci { digest: Some(d), .. } if *d == digest
+        ));
+
+        // update-step --dry-run re-pin: also digest-only.
+        let old = NodeResolveV1 {
+            source: ComponentSourceRefV1::Oci {
+                r#ref: "oci://ghcr.io/acme/comp:1".to_string(),
+                digest: Some(format!("sha256:{}", "a".repeat(64))),
+            },
+            mode: Some(ResolveModeV1::Pinned),
+        };
+        let entry =
+            resolve_update_step_source_with(Some(&old), None, Some(&reference), false, flow, &ops)
+                .expect("dry-run repin")
+                .expect("replaced");
+        assert_eq!(fetch_calls.get(), 0, "dry-run re-pin must not fetch");
+        assert!(matches!(entry.mode, Some(ResolveModeV1::Pinned)));
+
+        // Persisting paths do fetch (the failing fetcher proves it is reached).
+        assert!(
+            resolve_component_source_inputs_with(None, Some(&reference), true, true, flow, &ops)
+                .is_err()
+        );
+        assert_eq!(fetch_calls.get(), 1);
+    }
+
+    pub(crate) struct CacheDirGuard(Option<String>);
+    impl CacheDirGuard {
+        pub(crate) fn set(dir: &Path) -> Self {
+            let previous = env::var("GREENTIC_CACHE_DIR").ok();
+            unsafe {
+                env::set_var("GREENTIC_CACHE_DIR", dir);
+            }
+            Self(previous)
+        }
+    }
+    impl Drop for CacheDirGuard {
+        fn drop(&mut self) {
+            unsafe {
+                match self.0.take() {
+                    Some(v) => env::set_var("GREENTIC_CACHE_DIR", v),
+                    None => env::remove_var("GREENTIC_CACHE_DIR"),
+                }
+            }
+        }
+    }
+
+    /// Re-pinning to a never-pulled remote ref must populate the cache so that
+    /// `load_component_payload` (-> `ensure_sidecar_source_available` -> `open_cached`)
+    /// succeeds on an empty cache. The injected fetcher stands in for the registry by
+    /// ingesting a local wasm into the real (temp) distribution cache.
+    #[cfg(debug_assertions)]
+    #[test]
+    fn update_step_repin_fetches_into_empty_cache() {
+        let _lock = env_test_lock();
+        let _digest_off = {
+            // Make sure the digest-only test override is not active.
+            let previous = env::var("GREENTIC_FLOW_TEST_DIGEST").ok();
+            unsafe {
+                env::remove_var("GREENTIC_FLOW_TEST_DIGEST");
+            }
+            DigestEnvGuard(previous)
+        };
+        let cache = tempdir().expect("cache");
+        let _cache_guard = CacheDirGuard::set(cache.path());
+        let work = tempdir().expect("work");
+        let wasm = work.path().join("new.wasm");
+        fs::write(&wasm, b"\0asm\x01\0\0\0").expect("wasm");
+        let flow = work.path().join("flow.ygtc");
+
+        let old = NodeResolveV1 {
+            source: ComponentSourceRefV1::Oci {
+                r#ref: "oci://ghcr.io/acme/comp:1".to_string(),
+                digest: Some(format!("sha256:{}", "a".repeat(64))),
+            },
+            mode: Some(ResolveModeV1::Pinned),
+        };
+        let new_ref = "oci://ghcr.io/acme/comp:2".to_string();
+        let fetch_calls = std::cell::Cell::new(0u32);
+        let fetch = |reference: &str| -> Result<(PathBuf, String)> {
+            fetch_calls.set(fetch_calls.get() + 1);
+            assert_eq!(reference, new_ref);
+            let client = DistClient::new(Default::default());
+            ensure_cached_component(&client, &wasm.display().to_string())
+        };
+
+        let entry = resolve_update_step_source_with(
+            Some(&old),
+            None,
+            Some(&new_ref),
+            true,
+            &flow,
+            &RemoteOps {
+                fetch: &fetch,
+                resolve_digest: &|_| Err(anyhow!("persisting path must not digest-only")),
+            },
+        )
+        .expect("repin")
+        .expect("replaced");
+        assert_eq!(fetch_calls.get(), 1);
+        assert!(matches!(entry.mode, Some(ResolveModeV1::Pinned)));
+        let ComponentSourceRefV1::Oci {
+            digest: Some(d), ..
+        } = &entry.source
+        else {
+            panic!("unexpected source {:?}", entry.source);
+        };
+        // Reaches the real consumer with the cache populated only by the re-pin.
+        load_component_payload(&entry.source, &flow).expect("pinned entry is loadable");
+        assert!(DistClient::new(Default::default()).open_cached(d).is_ok());
+
+        // Control: a digest-only pin (previous behaviour) against an empty cache bails.
+        let empty = tempdir().expect("empty cache");
+        let _empty_guard = CacheDirGuard::set(empty.path());
+        let err = load_component_payload(&entry.source, &flow).expect_err("empty cache");
+        assert!(format!("{err:#}").contains("not cached"), "{err:#}");
+    }
+
+    #[test]
+    fn outbound_url_rejects_ipv6_and_mapped_and_trailing_dot_hosts() {
+        for url in [
+            "https://[::1]/x",
+            "https://[::ffff:127.0.0.1]/x",
+            "https://[::ffff:10.0.0.1]/x",
+            "https://[fe80::1]/x",
+            "https://[fc00::1]/x",
+            "https://localhost./x",
+            "https://LOCALHOST/x",
+            "https://api.localhost/x",
+            "https://127.0.0.1/x",
+            "https://2130706433/x",
+        ] {
+            assert!(
+                parse_and_validate_outbound_url(url, "t").is_err(),
+                "{url} must be rejected"
+            );
+        }
+        assert!(parse_and_validate_outbound_url("https://example.com/x", "t").is_ok());
+        assert!(parse_and_validate_outbound_url("https://[2606:4700::1111]/x", "t").is_ok());
+    }
+
+    #[test]
+    fn dns_resolution_times_out_without_network() {
+        let started = std::time::Instant::now();
+        let err = resolve_with_timeout("slow.example", Duration::from_millis(50), || {
+            std::thread::sleep(Duration::from_millis(1500));
+            Ok(Vec::new())
+        })
+        .expect_err("must time out");
+        assert_eq!(err.kind(), std::io::ErrorKind::TimedOut);
+        assert!(started.elapsed() < Duration::from_millis(1000));
+        let ok = resolve_with_timeout("fast.example", Duration::from_secs(5), || {
+            Ok(vec![std::net::SocketAddr::from(([93, 184, 216, 34], 443))])
+        })
+        .expect("fast lookup");
+        assert_eq!(ok.len(), 1);
+    }
+
+    #[test]
+    fn outbound_net_policy_decides_proxy_and_pinning() {
+        let pinned = OutboundNetPolicy {
+            use_proxy: false,
+            pin_dns: true,
+        };
+        let proxied = OutboundNetPolicy {
+            use_proxy: true,
+            pin_dns: false,
+        };
+        // Default: no proxy, pinned DNS, regardless of whether a proxy env exists.
+        assert_eq!(outbound_net_policy(false, false, false), pinned);
+        assert_eq!(outbound_net_policy(false, false, true), pinned);
+        // Opt-in with an applicable proxy: proxy, DNS check + pin skipped.
+        assert_eq!(outbound_net_policy(false, true, true), proxied);
+        // Opt-in without any applicable proxy (no env, or NO_PROXY match): full default path.
+        assert_eq!(outbound_net_policy(false, true, false), pinned);
+        // Test hosts are always unchecked.
+        assert_eq!(outbound_net_policy(true, false, false), proxied);
+    }
+
+    #[test]
+    fn select_proxy_follows_hyper_util_semantics() {
+        let pick = |host: &str, port: u16, pairs: &[(&str, &str)]| -> Option<String> {
+            select_proxy(host, port, &|key| {
+                pairs
+                    .iter()
+                    .find(|(k, _)| *k == key)
+                    .map(|(_, v)| v.to_string())
+            })
+            .map(|u| u.to_string())
+        };
+        let p = "http://p:3128";
+        let p_url = Some("http://p:3128/".to_string());
+        assert_eq!(pick("example.com", 443, &[]), None);
+        assert_eq!(pick("example.com", 443, &[("HTTPS_PROXY", "  ")]), None);
+        // Plain HTTP_PROXY does not carry https fetches.
+        assert_eq!(pick("example.com", 443, &[("HTTP_PROXY", p)]), None);
+        for key in ["HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy"] {
+            assert_eq!(pick("example.com", 443, &[(key, p)]), p_url, "{key}");
+        }
+        // Schemeless values are http.
+        assert_eq!(
+            pick("example.com", 443, &[("HTTPS_PROXY", "p:3128")]),
+            p_url
+        );
+        // First variable that is SET wins, even when empty (=> no proxy).
+        assert_eq!(
+            pick(
+                "example.com",
+                443,
+                &[("HTTPS_PROXY", ""), ("https_proxy", p)]
+            ),
+            None
+        );
+        assert_eq!(
+            pick("example.com", 443, &[("ALL_PROXY", ""), ("all_proxy", p)]),
+            None
+        );
+        // HTTPS_PROXY is preferred over ALL_PROXY.
+        assert_eq!(
+            pick(
+                "example.com",
+                443,
+                &[("HTTPS_PROXY", "http://a:1"), ("ALL_PROXY", "http://b:2")]
+            ),
+            Some("http://a:1/".to_string())
+        );
+        // Unsupported scheme in HTTPS_PROXY falls through to ALL_PROXY; alone it is no proxy.
+        assert_eq!(
+            pick("example.com", 443, &[("HTTPS_PROXY", "ftp://p:21")]),
+            None
+        );
+        assert_eq!(
+            pick(
+                "example.com",
+                443,
+                &[("HTTPS_PROXY", "ftp://p:21"), ("ALL_PROXY", p)]
+            ),
+            p_url
+        );
+        assert_eq!(
+            pick("example.com", 443, &[("ALL_PROXY", "socks5://p:1080")]),
+            None
+        );
+        // CGI: REQUEST_METHOD disables proxies.
+        assert_eq!(
+            pick(
+                "example.com",
+                443,
+                &[("HTTPS_PROXY", p), ("REQUEST_METHOD", "GET")]
+            ),
+            None
+        );
+        // NO_PROXY.
+        let with_no = |host: &str, port: u16, no: &str| {
+            pick(host, port, &[("HTTPS_PROXY", p), ("NO_PROXY", no)])
+        };
+        for (host, port, no) in [
+            ("example.com", 443, "example.com"),
+            ("a.example.com", 443, ".example.com"),
+            ("a.example.com", 443, "x.org, *.example.com"),
+            ("anything.io", 443, "*"),
+            ("Example.COM", 443, "example.com"),
+            ("example.com", 443, "EXAMPLE.com"),
+            ("example.com", 443, "example.com."),
+            ("example.com.", 443, "example.com"),
+            ("a.example.com.", 443, ".example.com."),
+            ("example.com", 443, "example.com:443"),
+        ] {
+            assert_eq!(with_no(host, port, no), None, "{host}:{port} vs {no}");
+        }
+        for (host, port, no) in [
+            ("notexample.com", 443, "example.com"),
+            ("example.com", 443, "other.org"),
+            ("example.com", 8443, "example.com:443"),
+            ("example.com", 443, ""),
+        ] {
+            assert_eq!(with_no(host, port, no), p_url, "{host}:{port} vs {no}");
+        }
+        // Lowercase no_proxy is honoured; an empty NO_PROXY (set first) wins over no_proxy.
+        assert_eq!(
+            pick(
+                "example.com",
+                443,
+                &[("HTTPS_PROXY", p), ("no_proxy", "example.com")]
+            ),
+            None
+        );
+        assert_eq!(
+            pick(
+                "example.com",
+                443,
+                &[
+                    ("HTTPS_PROXY", p),
+                    ("NO_PROXY", ""),
+                    ("no_proxy", "example.com")
+                ]
+            ),
+            p_url
+        );
+    }
+
+    #[test]
+    fn outbound_builder_skips_resolution_only_when_proxy_really_applies() {
+        const KEYS: [&str; 8] = [
+            "HTTPS_PROXY",
+            "https_proxy",
+            "ALL_PROXY",
+            "all_proxy",
+            "NO_PROXY",
+            "no_proxy",
+            "REQUEST_METHOD",
+            ALLOW_PROXY_ENV,
+        ];
+        struct Restore(Vec<(&'static str, Option<String>)>);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                for (key, value) in self.0.drain(..) {
+                    unsafe {
+                        match value {
+                            Some(v) => env::set_var(key, v),
+                            None => env::remove_var(key),
+                        }
+                    }
+                }
+            }
+        }
+        let _lock = env_test_lock();
+        let _restore = Restore(KEYS.iter().map(|k| (*k, env::var(k).ok())).collect());
+        for key in KEYS {
+            unsafe {
+                env::remove_var(key);
+            }
+        }
+        let url = reqwest::Url::parse("https://pinned.example/x").expect("url");
+        static CALLS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let counting: &HostResolver = &|_, port| {
+            CALLS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(vec![std::net::SocketAddr::from(([93, 184, 216, 34], port))])
+        };
+        let calls = || CALLS.load(std::sync::atomic::Ordering::SeqCst);
+        let _ =
+            outbound_client_builder(&url, "t", counting, false, false).expect("default builder");
+        assert_eq!(calls(), 1, "default path resolves and pins");
+        // Opt-in but no proxy env: the full default path still runs.
+        let _ = outbound_client_builder(&url, "t", counting, false, true).expect("opt-in builder");
+        assert_eq!(calls(), 2, "opt-in without a proxy still resolves and pins");
+        // Opt-in with a proxy env: DNS check and pin are skipped.
+        unsafe {
+            env::set_var("HTTPS_PROXY", "http://proxy.invalid:3128");
+        }
+        let _ = outbound_client_builder(&url, "t", counting, false, true).expect("proxy builder");
+        assert_eq!(calls(), 2, "applicable proxy skips local DNS");
+        // Host excluded via NO_PROXY: back to the default path.
+        unsafe {
+            env::set_var("NO_PROXY", "pinned.example");
+        }
+        let _ =
+            outbound_client_builder(&url, "t", counting, false, true).expect("no_proxy builder");
+        assert_eq!(calls(), 3, "NO_PROXY host resolves and pins");
+        // Empty HTTPS_PROXY wins over lowercase https_proxy (reqwest would connect
+        // directly), so the full default path must run.
+        unsafe {
+            env::remove_var("NO_PROXY");
+            env::set_var("HTTPS_PROXY", "");
+            env::set_var("https_proxy", "http://proxy.invalid:3128");
+        }
+        let _ = outbound_client_builder(&url, "t", counting, false, true).expect("empty builder");
+        assert_eq!(calls(), 4, "empty HTTPS_PROXY means no proxy");
+        // CGI environments disable proxies.
+        unsafe {
+            env::set_var("HTTPS_PROXY", "http://proxy.invalid:3128");
+            env::set_var("REQUEST_METHOD", "GET");
+        }
+        let _ = outbound_client_builder(&url, "t", counting, false, true).expect("cgi builder");
+        assert_eq!(calls(), 5, "REQUEST_METHOD disables the proxy");
+    }
+
+    /// Restores `GREENTIC_FLOW_ALLOW_PROXY` on drop (even if the test panics).
+    struct AllowProxyGuard(Option<String>);
+    impl Drop for AllowProxyGuard {
+        fn drop(&mut self) {
+            unsafe {
+                match self.0.take() {
+                    Some(v) => env::set_var(ALLOW_PROXY_ENV, v),
+                    None => env::remove_var(ALLOW_PROXY_ENV),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn allow_proxy_env_requires_explicit_one() {
+        let _lock = env_test_lock();
+        let _restore = AllowProxyGuard(env::var(ALLOW_PROXY_ENV).ok());
+        unsafe {
+            env::remove_var(ALLOW_PROXY_ENV);
+        }
+        assert!(!allow_proxy_from_env());
+        assert_eq!(proxy_note(false), PROXY_IGNORED_NOTE);
+        unsafe {
+            env::set_var(ALLOW_PROXY_ENV, "0");
+        }
+        assert!(!allow_proxy_from_env());
+        unsafe {
+            env::set_var(ALLOW_PROXY_ENV, "1");
+        }
+        assert!(allow_proxy_from_env());
+        assert_eq!(proxy_note(false), "");
+    }
+
+    #[test]
+    fn resolve_error_mentions_ignored_proxy_and_opt_in() {
+        let _lock = env_test_lock();
+        let previous = env::var(ALLOW_PROXY_ENV).ok();
+        unsafe {
+            env::remove_var(ALLOW_PROXY_ENV);
+        }
+        let _restore = AllowProxyGuard(previous);
+        let url = reqwest::Url::parse("https://nodns.example/x").expect("url");
+        let failing: &HostResolver = &|_, _| Err(std::io::Error::other("no dns"));
+        let err = resolve_outbound_host(&url, "t", failing).expect_err("must fail");
+        let text = format!("{err:#}");
+        assert!(text.contains("GREENTIC_FLOW_ALLOW_PROXY=1"), "{text}");
+    }
+
+    #[test]
+    fn dns_budgets_are_bounded_by_their_http_timeouts() {
+        // DNS runs outside the HTTP `.timeout(..)`, so the worst case is the sum; the DNS
+        // share must never exceed the request timeout it is added to.
+        for budget in [CATALOG_BUDGET, ASSET_BUDGET] {
+            assert!(budget.dns <= budget.http, "{budget:?}");
+            assert_eq!(budget.worst_case(), budget.dns + budget.http);
+        }
+        // The catalog fetch is interactive and must stay much tighter than asset downloads.
+        assert!(CATALOG_BUDGET.worst_case() < ASSET_BUDGET.worst_case());
+    }
+
+    #[test]
+    fn outbound_host_resolution_rejects_private_answers_without_network() {
+        let url = reqwest::Url::parse("https://rebind.example/x").expect("url");
+        let private: &HostResolver =
+            &|_, port| Ok(vec![std::net::SocketAddr::from(([10, 0, 0, 5], port))]);
+        let err = resolve_outbound_host(&url, "t", private).expect_err("private rejected");
+        assert!(err.to_string().contains("disallowed"), "{err:#}");
+        let mixed: &HostResolver = &|_, port| {
+            Ok(vec![
+                std::net::SocketAddr::from(([93, 184, 216, 34], port)),
+                std::net::SocketAddr::from(([127, 0, 0, 1], port)),
+            ])
+        };
+        assert!(resolve_outbound_host(&url, "t", mixed).is_err());
+        let public: &HostResolver =
+            &|_, port| Ok(vec![std::net::SocketAddr::from(([93, 184, 216, 34], port))]);
+        assert_eq!(
+            resolve_outbound_host(&url, "t", public).expect("ok").len(),
+            1
+        );
+        let empty: &HostResolver = &|_, _| Ok(Vec::new());
+        assert!(resolve_outbound_host(&url, "t", empty).is_err());
+    }
+
+    #[test]
+    fn redirect_responses_are_not_treated_as_success() {
+        let url = reqwest::Url::parse("https://example.com/a").expect("url");
+        let err = reject_redirect_response(reqwest::StatusCode::FOUND, "asset", &url)
+            .expect_err("3xx rejected");
+        assert!(err.to_string().contains("redirect"), "{err:#}");
+        assert!(reject_redirect_response(reqwest::StatusCode::OK, "asset", &url).is_ok());
+    }
+
+    #[test]
+    fn save_does_not_overwrite_protected_answers_file() {
+        let pack = tempdir().expect("pack");
+        let answers = pack.path().join("answers.json");
+        fs::write(&answers, "{ broken").expect("broken answers");
+        let staged = tempdir().expect("staged");
+        fs::create_dir_all(staged.path().join("flows")).expect("flows");
+        let mut session = test_session(pack.path(), staged.path());
+        session.dirty = true;
+        session.actions.push(WizardPlanAction {
+            action: "add-flow".to_string(),
+            ..Default::default()
+        });
+        session.protected_answers_path = Some(answers.clone());
+        let mut out = Vec::new();
+        wizard_save_staged_changes(&mut session, &mut Cursor::new(""), &mut out)
+            .expect("save still succeeds");
+        assert_eq!(fs::read_to_string(&answers).expect("read"), "{ broken");
+        let rendered = String::from_utf8(out).expect("utf8");
+        assert!(rendered.contains("will not be overwritten"), "{rendered}");
+        assert!(!session.dirty);
+    }
+
+    #[test]
+    fn dry_run_accepts_add_flow_plan_like_a_real_run() {
+        let pack = tempdir().expect("pack");
+        fs::create_dir_all(pack.path().join("flows")).expect("flows");
+        let plan = WizardPlan::from_actions(&[WizardPlanAction {
+            action: "add-flow".to_string(),
+            flow: Some("flows/new.ygtc".to_string()),
+            flow_id: Some("new".to_string()),
+            flow_type: Some("messaging".to_string()),
+            ..Default::default()
+        }]);
+        let mut out = Vec::new();
+        execute_wizard_plan_dry_run(pack.path(), &plan, &mut out).expect("dry run ok");
+        assert!(
+            !pack.path().join("flows/new.ygtc").exists(),
+            "dry-run must not touch the real pack"
+        );
+        execute_wizard_plan(pack.path(), &plan).expect("real run ok");
+        assert!(pack.path().join("flows/new.ygtc").exists());
+    }
+
+    #[test]
+    fn dry_run_stages_plan_wasm_outside_standard_dirs() {
+        let pack = tempdir().expect("pack");
+        fs::create_dir_all(pack.path().join("dist")).expect("dist");
+        fs::write(pack.path().join("dist/x.wasm"), b"wasm").expect("wasm");
+        let staged = tempdir().expect("staged");
+        let plan = WizardPlan::from_actions(&[WizardPlanAction {
+            action: "add-step".to_string(),
+            component: Some("dist/x.wasm".to_string()),
+            ..Default::default()
+        }]);
+        stage_plan_local_wasms(pack.path(), staged.path(), &plan).expect("stage");
+        assert_eq!(
+            fs::read(staged.path().join("dist/x.wasm")).expect("read"),
+            b"wasm"
+        );
+    }
+
+    #[test]
+    fn dry_run_stages_plan_wasm_with_sha_fallback_and_delete_step() {
+        let pack = tempdir().expect("pack");
+        fs::create_dir_all(pack.path().join("dist")).expect("dist");
+        fs::write(pack.path().join("dist/comp.wasm"), b"fallback").expect("wasm");
+        let staged = tempdir().expect("staged");
+        let plan = WizardPlan::from_actions(&[WizardPlanAction {
+            action: "delete-step".to_string(),
+            component: Some("dist/comp-sha256:abc.wasm".to_string()),
+            ..Default::default()
+        }]);
+        stage_plan_local_wasms(pack.path(), staged.path(), &plan).expect("stage");
+        assert_eq!(
+            fs::read(staged.path().join("dist/comp.wasm")).expect("read"),
+            b"fallback"
+        );
+        let resolved =
+            resolve_plan_local_wasm(staged.path(), PathBuf::from("dist/comp-sha256:abc.wasm"))
+                .expect("resolve in staged");
+        assert!(resolved.ends_with("dist/comp.wasm"));
+    }
+
+    #[test]
+    fn stage_fingerprint_detects_sidecar_and_pack_yaml_edits() {
+        let staged = tempdir().expect("staged");
+        fs::create_dir_all(staged.path().join("flows")).expect("flows");
+        let before = wizard_stage_fingerprint(staged.path());
+        assert_eq!(before, wizard_stage_fingerprint(staged.path()));
+        fs::write(staged.path().join("flows/a.ygtc.resolve.json"), "{}").expect("sidecar");
+        let after_sidecar = wizard_stage_fingerprint(staged.path());
+        assert_ne!(before, after_sidecar);
+        fs::write(
+            staged.path().join("pack.yaml"),
+            "x: 1
+",
+        )
+        .expect("pack.yaml");
+        assert_ne!(after_sidecar, wizard_stage_fingerprint(staged.path()));
+    }
+
+    #[test]
+    fn flow_wizard_state_file_rejects_unsafe_ids_and_unparsable_flows() {
+        let dir = tempdir().expect("dir");
+        let evil = dir.path().join("evil.ygtc");
+        fs::write(
+            &evil,
+            "id: ../../../../escape
+type: messaging
+schema_version: 2
+nodes: {}
+",
+        )
+        .expect("evil flow");
+        assert!(flow_wizard_state_file(&evil).is_none());
+        let broken = dir.path().join("broken.ygtc");
+        fs::write(&broken, "::: [").expect("broken flow");
+        assert!(flow_wizard_state_file(&broken).is_none());
+        let ok = seed_flow(dir.path(), "ok.ygtc", "ok");
+        assert!(flow_wizard_state_file(&ok).is_some());
+    }
+
+    #[test]
+    fn private_ip_check_blocks_carrier_grade_nat() {
+        assert!(is_private_or_local_ip("100.64.0.1".parse().expect("ip")));
+        assert!(is_private_or_local_ip(
+            "100.127.255.254".parse().expect("ip")
+        ));
+        assert!(!is_private_or_local_ip("100.128.0.1".parse().expect("ip")));
+        assert!(!is_private_or_local_ip("8.8.8.8".parse().expect("ip")));
+    }
+
+    #[test]
+    fn http_body_limit_is_enforced() {
+        assert_eq!(
+            read_http_body_limited(Cursor::new(vec![1u8; 4]), 4).expect("fits"),
+            vec![1u8; 4]
+        );
+        assert!(read_http_body_limited(Cursor::new(vec![1u8; 5]), 4).is_err());
+    }
+
+    #[test]
+    fn online_contract_validation_reads_the_resolve_sidecar_not_the_flow() {
+        let dir = tempdir().expect("temp dir");
+        let flow_path = dir.path().join("flows/main.ygtc");
+        fs::create_dir_all(dir.path().join("flows")).expect("flows dir");
+        fs::write(
+            &flow_path,
+            r#"id: main
+type: messaging
+schema_version: 2
+start: step
+nodes:
+  step:
+    run:
+      config: {}
+    routing: out
+meta:
+  greentic:
+    components:
+      step:
+        describe_hash: abc
+        schema_hash: def
+        operation_id: run
+"#,
+        )
+        .expect("write flow");
+        let sidecar = sidecar_path_for_flow(&flow_path);
+        write_flow_resolve(
+            &sidecar,
+            &FlowResolveV1 {
+                schema_version: FLOW_RESOLVE_SCHEMA_VERSION,
+                flow: "main.ygtc".to_string(),
+                nodes: Default::default(),
+            },
+        )
+        .expect("write sidecar");
+
+        let diags = validate_contracts_for_flow(&flow_path, true).expect("validate");
+        let messages: Vec<_> = diags.iter().map(|d| d.message.as_str()).collect();
+        assert!(
+            messages.contains(&"missing sidecar entry for node"),
+            "sidecar must be found and parsed, got {messages:?}"
+        );
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::AddStepArgs;
     use super::AddStepMode;
@@ -8071,11 +10008,11 @@ mod tests {
             .unwrap_or(payload)
     }
 
-    fn env_test_lock() -> std::sync::MutexGuard<'static, ()> {
+    pub(crate) fn env_test_lock() -> std::sync::MutexGuard<'static, ()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
         LOCK.get_or_init(|| Mutex::new(()))
             .lock()
-            .expect("env test lock")
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     fn write_remote_asset_fixture(root: &Path, reference: &str) {
@@ -8900,6 +10837,7 @@ nodes: {}
             config: super::WizardRunConfig::default(),
             actions: Vec::new(),
             answers_output_path: None,
+            protected_answers_path: None,
         };
         super::sync_staged_pack_back(&mut session).expect("sync staged pack back");
 
@@ -9716,21 +11654,34 @@ nodes:
         }
     }
 
+    /// Restores `GREENTIC_FLOW_FREQUENT_COMPONENTS_URL` on drop (even if the test panics).
+    struct FrequentComponentsEnvGuard(Option<String>);
+    impl Drop for FrequentComponentsEnvGuard {
+        fn drop(&mut self) {
+            unsafe {
+                match self.0.take() {
+                    Some(v) => env::set_var("GREENTIC_FLOW_FREQUENT_COMPONENTS_URL", v),
+                    None => env::remove_var("GREENTIC_FLOW_FREQUENT_COMPONENTS_URL"),
+                }
+            }
+        }
+    }
+
+    /// Takes the env lock. Nested callers (already holding the lock, e.g. inside
+    /// `with_wizard_resolver_env`) must use `with_frequent_components_env_unlocked`: the
+    /// std mutex is not reentrant.
     fn with_frequent_components_env<F: FnOnce()>(location: &str, run: F) {
-        let previous = env::var("GREENTIC_FLOW_FREQUENT_COMPONENTS_URL").ok();
+        let _lock = env_test_lock();
+        with_frequent_components_env_unlocked(location, run);
+    }
+
+    fn with_frequent_components_env_unlocked<F: FnOnce()>(location: &str, run: F) {
+        let _restore =
+            FrequentComponentsEnvGuard(env::var("GREENTIC_FLOW_FREQUENT_COMPONENTS_URL").ok());
         unsafe {
             env::set_var("GREENTIC_FLOW_FREQUENT_COMPONENTS_URL", location);
         }
         run();
-        if let Some(value) = previous {
-            unsafe {
-                env::set_var("GREENTIC_FLOW_FREQUENT_COMPONENTS_URL", value);
-            }
-        } else {
-            unsafe {
-                env::remove_var("GREENTIC_FLOW_FREQUENT_COMPONENTS_URL");
-            }
-        }
     }
 
     fn write_frequent_components_fixture(path: &Path, component_ref: &str) {
@@ -10016,14 +11967,17 @@ nodes:
         .expect("add step");
 
         with_wizard_resolver_env(fixture_registry_resolver(), || {
-            with_frequent_components_env(catalog_path.to_str().expect("fixture path"), || {
-                let input = Cursor::new("2\n1\n4\n1\n1\n1\n1\n7\n\n0\n0\n0\n");
-                let mut output = Vec::new();
-                super::run_wizard_menu_with_io(dir.path(), input, &mut output)
-                    .expect("wizard menu update step with frequent component");
-                let rendered = String::from_utf8(output).expect("utf8");
-                assert!(rendered.contains("Fixture Widget"));
-            });
+            with_frequent_components_env_unlocked(
+                catalog_path.to_str().expect("fixture path"),
+                || {
+                    let input = Cursor::new("2\n1\n4\n1\n1\n1\n1\n7\n\n0\n0\n0\n");
+                    let mut output = Vec::new();
+                    super::run_wizard_menu_with_io(dir.path(), input, &mut output)
+                        .expect("wizard menu update step with frequent component");
+                    let rendered = String::from_utf8(output).expect("utf8");
+                    assert!(rendered.contains("Fixture Widget"));
+                },
+            );
         });
         let doc = load_ygtc_from_path(&flow_path).expect("load flow");
         let flow_ir = FlowIr::from_doc(doc).expect("flow ir");
@@ -10208,7 +12162,8 @@ nodes:
 
     #[test]
     fn embedded_frequent_components_catalog_uses_current_package_version() {
-        let catalog = super::embedded_frequent_components_catalog();
+        let catalog =
+            super::embedded_frequent_components_catalog().expect("embedded catalog must parse");
         assert_eq!(
             catalog.catalog_version.as_deref(),
             Some(env!("CARGO_PKG_VERSION"))
@@ -11107,42 +13062,51 @@ nodes:
         let config = extract_config_payload(&node.payload);
         assert_eq!(config.get("foo").and_then(|v| v.as_str()), Some("updated"));
 
-        let remove_err = handle_delete_step(
-            DeleteStepArgs {
-                component_id: None,
-                flow_path: flow_path.clone(),
-                step: Some("widget".to_string()),
-                wizard_mode: Some(WizardModeArg::Remove),
-                answers: None,
-                answers_file: None,
-                answers_dir: None,
-                overwrite_answers: false,
-                reask: false,
-                locale: None,
-                interactive: false,
-                component: Some("oci://acme/widget:1".to_string()),
-                local_wasm: None,
-                distributor_url: None,
-                auth_token: None,
-                tenant: None,
-                env: None,
-                pack: None,
-                component_version: None,
-                abi_version: None,
-                resolver: Some(resolver),
-                strategy: "splice".to_string(),
-                multi_pred: "error".to_string(),
-                assume_yes: true,
-                write: true,
-            },
-            OutputFormat::Human,
-            false,
-        )
-        .expect_err("remove mode should require explicit confirmation");
+        let remove_args = DeleteStepArgs {
+            component_id: None,
+            flow_path: flow_path.clone(),
+            step: Some("widget".to_string()),
+            wizard_mode: Some(WizardModeArg::Remove),
+            answers: None,
+            answers_file: None,
+            answers_dir: None,
+            overwrite_answers: false,
+            reask: false,
+            locale: None,
+            interactive: false,
+            component: Some("oci://acme/widget:1".to_string()),
+            local_wasm: None,
+            distributor_url: None,
+            auth_token: None,
+            tenant: None,
+            env: None,
+            pack: None,
+            component_version: None,
+            abi_version: None,
+            resolver: Some(resolver),
+            strategy: "splice".to_string(),
+            multi_pred: "error".to_string(),
+            assume_yes: false,
+            write: true,
+        };
+        let remove_err = handle_delete_step(remove_args.clone(), OutputFormat::Human, false)
+            .expect_err("remove mode should require explicit confirmation");
         assert!(
             remove_err.to_string().contains("Type REMOVE to confirm"),
             "unexpected remove confirmation error: {remove_err}"
         );
+
+        // --assume-yes bypasses the confirmation (dry run: nothing is written).
+        handle_delete_step(
+            DeleteStepArgs {
+                assume_yes: true,
+                write: false,
+                ..remove_args
+            },
+            OutputFormat::Human,
+            false,
+        )
+        .expect("remove mode with --assume-yes should pass confirmation");
 
         handle_delete_step(
             DeleteStepArgs {
@@ -11322,6 +13286,94 @@ nodes:
         );
     }
 
+    /// `update-step --dry-run` re-pinning to a remote ref whose digest is not cached must
+    /// succeed (the real run would fetch it), without fetching and without writing the
+    /// distribution cache, the sidecar or the flow.
+    #[cfg(debug_assertions)]
+    #[test]
+    fn update_step_dry_run_repin_with_empty_cache_succeeds_without_writes() {
+        use crate::ComponentSourceRefV1;
+        use crate::audit_wizard_tests::{CacheDirGuard, DigestEnvGuard};
+        use crate::pinned_digest_not_cached;
+        let _lock = env_test_lock();
+        let digest = format!("sha256:{}", "b".repeat(64));
+        let _digest_guard = DigestEnvGuard::set(&digest);
+        let cache = tempdir().expect("cache");
+        let _cache_guard = CacheDirGuard::set(cache.path());
+        let work = tempdir().expect("work");
+        let flow_path = work.path().join("flow.ygtc");
+        let flow_text = "id: main\ntype: messaging\nschema_version: 2\nnodes:\n  n:\n    op:\n      foo: user\n    routing: out\n";
+        fs::write(&flow_path, flow_text).expect("flow");
+        let sidecar_path = work.path().join("flow.ygtc.resolve.json");
+        let sidecar_text = format!(
+            r#"{{"schema_version":1,"flow":"flow.ygtc","nodes":{{"n":{{"source":{{"kind":"oci","ref":"oci://ghcr.io/acme/comp:1","digest":"sha256:{}"}},"mode":"pinned"}}}}}}"#,
+            "a".repeat(64)
+        );
+        fs::write(&sidecar_path, &sidecar_text).expect("sidecar");
+
+        let args = UpdateStepArgs {
+            component_id: None,
+            flow_path: flow_path.clone(),
+            step: Some("n".to_string()),
+            mode: "default".to_string(),
+            wizard_mode: None,
+            operation: None,
+            routing_out: false,
+            routing_reply: false,
+            routing_next: None,
+            routing_multi_to: None,
+            routing_json: None,
+            answers: None,
+            answers_file: None,
+            answers_dir: None,
+            overwrite_answers: false,
+            reask: false,
+            locale: None,
+            non_interactive: true,
+            interactive: false,
+            component: Some("oci://ghcr.io/acme/comp:2".to_string()),
+            local_wasm: None,
+            distributor_url: None,
+            auth_token: None,
+            tenant: None,
+            env: None,
+            pack: None,
+            component_version: None,
+            abi_version: None,
+            resolver: None,
+            dry_run: true,
+            write: false,
+            allow_contract_change: false,
+            in_map: None,
+            out_map: None,
+            err_map: None,
+            routing_inline_json: None,
+        };
+        handle_update_step(args, SchemaMode::Permissive, OutputFormat::Human, false)
+            .expect("dry-run re-pin must not require the artifact to be cached");
+
+        assert_eq!(fs::read_to_string(&flow_path).expect("flow"), flow_text);
+        assert_eq!(
+            fs::read_to_string(&sidecar_path).expect("sidecar"),
+            sidecar_text
+        );
+        assert_eq!(
+            fs::read_dir(cache.path()).expect("cache dir").count(),
+            0,
+            "dry-run must not write the distribution cache"
+        );
+        // The helper reports the missing pinned artifact and a cached one is untouched.
+        let uncached = ComponentSourceRefV1::Oci {
+            r#ref: "oci://ghcr.io/acme/comp:2".to_string(),
+            digest: Some(digest),
+        };
+        assert!(pinned_digest_not_cached(&uncached));
+        assert!(!pinned_digest_not_cached(&ComponentSourceRefV1::Local {
+            path: "x.wasm".to_string(),
+            digest: None,
+        }));
+    }
+
     #[test]
     fn add_step_dry_run_does_not_write() {
         let dir = tempdir().expect("temp dir");
@@ -11425,10 +13477,38 @@ fn write_flow_file(path: &Path, content: &str, force: bool, backup: bool) -> Res
         fs::copy(path, &bak)
             .with_context(|| format!("failed to write backup {}", bak.display()))?;
     }
-    let tmp_path = path.with_extension("tmp");
-    fs::write(&tmp_path, content)
-        .with_context(|| format!("failed to write {}", tmp_path.display()))?;
-    fs::rename(&tmp_path, path).with_context(|| format!("failed to replace {}", path.display()))?;
+    // Unique sibling temp name (never `with_extension`, which could clobber an unrelated
+    // user file such as `flow.tmp`); `create_new` refuses to reuse an existing path.
+    static TMP_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let file_name = path
+        .file_name()
+        .ok_or_else(|| anyhow!("flow path {} has no file name", path.display()))?
+        .to_string_lossy()
+        .into_owned();
+    let tmp_path = path.with_file_name(format!(
+        ".{file_name}.{}.{}.tmp",
+        std::process::id(),
+        TMP_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
+    let write_result = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&tmp_path)
+        .and_then(|mut file| {
+            file.write_all(content.as_bytes())?;
+            file.sync_all()
+        });
+    if let Err(err) = write_result {
+        // On AlreadyExists the path belongs to someone else; never remove it.
+        if err.kind() != std::io::ErrorKind::AlreadyExists {
+            let _ = fs::remove_file(&tmp_path);
+        }
+        return Err(err).with_context(|| format!("failed to write {}", tmp_path.display()));
+    }
+    if let Err(err) = fs::rename(&tmp_path, path) {
+        let _ = fs::remove_file(&tmp_path);
+        return Err(err).with_context(|| format!("failed to replace {}", path.display()));
+    }
     Ok(())
 }
 
@@ -11784,9 +13864,14 @@ fn warn_unknown_keys(answers: &QuestionAnswers, questions: &[Question]) {
     }
 }
 
-fn confirm_remove_mode(interactive: bool) -> Result<()> {
+fn confirm_remove_mode(interactive: bool, assume_yes: bool) -> Result<()> {
+    if assume_yes {
+        return Ok(());
+    }
     if !interactive {
-        anyhow::bail!("remove mode requires interactive confirmation: Type REMOVE to confirm");
+        anyhow::bail!(
+            "remove mode requires interactive confirmation: Type REMOVE to confirm (or pass --assume-yes)"
+        );
     }
     let mut stdout = io::stdout().lock();
     write!(stdout, "Type REMOVE to confirm: ").context("write confirmation prompt")?;
@@ -12163,8 +14248,13 @@ fn handle_add_step_with_qa_io(
     mut captured_answers: Option<&mut serde_json::Map<String, serde_json::Value>>,
 ) -> Result<()> {
     let (routing_value, require_placeholder) = build_routing_value(&args)?;
-    let (local_wasm_for_flow, pack_component_rel) =
-        maybe_vendor_local_wasm_for_pack(&args.flow_path, args.local_wasm.as_ref())?;
+    // --dry-run / --validate-only must not touch the filesystem (no vendoring, no asset copies).
+    let persist_side_effects = !(args.dry_run || args.validate_only);
+    let (local_wasm_for_flow, pack_component_rel) = if persist_side_effects {
+        maybe_vendor_local_wasm_for_pack(&args.flow_path, args.local_wasm.as_ref())?
+    } else {
+        (args.local_wasm.clone(), None)
+    };
     let component_identity = args
         .component_id
         .clone()
@@ -12182,6 +14272,7 @@ fn handle_add_step_with_qa_io(
         let (sidecar_path, mut sidecar) = ensure_sidecar(&args.flow_path)?;
         let doc = load_ygtc_from_path(&args.flow_path)?;
         let flow_ir = FlowIr::from_doc(doc)?;
+        validate_storage_segment("flow id", &flow_ir.id)?;
         let wizard_mode_arg = args.wizard_mode.unwrap_or(WizardModeArg::Default);
         let deprecation_diagnostic = None;
         let wizard_mode = wizard_mode_arg.to_mode();
@@ -12269,13 +14360,15 @@ fn handle_add_step_with_qa_io(
                 captured_answers.clear();
                 captured_answers.extend(answers.clone());
             }
-            materialize_remote_asset_answers(
-                &spec.qa_spec_cbor,
-                &mut answers,
-                &args.flow_path,
-                args.interactive,
-                qa_io,
-            )?;
+            if persist_side_effects {
+                materialize_remote_asset_answers(
+                    &spec.qa_spec_cbor,
+                    &mut answers,
+                    &args.flow_path,
+                    args.interactive,
+                    qa_io,
+                )?;
+            }
 
             let answers_cbor = wizard_ops::answers_to_cbor(&answers)?;
             let current_config = wizard_ops::empty_cbor_map();
@@ -12410,6 +14503,7 @@ fn handle_add_step_with_qa_io(
         }
 
         if !args.dry_run {
+            validate_storage_segment("node id", &inserted_id)?;
             if !wizard_fallback {
                 let mut sorted = std::collections::BTreeMap::new();
                 for (key, value) in &answers {
@@ -12492,6 +14586,7 @@ fn handle_add_step_with_qa_io(
         local_wasm_for_flow.as_ref(),
         args.component_ref.as_ref(),
         args.pin,
+        persist_side_effects,
         &args.flow_path,
     )?;
     let doc = load_ygtc_from_path(&args.flow_path)?;
@@ -12725,7 +14820,15 @@ fn handle_update_step_with_qa_io(
         .unwrap_or_else(|| "component".to_string());
     let step_id = resolve_step_id(args.step.clone(), args.component_id.as_ref(), &flow_ir.meta)?;
     let wizard_requested = args.component_id.is_some() || args.wizard_mode.is_some();
+    // Same vendoring behaviour as add-step, but never during --dry-run.
+    let (local_wasm_for_flow, pack_component_rel) = if args.dry_run {
+        (args.local_wasm.clone(), None)
+    } else {
+        maybe_vendor_local_wasm_for_pack(&args.flow_path, args.local_wasm.as_ref())?
+    };
     if wizard_requested {
+        validate_storage_segment("flow id", &flow_ir.id)?;
+        validate_storage_segment("node id", &step_id)?;
         let (sidecar_path, mut sidecar) = ensure_sidecar(&args.flow_path)?;
         let wizard_mode_arg = args.wizard_mode.unwrap_or(WizardModeArg::Update);
         let deprecation_diagnostic = None;
@@ -12733,7 +14836,7 @@ fn handle_update_step_with_qa_io(
         let resolved = resolve_wizard_component(
             &args.flow_path,
             wizard_mode,
-            args.local_wasm.as_ref(),
+            local_wasm_for_flow.as_ref(),
             args.component.as_ref(),
             args.component_id.as_ref(),
             args.resolver.as_ref(),
@@ -12792,13 +14895,15 @@ fn handle_update_step_with_qa_io(
             captured_answers.clear();
             captured_answers.extend(answers.clone());
         }
-        materialize_remote_asset_answers(
-            &spec.qa_spec_cbor,
-            &mut answers,
-            &args.flow_path,
-            args.interactive,
-            qa_io,
-        )?;
+        if !args.dry_run {
+            materialize_remote_asset_answers(
+                &spec.qa_spec_cbor,
+                &mut answers,
+                &args.flow_path,
+                args.interactive,
+                qa_io,
+            )?;
+        }
 
         let answers_cbor = wizard_ops::answers_to_cbor(&answers)?;
         let mut node = flow_ir
@@ -12873,7 +14978,8 @@ fn handle_update_step_with_qa_io(
                 &step_id,
                 wizard_mode.as_str(),
                 &sorted,
-                should_overwrite_wizard_answers(args.overwrite_answers, args.interactive),
+                // Updating an existing step always replaces its previous answers.
+                true,
             )?;
             wizard_state::update_wizard_state(
                 &args.flow_path,
@@ -12891,6 +14997,16 @@ fn handle_update_step_with_qa_io(
                 },
             );
             write_sidecar(&sidecar_path, &sidecar)?;
+            if let Some(wasm_rel) = pack_component_rel.as_ref()
+                && let Ok(pack_dir) = infer_pack_root_from_flow_path(&args.flow_path)
+            {
+                upsert_pack_component_entry(
+                    &pack_dir,
+                    &component_identity,
+                    wasm_rel,
+                    &flow_ir.kind,
+                )?;
+            }
             if let Err(err) =
                 write_flow_resolve_summary_for_node(&args.flow_path, &step_id, &sidecar)
                     .with_context(|| {
@@ -12922,9 +15038,21 @@ fn handle_update_step_with_qa_io(
         }
         return Ok(());
     }
-    let (_sidecar_path, sidecar) = ensure_sidecar(&args.flow_path)?;
-    if let Some(component) = args.component.as_deref() {
-        validate_component_ref(component)?;
+    let (sidecar_path, mut sidecar) = ensure_sidecar(&args.flow_path)?;
+    // An explicit --component/--local-wasm replaces the node's sidecar source (validated by
+    // resolve_component_source_inputs) instead of being silently ignored.
+    let mut sidecar_changed = false;
+    if (args.component.is_some() || local_wasm_for_flow.is_some())
+        && let Some(entry) = resolve_update_step_source(
+            sidecar.nodes.get(&step_id),
+            local_wasm_for_flow.as_ref(),
+            args.component.as_ref(),
+            !args.dry_run,
+            &args.flow_path,
+        )?
+    {
+        sidecar.nodes.insert(step_id.clone(), entry);
+        sidecar_changed = true;
     }
     let sidecar_entry = sidecar.nodes.get(&step_id).ok_or_else(|| {
         anyhow::anyhow!(
@@ -12932,7 +15060,8 @@ fn handle_update_step_with_qa_io(
             step_id
         )
     })?;
-    let component_payload = load_component_payload(&sidecar_entry.source, &args.flow_path)?;
+    let component_payload =
+        load_component_payload_for_update(&sidecar_entry.source, &args.flow_path, args.dry_run)?;
     let mut node = flow_ir
         .nodes
         .get(&step_id)
@@ -12940,7 +15069,8 @@ fn handle_update_step_with_qa_io(
         .ok_or_else(|| anyhow::anyhow!("step '{}' not found", step_id))?;
     let mut merged_payload = node.payload.clone();
     if let Some(component_defaults) = component_payload {
-        merged_payload = merge_payload(merged_payload, Some(component_defaults));
+        // Manifest defaults only fill keys the user has not set; they never overwrite.
+        merged_payload = merge_missing_defaults(merged_payload, Some(component_defaults));
     }
     let mut answers = parse_answers_map(args.answers.as_deref(), args.answers_file.as_deref())?;
     let mut new_operation = args
@@ -13073,6 +15203,19 @@ fn handle_update_step_with_qa_io(
     load_ygtc_from_str(&yaml)?; // schema validation
     if !args.dry_run {
         write_flow_file(&args.flow_path, &yaml, true, backup)?;
+        if sidecar_changed {
+            write_sidecar(&sidecar_path, &sidecar)?;
+            if let Some(wasm_rel) = pack_component_rel.as_ref()
+                && let Ok(pack_dir) = infer_pack_root_from_flow_path(&args.flow_path)
+            {
+                upsert_pack_component_entry(
+                    &pack_dir,
+                    &component_identity,
+                    wasm_rel,
+                    &flow_ir.kind,
+                )?;
+            }
+        }
         if let Err(err) = write_flow_resolve_summary_for_node(&args.flow_path, &step_id, &sidecar)
             .with_context(|| format!("update resolve summary for {}", args.flow_path.display()))
         {
@@ -13116,12 +15259,15 @@ fn handle_delete_step(args: DeleteStepArgs, format: OutputFormat, backup: bool) 
     let target = resolve_step_id(args.step.clone(), args.component_id.as_ref(), &flow_ir.meta)?;
     let wizard_requested = args.component_id.is_some() || args.wizard_mode.is_some();
     let mut deprecation_diagnostic: Option<serde_json::Value> = None;
+    let base_dir = answers_base_dir(&args.flow_path, args.answers_dir.as_deref());
     if wizard_requested {
+        validate_storage_segment("flow id", &flow_ir.id)?;
+        validate_storage_segment("node id", &target)?;
         let wizard_mode_arg = args.wizard_mode.unwrap_or(WizardModeArg::Remove);
         deprecation_diagnostic = None;
         let wizard_mode = wizard_mode_arg.to_mode();
         if matches!(wizard_mode, wizard_ops::WizardMode::Remove) {
-            confirm_remove_mode(args.interactive)?;
+            confirm_remove_mode(args.interactive, args.assume_yes)?;
         }
         let resolved = resolve_wizard_component(
             &args.flow_path,
@@ -13153,7 +15299,6 @@ fn handle_delete_step(args: DeleteStepArgs, format: OutputFormat, backup: bool) 
         let (mut catalog, locale) = default_i18n_catalog(args.locale.as_deref());
         merge_component_i18n_catalog(&mut catalog, &locale, &args.flow_path, &resolved.source);
 
-        let base_dir = answers_base_dir(&args.flow_path, args.answers_dir.as_deref());
         let fallback_path = if !args.reask && args.answers.is_none() && args.answers_file.is_none()
         {
             wizard_answers_json_path_compat(&base_dir, &flow_ir.id, &target, wizard_mode)
@@ -13185,41 +15330,22 @@ fn handle_delete_step(args: DeleteStepArgs, format: OutputFormat, backup: bool) 
             .get(&target)
             .cloned()
             .ok_or_else(|| anyhow::anyhow!("step '{}' not found", target))?;
-        let current_config = wizard_ops::json_to_cbor(&target_node.payload)?;
-        if let Some(fixture) = resolved.fixture.as_ref() {
-            let _ = fixture.apply_answers_cbor.clone();
+        let config_cbor = if let Some(fixture) = resolved.fixture.as_ref() {
+            fixture.apply_answers_cbor.clone()
         } else {
-            let _ = wizard_ops::apply_wizard_answers(
+            let current_config = wizard_ops::json_to_cbor(&target_node.payload)?;
+            wizard_ops::apply_wizard_answers(
                 &resolved.wasm_bytes,
                 spec.abi,
                 wizard_mode,
                 &current_config,
                 &answers_cbor,
             )
-            .map_err(|err| wrap_wizard_error(err, &component_identity, "apply-answers", None))?;
-        }
-        flow_meta::clear_component_entry(&mut flow_ir.meta, &target);
-        if args.write {
-            let mut sorted = std::collections::BTreeMap::new();
-            for (key, value) in &answers {
-                sorted.insert(key.clone(), value.clone());
-            }
-            let _paths = answers::write_answers(
-                &base_dir,
-                &flow_ir.id,
-                &target,
-                wizard_mode.as_str(),
-                &sorted,
-                should_overwrite_wizard_answers(args.overwrite_answers, args.interactive),
-            )?;
-            wizard_state::update_wizard_state(
-                &args.flow_path,
-                &flow_ir.id,
-                &target,
-                wizard_mode.as_str(),
-                &locale,
-            )?;
-        }
+            .map_err(|err| wrap_wizard_error(err, &component_identity, "apply-answers", None))?
+        };
+        // The component may report a failed remove via an error payload; do not delete then.
+        let config_json = wizard_ops::cbor_to_json(&config_cbor)?;
+        ensure_wizard_config_not_error(&component_identity, wizard_mode, &config_json)?;
     }
 
     let target_node = flow_ir
@@ -13230,6 +15356,10 @@ fn handle_delete_step(args: DeleteStepArgs, format: OutputFormat, backup: bool) 
 
     let mut predecessors = Vec::new();
     for (id, node) in &flow_ir.nodes {
+        // A self-loop on the target disappears with the target; it is not a predecessor.
+        if id == &target {
+            continue;
+        }
         if node
             .routing
             .iter()
@@ -13247,24 +15377,29 @@ fn handle_delete_step(args: DeleteStepArgs, format: OutputFormat, backup: bool) 
         );
     }
 
+    // Routes the target forwards to, minus any self-loop back into the target.
+    let forwarded_routes: Vec<_> = target_node
+        .routing
+        .iter()
+        .filter(|r| r.to.as_deref() != Some(target.as_str()))
+        .cloned()
+        .collect();
+
     if args.strategy == "splice" {
+        let terminal_target = forwarded_routes.is_empty()
+            || forwarded_routes
+                .iter()
+                .all(|r| r.to.is_none() && (r.out || r.reply));
         for pred_id in predecessors {
             if let Some(pred) = flow_ir.nodes.get_mut(&pred_id) {
                 let mut new_routes = Vec::new();
                 for route in &pred.routing {
                     if route.to.as_deref() == Some(target.as_str()) {
-                        if target_node.routing.is_empty()
-                            || target_node
-                                .routing
-                                .iter()
-                                .all(|r| r.to.is_none() && (r.out || r.reply))
-                        {
-                            // drop this edge; terminal target
-                            continue;
-                        } else {
-                            new_routes.extend(target_node.routing.clone());
-                            continue;
+                        if !terminal_target {
+                            new_routes.extend(forwarded_routes.clone());
                         }
+                        // terminal target: drop this edge
+                        continue;
                     }
                     new_routes.push(route.clone());
                 }
@@ -13273,29 +15408,63 @@ fn handle_delete_step(args: DeleteStepArgs, format: OutputFormat, backup: bool) 
         }
     }
 
-    flow_ir.nodes.swap_remove(&target);
+    // shift_remove keeps the remaining nodes in their original order.
+    flow_ir.nodes.shift_remove(&target);
     flow_meta::clear_component_entry(&mut flow_ir.meta, &target);
-    // Fix entrypoint if it pointed to deleted node.
-    let mut new_entrypoints = flow_ir.entrypoints.clone();
-    for (_, v) in new_entrypoints.iter_mut() {
-        if v == &target {
-            if let Some(first) = flow_ir.nodes.keys().next() {
-                *v = first.clone();
-            } else {
-                *v = String::new();
+    // Entrypoints / start that pointed at the deleted node move to its successor.
+    let successor = forwarded_routes
+        .iter()
+        .filter_map(|r| r.to.as_deref())
+        .find(|to| flow_ir.nodes.contains_key(*to))
+        .map(str::to_string);
+    let replacement = match successor {
+        Some(next) => Some(next),
+        None => {
+            let fallback = flow_ir.nodes.keys().next().cloned();
+            let entrypoint_affected = flow_ir.start.as_deref() == Some(target.as_str())
+                || flow_ir.entrypoints.values().any(|v| v == &target);
+            if entrypoint_affected && let Some(fallback) = fallback.as_ref() {
+                eprintln!(
+                    "warning: deleted step '{target}' had no successor; entrypoints now point at '{fallback}'"
+                );
             }
+            fallback
+        }
+    };
+    for v in flow_ir.entrypoints.values_mut() {
+        if v == &target {
+            *v = replacement.clone().unwrap_or_default();
         }
     }
-    flow_ir.entrypoints = new_entrypoints;
+    if flow_ir.start.as_deref() == Some(target.as_str()) {
+        flow_ir.start = replacement.clone();
+    }
 
     let doc_out = flow_ir.to_doc()?;
     let yaml = serialize_doc(&doc_out)?;
     load_ygtc_from_str(&yaml)?;
     if args.write {
+        // Everything above is computed and validated; persist only now.
         write_flow_file(&args.flow_path, &yaml, true, backup)?;
         sidecar.nodes.remove(&target);
         write_sidecar(&sidecar_path, &sidecar)?;
-        let _ = wizard_state::remove_wizard_step(&args.flow_path, &flow_ir.id, &target);
+        // The non-wizard path has not validated the ids yet; never build state paths from
+        // an unsafe flow id or node id.
+        match validate_storage_segment("flow id", &flow_ir.id)
+            .and_then(|()| validate_storage_segment("node id", &target))
+        {
+            Ok(()) => {
+                if let Err(err) =
+                    wizard_state::remove_wizard_step(&args.flow_path, &flow_ir.id, &target)
+                {
+                    eprintln!("warning: failed to update wizard state for '{target}': {err}");
+                }
+            }
+            Err(err) => {
+                eprintln!("warning: skipped wizard state cleanup for '{target}': {err}");
+            }
+        }
+        remove_node_answers(&base_dir, &flow_ir.id, &target);
         if let Err(err) = remove_flow_resolve_summary_node(&args.flow_path, &target)
             .with_context(|| format!("update resolve summary for {}", args.flow_path.display()))
         {
@@ -13325,6 +15494,32 @@ fn handle_delete_step(args: DeleteStepArgs, format: OutputFormat, backup: bool) 
     Ok(())
 }
 
+/// Best-effort removal of the answers artifacts of a deleted node. Skipped when the ids are not
+/// plain path segments so a crafted flow can never make us touch paths outside `base_dir`.
+fn remove_node_answers(base_dir: &Path, flow_id: &str, node_id: &str) {
+    if validate_storage_segment("flow id", flow_id).is_err()
+        || validate_storage_segment("node id", node_id).is_err()
+    {
+        return;
+    }
+    let mut node_dir: Option<PathBuf> = None;
+    for mode in ["default", "setup", "update", "remove"] {
+        let paths = answers::answers_paths(base_dir, flow_id, node_id, mode);
+        node_dir = paths.json.parent().map(Path::to_path_buf);
+        for file in [&paths.json, &paths.cbor] {
+            if let Err(err) = fs::remove_file(file)
+                && err.kind() != io::ErrorKind::NotFound
+            {
+                eprintln!("warning: failed to remove {}: {err}", file.display());
+            }
+        }
+    }
+    if let Some(dir) = node_dir {
+        // Only succeeds when empty, so unrelated user files are preserved.
+        let _ = fs::remove_dir(&dir);
+    }
+}
+
 fn handle_bind_component(args: BindComponentArgs) -> Result<()> {
     if !args.flow_path.exists() {
         anyhow::bail!(
@@ -13342,6 +15537,7 @@ fn handle_bind_component(args: BindComponentArgs) -> Result<()> {
         args.local_wasm.as_ref(),
         args.component_ref.as_ref(),
         args.pin,
+        args.write,
         &args.flow_path,
     )?;
     sidecar
@@ -13478,6 +15674,42 @@ fn merge_payload(base: serde_json::Value, overlay: Option<serde_json::Value>) ->
     }
 }
 
+/// Fills keys from `defaults` that are missing in `base`; existing (user) values always win.
+fn merge_missing_defaults(
+    base: serde_json::Value,
+    defaults: Option<serde_json::Value>,
+) -> serde_json::Value {
+    let Some(defaults) = defaults else {
+        return base;
+    };
+    match (base, defaults) {
+        (serde_json::Value::Object(mut b), serde_json::Value::Object(d)) => {
+            for (k, v) in d {
+                b.entry(k).or_insert(v);
+            }
+            serde_json::Value::Object(b)
+        }
+        (base, _) => base,
+    }
+}
+
+/// Flow ids and node ids come from user-controlled YAML and are used as path segments for
+/// wizard answers and wizard state; they must be exactly one normal path component.
+fn validate_storage_segment(label: &str, value: &str) -> Result<()> {
+    let mut components = Path::new(value).components();
+    let ok = matches!(
+        (components.next(), components.next()),
+        (Some(std::path::Component::Normal(part)), None) if part == OsStr::new(value)
+    ) && !value.contains(['/', '\\', '\0']);
+    if !ok {
+        anyhow::bail!(
+            "{label} '{}' is not safe to use as a path segment (must be a single plain name without separators or '..')",
+            sanitize_for_log(value)
+        );
+    }
+    Ok(())
+}
+
 fn parse_routing_arg(raw: &str) -> Result<Vec<greentic_flow::flow_ir::Route>> {
     if raw == "out" {
         return Ok(vec![greentic_flow::flow_ir::Route {
@@ -13514,12 +15746,13 @@ fn ensure_sidecar(flow_path: &Path) -> Result<(PathBuf, FlowResolveV1)> {
         .file_name()
         .map(|s| s.to_string_lossy().to_string())
         .unwrap_or_else(|| "flow.ygtc".to_string());
+    // Read-only: callers persist the sidecar with `write_sidecar` once their changes are
+    // validated, so --dry-run / --validate-only never touch the filesystem.
     let doc = FlowResolveV1 {
         schema_version: FLOW_RESOLVE_SCHEMA_VERSION,
         flow: flow_name,
         nodes: Default::default(),
     };
-    write_sidecar(&sidecar_path, &doc)?;
     Ok((sidecar_path, doc))
 }
 
@@ -13742,24 +15975,177 @@ fn compute_local_digest(path: &Path) -> Result<String> {
     Ok(digest)
 }
 
-fn resolve_remote_digest(reference: &str) -> Result<String> {
+/// Computes the sidecar entry for `update-step --component/--local-wasm`. Replacing the
+/// source never silently drops an existing pin: a pinned local source is re-pinned against
+/// the new wasm, a pinned remote entry is kept as-is (`None`) when the reference is
+/// unchanged, and any other pinned -> different source is re-pinned.
+fn resolve_update_step_source(
+    old_entry: Option<&NodeResolveV1>,
+    local_wasm: Option<&PathBuf>,
+    component: Option<&String>,
+    fetch_artifact: bool,
+    flow_path: &Path,
+) -> Result<Option<NodeResolveV1>> {
+    resolve_update_step_source_with(
+        old_entry,
+        local_wasm,
+        component,
+        fetch_artifact,
+        flow_path,
+        &REAL_REMOTE_OPS,
+    )
+}
+
+/// Same as [`resolve_update_step_source`] with an injectable remote fetcher (tests).
+fn resolve_update_step_source_with(
+    old_entry: Option<&NodeResolveV1>,
+    local_wasm: Option<&PathBuf>,
+    component: Option<&String>,
+    fetch_artifact: bool,
+    flow_path: &Path,
+    ops: &RemoteOps<'_>,
+) -> Result<Option<NodeResolveV1>> {
+    let old_pinned = old_entry.is_some_and(|entry| {
+        matches!(entry.mode, Some(ResolveModeV1::Pinned))
+            || matches!(
+                &entry.source,
+                ComponentSourceRefV1::Local {
+                    digest: Some(_),
+                    ..
+                } | ComponentSourceRefV1::Oci {
+                    digest: Some(_),
+                    ..
+                } | ComponentSourceRefV1::Repo {
+                    digest: Some(_),
+                    ..
+                } | ComponentSourceRefV1::Store {
+                    digest: Some(_),
+                    ..
+                }
+            )
+    });
+    let repin_local = old_pinned
+        && local_wasm.is_some()
+        && matches!(
+            old_entry.map(|entry| &entry.source),
+            Some(ComponentSourceRefV1::Local { .. })
+        );
+    let (source, mode) = resolve_component_source_inputs_with(
+        local_wasm,
+        component,
+        repin_local,
+        fetch_artifact,
+        flow_path,
+        ops,
+    )?;
+    let remote_ref = |source: &ComponentSourceRefV1| match source {
+        ComponentSourceRefV1::Oci { r#ref, .. }
+        | ComponentSourceRefV1::Repo { r#ref, .. }
+        | ComponentSourceRefV1::Store { r#ref, .. } => Some(r#ref.clone()),
+        _ => None,
+    };
+    if let (Some(entry), true, true) = (old_entry, old_pinned, component.is_some()) {
+        let old_ref = remote_ref(&entry.source);
+        if old_ref.is_some()
+            && old_ref == remote_ref(&source)
+            && std::mem::discriminant(&entry.source) == std::mem::discriminant(&source)
+        {
+            return Ok(None);
+        }
+    }
+    if old_pinned && mode.is_none() {
+        let (source, mode) = resolve_component_source_inputs_with(
+            local_wasm,
+            component,
+            true,
+            fetch_artifact,
+            flow_path,
+            ops,
+        )?;
+        return Ok(Some(NodeResolveV1 { source, mode }));
+    }
+    Ok(Some(NodeResolveV1 { source, mode }))
+}
+
+/// Fetches `reference` into the distribution cache, returning `(cache path, digest)`.
+type RemoteFetcher<'a> = dyn Fn(&str) -> Result<(PathBuf, String)> + 'a;
+
+/// Resolves `reference` to its digest without downloading it.
+type RemoteDigestResolver<'a> = dyn Fn(&str) -> Result<String> + 'a;
+
+/// Injectable remote operations for pinning: previews use `resolve_digest`, persisting
+/// paths use `fetch`.
+struct RemoteOps<'a> {
+    fetch: &'a RemoteFetcher<'a>,
+    resolve_digest: &'a RemoteDigestResolver<'a>,
+}
+
+const REAL_REMOTE_OPS: RemoteOps<'static> = RemoteOps {
+    fetch: &fetch_component_for_pin,
+    resolve_digest: &resolve_remote_digest_only,
+};
+
+fn fetch_component_for_pin(reference: &str) -> Result<(PathBuf, String)> {
+    let client = DistClient::new(Default::default());
+    ensure_cached_component(&client, reference)
+}
+
+/// Pins `reference`: fetches it into the cache and returns the digest of the descriptor
+/// that was actually fetched, so a pinned entry can always be reopened from the cache
+/// (`open_cached(digest)`) even when the reference was never pulled before.
+fn resolve_remote_digest_with(reference: &str, fetch: &RemoteFetcher) -> Result<String> {
+    if let Some(mock) = test_digest_override() {
+        return Ok(mock);
+    }
+    let (_path, digest) = fetch(reference)
+        .map_err(|e| anyhow::anyhow!("failed to resolve reference {reference}: {e}"))?;
+    Ok(digest)
+}
+
+/// Test-only digest override; never honoured in release builds so that an
+/// environment variable cannot forge pinned digests in production.
+fn test_digest_override() -> Option<String> {
+    #[cfg(debug_assertions)]
     if let Ok(mock) = std::env::var("GREENTIC_FLOW_TEST_DIGEST")
         && !mock.is_empty()
     {
+        return Some(mock);
+    }
+    None
+}
+
+/// Resolves `reference` to its digest without downloading the artifact or touching the
+/// distribution cache. Used by previews (`--dry-run`, `--validate-only`, `bind-component`
+/// without `--write`), which must not have side effects.
+fn resolve_remote_digest_via(
+    reference: &str,
+    resolve_digest: &RemoteDigestResolver<'_>,
+) -> Result<String> {
+    if let Some(mock) = test_digest_override() {
         return Ok(mock);
     }
+    resolve_digest(reference)
+}
+
+fn resolve_remote_digest_only(reference: &str) -> Result<String> {
     let rt = tokio::runtime::Runtime::new().context("create tokio runtime")?;
     let client = DistClient::new(Default::default());
-    let descriptor = client
+    let source = client
         .parse_source(reference)
         .map_err(|e| anyhow::anyhow!("failed to resolve reference {reference}: {e}"))?;
-    let resolved = rt
-        .block_on(client.resolve(descriptor, ResolvePolicy))
+    let descriptor = rt
+        .block_on(client.resolve(source, ResolvePolicy))
         .map_err(|e| anyhow::anyhow!("failed to resolve reference {reference}: {e}"))?;
-    Ok(resolved.digest)
+    Ok(descriptor.digest)
 }
 
 fn ensure_cached_component_path(client: &DistClient, reference: &str) -> Result<PathBuf> {
+    ensure_cached_component(client, reference).map(|(path, _digest)| path)
+}
+
+/// Resolves and fetches `reference` once, returning the cache path together with the
+/// digest of the descriptor that was actually fetched (avoids a second, racy resolve).
+fn ensure_cached_component(client: &DistClient, reference: &str) -> Result<(PathBuf, String)> {
     let rt = tokio::runtime::Runtime::new().context("create tokio runtime")?;
     let source = client
         .parse_source(reference)
@@ -13770,9 +16156,10 @@ fn ensure_cached_component_path(client: &DistClient, reference: &str) -> Result<
     let resolved = rt
         .block_on(client.fetch(&descriptor, CachePolicy))
         .map_err(|e| anyhow::anyhow!("resolve component {}: {e}", reference))?;
-    resolved
+    let cache_path = resolved
         .cache_path
-        .ok_or_else(|| anyhow::anyhow!("resolved component {} without cache path", reference))
+        .ok_or_else(|| anyhow::anyhow!("resolved component {} without cache path", reference))?;
+    Ok((cache_path, descriptor.digest.clone()))
 }
 
 fn distribution_cache_root() -> PathBuf {
@@ -13861,7 +16248,26 @@ fn resolve_component_source_inputs(
     local_wasm: Option<&PathBuf>,
     component_ref: Option<&String>,
     pin: bool,
+    fetch_artifact: bool,
     flow_path: &Path,
+) -> Result<(ComponentSourceRefV1, Option<ResolveModeV1>)> {
+    resolve_component_source_inputs_with(
+        local_wasm,
+        component_ref,
+        pin,
+        fetch_artifact,
+        flow_path,
+        &REAL_REMOTE_OPS,
+    )
+}
+
+fn resolve_component_source_inputs_with(
+    local_wasm: Option<&PathBuf>,
+    component_ref: Option<&String>,
+    pin: bool,
+    fetch_artifact: bool,
+    flow_path: &Path,
+    ops: &RemoteOps<'_>,
 ) -> Result<(ComponentSourceRefV1, Option<ResolveModeV1>)> {
     if let Some(local) = local_wasm {
         let (abs_path, uri_path) = normalize_local_wasm_path(local, flow_path)?;
@@ -13880,8 +16286,12 @@ fn resolve_component_source_inputs(
 
     if let Some(reference) = component_ref {
         validate_component_ref(reference)?;
-        let digest = if pin {
-            Some(resolve_remote_digest(reference)?)
+        // `fetch_artifact` is set only on paths that persist the sidecar: they need the
+        // artifact in the cache so the pinned digest can be reopened. Previews only resolve.
+        let digest = if pin && fetch_artifact {
+            Some(resolve_remote_digest_with(reference, ops.fetch)?)
+        } else if pin {
+            Some(resolve_remote_digest_via(reference, ops.resolve_digest)?)
         } else {
             None
         };
@@ -14090,20 +16500,13 @@ fn resolve_ref_to_bytes(reference: &str, resolver: Option<&String>) -> Result<Re
         return resolve_fixture_bytes(reference, Path::new(root));
     }
 
-    let rt = tokio::runtime::Runtime::new().context("create tokio runtime")?;
     let client = DistClient::new(Default::default());
-    let path = ensure_cached_component_path(&client, reference)
-        .map_err(|e| anyhow::anyhow!("resolve reference {reference}: {e}"))?;
-    let source = client
-        .parse_source(reference)
-        .map_err(|e| anyhow::anyhow!("resolve reference {reference}: {e}"))?;
-    let descriptor = rt
-        .block_on(client.resolve(source, ResolvePolicy))
+    let (path, digest) = ensure_cached_component(&client, reference)
         .map_err(|e| anyhow::anyhow!("resolve reference {reference}: {e}"))?;
     let bytes = fs::read(&path).with_context(|| format!("read {}", path.display()))?;
     Ok(ResolvedRefBytes {
         bytes,
-        digest: Some(descriptor.digest),
+        digest: Some(digest),
     })
 }
 
@@ -14405,11 +16808,12 @@ fn resolve_component_manifest_path(
             } else {
                 ensure_cached_component_path(&client, r#ref)
             };
-            let mut candidate = cached
+            let cached_candidate = cached
                 .ok()
-                .and_then(|artifact| artifact.parent().map(|p| p.join("component.manifest.json")))
-                .unwrap_or_else(|| PathBuf::from("component.manifest.json"));
-            if candidate.exists() {
+                .and_then(|artifact| artifact.parent().map(|p| p.join("component.manifest.json")));
+            if let Some(candidate) = cached_candidate
+                && candidate.exists()
+            {
                 return Ok(candidate);
             }
             let resolved_ref = if let Some(d) = digest {
@@ -14423,10 +16827,11 @@ fn resolve_component_manifest_path(
             };
             let path = ensure_cached_component_path(&client, &resolved_ref)
                 .map_err(|e| anyhow::anyhow!("resolve component {}: {e}", resolved_ref))?;
-            if let Some(parent) = path.parent() {
-                candidate = parent.join("component.manifest.json");
-            }
-            candidate
+            path.parent()
+                .map(|p| p.join("component.manifest.json"))
+                .ok_or_else(|| {
+                    anyhow::anyhow!("cached component path {} has no parent", path.display())
+                })?
         }
         ComponentSourceRefV1::Repo { r#ref, digest }
         | ComponentSourceRefV1::Store { r#ref, digest, .. } => {
@@ -14449,7 +16854,9 @@ fn resolve_component_manifest_path(
             artifact
                 .parent()
                 .map(|p| p.join("component.manifest.json"))
-                .unwrap_or_else(|| PathBuf::from("component.manifest.json"))
+                .ok_or_else(|| {
+                    anyhow::anyhow!("cached component path {} has no parent", artifact.display())
+                })?
         }
         ComponentSourceRefV1::Ext { r#ref, .. } => {
             anyhow::bail!(
@@ -14466,6 +16873,44 @@ fn resolve_component_manifest_path(
         );
     }
     Ok(manifest_path)
+}
+
+/// True when `source` is a remote entry pinned to a digest that is not in the local
+/// distribution cache (e.g. a dry-run re-pin that only resolved the digest).
+fn pinned_digest_not_cached(source: &ComponentSourceRefV1) -> bool {
+    match source {
+        ComponentSourceRefV1::Oci {
+            digest: Some(digest),
+            ..
+        }
+        | ComponentSourceRefV1::Repo {
+            digest: Some(digest),
+            ..
+        }
+        | ComponentSourceRefV1::Store {
+            digest: Some(digest),
+            ..
+        } => DistClient::new(Default::default())
+            .open_cached(digest)
+            .is_err(),
+        _ => false,
+    }
+}
+
+/// `load_component_payload` for `update-step`. A dry-run re-pin only resolves the digest
+/// (it must not fetch or write the cache), so the pinned artifact may legitimately be
+/// absent: skip manifest defaults with a warning instead of failing where the real run
+/// would succeed.
+fn load_component_payload_for_update(
+    source: &ComponentSourceRefV1,
+    flow_path: &Path,
+    dry_run: bool,
+) -> Result<Option<serde_json::Value>> {
+    if dry_run && pinned_digest_not_cached(source) {
+        eprintln!("warning: dry-run: pinned artifact not cached; manifest defaults not applied");
+        return Ok(None);
+    }
+    load_component_payload(source, flow_path)
 }
 
 fn load_component_payload(
@@ -14499,7 +16944,9 @@ fn load_component_payload(
             artifact
                 .parent()
                 .map(|p| p.join("component.manifest.json"))
-                .unwrap_or_else(|| PathBuf::from("component.manifest.json"))
+                .ok_or_else(|| {
+                    anyhow::anyhow!("cached component path {} has no parent", artifact.display())
+                })?
         }
         // ext:// manifest is resolved by packc at pack-build time; no payload to load here.
         ComponentSourceRefV1::Ext { .. } => return Ok(None),
