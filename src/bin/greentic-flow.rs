@@ -622,7 +622,7 @@ fn hex_to_bytes(hex: &str) -> Result<Vec<u8>> {
     name = "greentic-flow",
     about = "Flow scaffolding helpers",
     version,
-    after_help = "Environment:\n  GREENTIC_FLOW_ALLOW_PROXY=1  Let remote asset/catalog fetches use a proxy from the environment\n                               (HTTPS_PROXY/https_proxy, then ALL_PROXY/all_proxy; HTTP_PROXY is not\n                               used because fetches are https-only; the first variable that is set\n                               wins, empty means none; NO_PROXY is honoured). By default the proxy\n                               environment is ignored so DNS answers can be validated and pinned.\n                               When a proxy really applies to the host, the private-address DNS check\n                               and DNS pinning are both skipped (left to the proxy). Without an\n                               applicable proxy the default checks still run."
+    after_help = "Environment:\n  GREENTIC_FLOW_ALLOW_PROXY=1  Let remote asset/catalog fetches use a proxy from the environment\n                               (HTTPS_PROXY/https_proxy, then ALL_PROXY/all_proxy; HTTP_PROXY is\n                               not used because fetches are https-only). Within HTTPS_PROXY/\n                               https_proxy (and likewise ALL_PROXY/all_proxy) the first set\n                               variable wins; an empty or unusable HTTPS value falls back to\n                               ALL_PROXY. http/https URLs only, SOCKS is ignored. NO_PROXY is\n                               honoured, including IP, IPv6 and CIDR entries.\n                               By default the proxy environment is ignored so DNS answers can be\n                               validated and pinned. When a proxy really applies to the host, the\n                               private-address DNS check and DNS pinning are both skipped (left\n                               to the proxy). Without an applicable proxy the default checks\n                               still run."
 )]
 struct Cli {
     /// Enable permissive schema handling (default: strict).
@@ -3835,12 +3835,12 @@ const PROXY_ENV_KEYS: [&str; 9] = [
 ];
 
 /// First variable in `keys` that is *set* wins, even when empty (an empty value means
-/// "no proxy", it does not fall through to the next variable). Mirrors hyper-util.
+/// "no proxy", it does not fall through to the next variable).
 fn first_set_env(keys: &[&str], env: &dyn Fn(&str) -> Option<String>) -> Option<String> {
     keys.iter().find_map(|key| env(key))
 }
 
-/// Parses a proxy env value like hyper-util: schemeless means `http`, only `http`/`https`
+/// Parses a proxy env value (hyper-util compatible): schemeless means `http`, only `http`/`https`
 /// are usable here (SOCKS is not compiled into this build, so it is "unsupported" and never
 /// counted as an applicable proxy), and a host is required.
 fn parse_proxy_url(value: &str) -> Option<reqwest::Url> {
@@ -3860,11 +3860,20 @@ fn parse_proxy_url(value: &str) -> Option<reqwest::Url> {
     Some(url)
 }
 
-/// `NO_PROXY` matching (case-insensitive): `*`, exact host, or domain suffix, with an
-/// optional leading `.`/`*.`; trailing dots on entry and host are ignored; an entry
-/// `host:port` only matches that port.
+/// `NO_PROXY` matching (case-insensitive): `*`, exact host, or domain suffix with an optional
+/// leading `.`/`*.`; trailing dots on entry and host are ignored; an entry `host:port` only
+/// matches that port; when the target host is an IP literal (IPv6 brackets are stripped)
+/// entries match as an exact IP or a CIDR block (`10.0.0.0/8`, `2001:db8::/32`) and never as
+/// a domain suffix. hyper-util also understands IP/CIDR entries; this matcher differs by also
+/// honouring ports, `*.` and trailing dots, bracketed `[v6]` entries, and by letting `*`
+/// match IP hosts too.
 fn no_proxy_matches(list: &str, host: &str, port: u16) -> bool {
-    let host = host.trim_end_matches('.').to_ascii_lowercase();
+    let host = host
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .trim_end_matches('.')
+        .to_ascii_lowercase();
+    let host_ip = host.parse::<std::net::IpAddr>().ok();
     list.split(',').any(|raw| {
         let entry = raw.trim().to_ascii_lowercase();
         if entry == "*" {
@@ -3874,6 +3883,11 @@ fn no_proxy_matches(list: &str, host: &str, port: u16) -> bool {
         if entry_port.is_some_and(|p| p != port) {
             return false;
         }
+        if let Some(ip) = host_ip {
+            // `split_no_proxy_port` already removed exactly one bracket pair from valid
+            // `[v6]` entries; anything else (e.g. `[v6]]`) must not match.
+            return ip_matches_no_proxy_entry(ip, name);
+        }
         let name = name
             .trim_start_matches("*.")
             .trim_start_matches('.')
@@ -3882,11 +3896,42 @@ fn no_proxy_matches(list: &str, host: &str, port: u16) -> bool {
     })
 }
 
+/// Whether `ip` equals the IP entry or lies inside the CIDR entry. Non-IP entries never match.
+fn ip_matches_no_proxy_entry(ip: std::net::IpAddr, entry: &str) -> bool {
+    use std::net::IpAddr;
+    let Some((net, prefix)) = entry.split_once('/') else {
+        return entry.parse::<IpAddr>().is_ok_and(|e| e == ip);
+    };
+    let (Ok(net), Ok(prefix)) = (net.parse::<IpAddr>(), prefix.parse::<u32>()) else {
+        return false;
+    };
+    match (net, ip) {
+        (IpAddr::V4(net), IpAddr::V4(ip)) if prefix <= 32 => {
+            let mask = u32::MAX.checked_shl(32 - prefix).unwrap_or(0);
+            u32::from(net) & mask == u32::from(ip) & mask
+        }
+        (IpAddr::V6(net), IpAddr::V6(ip)) if prefix <= 128 => {
+            let mask = u128::MAX.checked_shl(128 - prefix).unwrap_or(0);
+            u128::from(net) & mask == u128::from(ip) & mask
+        }
+        _ => false,
+    }
+}
+
 /// Splits `host:port` / `[v6]:port`; a bare IPv6 (several colons, no brackets) has no port.
 fn split_no_proxy_port(entry: &str) -> (&str, Option<u16>) {
     if let Some(rest) = entry.strip_prefix('[') {
         if let Some((inner, tail)) = rest.split_once(']') {
-            return (inner, tail.strip_prefix(':').and_then(|p| p.parse().ok()));
+            if tail.is_empty() {
+                return (inner, None);
+            }
+            // Anything after `]` other than `:<port>` (e.g. `/32`, garbage) makes the entry
+            // unusable: keep it whole so it matches nothing instead of silently turning into
+            // an exact-IP entry.
+            return match tail.strip_prefix(':').and_then(|p| p.parse().ok()) {
+                Some(port) => (inner, Some(port)),
+                None => (entry, None),
+            };
         }
         return (entry, None);
     }
@@ -3901,7 +3946,8 @@ fn split_no_proxy_port(entry: &str) -> (&str, Option<u16>) {
 
 /// The single source of truth for outbound proxying of an https request to `host:port`:
 /// returns the proxy URL to use, or `None` for a direct connection. Semantics follow
-/// hyper-util (what reqwest would use): `REQUEST_METHOD` set disables proxies; the first
+/// hyper-util (what reqwest would use) for proxy selection, with the `NO_PROXY` matcher
+/// extended (see `no_proxy_matches`): `REQUEST_METHOD` set disables proxies; the first
 /// *set* of `HTTPS_PROXY`/`https_proxy` is used (empty means none); if that is unusable
 /// the first set of `ALL_PROXY`/`all_proxy` is tried; `NO_PROXY` exclusions win.
 fn select_proxy(
@@ -9479,7 +9525,7 @@ mod audit_wizard_tests {
     }
 
     #[test]
-    fn select_proxy_follows_hyper_util_semantics() {
+    fn select_proxy_semantics_with_extended_no_proxy() {
         let pick = |host: &str, port: u16, pairs: &[(&str, &str)]| -> Option<String> {
             select_proxy(host, port, &|key| {
                 pairs
@@ -9524,6 +9570,11 @@ mod audit_wizard_tests {
                 &[("HTTPS_PROXY", "http://a:1"), ("ALL_PROXY", "http://b:2")]
             ),
             Some("http://a:1/".to_string())
+        );
+        // An empty HTTPS_PROXY only blocks its own pair; ALL_PROXY still applies.
+        assert_eq!(
+            pick("example.com", 443, &[("HTTPS_PROXY", ""), ("ALL_PROXY", p)]),
+            p_url
         );
         // Unsupported scheme in HTTPS_PROXY falls through to ALL_PROXY; alone it is no proxy.
         assert_eq!(
@@ -9598,6 +9649,55 @@ mod audit_wizard_tests {
             ),
             p_url
         );
+    }
+
+    #[test]
+    fn no_proxy_matches_ip_literals_and_cidr_via_real_urls() {
+        let p = "http://p:3128";
+        let pick = |url: &str, no: &str| -> Option<String> {
+            let url = reqwest::Url::parse(url).expect("url");
+            select_proxy_for_url(&url, &|key| match key {
+                "HTTPS_PROXY" => Some(p.to_string()),
+                "NO_PROXY" => Some(no.to_string()),
+                _ => None,
+            })
+            .map(|u| u.to_string())
+        };
+        let proxied = Some("http://p:3128/".to_string());
+        let v6 = "https://[2001:db8::1]/x";
+        for (url, no) in [
+            (v6, "2001:db8::1"),
+            (v6, "[2001:db8::1]"),
+            (v6, "2001:db8::/32"),
+            (v6, "[2001:db8::1]:443"),
+            (v6, "x.org, 2001:db8::/32"),
+            ("https://10.1.2.3/x", "10.0.0.0/8"),
+            ("https://10.1.2.3/x", "10.1.2.3"),
+            ("https://10.1.2.3/x", "0.0.0.0/0"),
+        ] {
+            assert_eq!(pick(url, no), None, "{url} vs {no}");
+        }
+        for (url, no) in [
+            (v6, "2001:db9::/32"),
+            (v6, "2001:db8::2"),
+            (v6, "[2001:db8::1]:8443"),
+            (v6, "10.0.0.0/8"),
+            (v6, "2001:db8::/129"),
+            // Bracketed entry with an unusable tail must not degrade to an exact-IP match.
+            (v6, "[2001:db8::1]garbage"),
+            (v6, "[2001:db8::1]/32"),
+            (v6, "[2001:db8::1]/128"),
+            (v6, "[2001:db8::1]:abc"),
+            (v6, "[2001:db8::1]]"),
+            (v6, "[[2001:db8::1]"),
+            ("https://10.1.2.3/x", "11.0.0.0/8"),
+            ("https://10.1.2.3/x", "10.0.0.0/33"),
+            ("https://10.1.2.3/x", "2001:db8::/32"),
+            ("https://10.1.2.3/x", ".1.2.3"),
+            ("https://10.1.2.3/x", "2.3"),
+        ] {
+            assert_eq!(pick(url, no), proxied, "{url} vs {no}");
+        }
     }
 
     #[test]
@@ -13374,6 +13474,132 @@ nodes:
         }));
     }
 
+    /// Shared fixture for the dry-run update-step cache tests: a flow whose sidecar pins
+    /// node `n` to an uncached digest `a...`; returns (workdir, flow path, args).
+    #[cfg(debug_assertions)]
+    fn dry_run_update_fixture(
+        mode: &str,
+        component: Option<&str>,
+    ) -> (tempfile::TempDir, UpdateStepArgs) {
+        let work = tempdir().expect("work");
+        let flow_path = work.path().join("flow.ygtc");
+        fs::write(
+            &flow_path,
+            "id: main\ntype: messaging\nschema_version: 2\nnodes:\n  n:\n    op:\n      foo: user\n    routing: out\n",
+        )
+        .expect("flow");
+        let sidecar_text = format!(
+            r#"{{"schema_version":1,"flow":"flow.ygtc","nodes":{{"n":{{"source":{{"kind":"oci","ref":"oci://ghcr.io/acme/comp:1","digest":"sha256:{}"}},"mode":"pinned"}}}}}}"#,
+            "a".repeat(64)
+        );
+        fs::write(work.path().join("flow.ygtc.resolve.json"), sidecar_text).expect("sidecar");
+        let args = UpdateStepArgs {
+            component_id: None,
+            flow_path,
+            step: Some("n".to_string()),
+            mode: mode.to_string(),
+            wizard_mode: None,
+            operation: None,
+            routing_out: false,
+            routing_reply: false,
+            routing_next: None,
+            routing_multi_to: None,
+            routing_json: None,
+            answers: None,
+            answers_file: None,
+            answers_dir: None,
+            overwrite_answers: false,
+            reask: false,
+            locale: None,
+            non_interactive: true,
+            interactive: false,
+            component: component.map(str::to_string),
+            local_wasm: None,
+            distributor_url: None,
+            auth_token: None,
+            tenant: None,
+            env: None,
+            pack: None,
+            component_version: None,
+            abi_version: None,
+            resolver: None,
+            dry_run: true,
+            write: false,
+            allow_contract_change: false,
+            in_map: None,
+            out_map: None,
+            err_map: None,
+            routing_inline_json: None,
+        };
+        (work, args)
+    }
+
+    /// Without a re-pin in this invocation, an uncached pinned digest fails the real run,
+    /// so the dry-run must fail too instead of skipping.
+    #[cfg(debug_assertions)]
+    #[test]
+    fn update_step_dry_run_without_repin_errors_on_uncached_pin() {
+        use crate::audit_wizard_tests::{CacheDirGuard, DigestEnvGuard};
+        let _lock = env_test_lock();
+        let _digest_guard = DigestEnvGuard::set(&format!("sha256:{}", "b".repeat(64)));
+        let cache = tempdir().expect("cache");
+        let _cache_guard = CacheDirGuard::set(cache.path());
+        let (_work, args) = dry_run_update_fixture("default", None);
+        let err = handle_update_step(args, SchemaMode::Permissive, OutputFormat::Human, false)
+            .expect_err("un-repinned uncached pin must fail in dry-run");
+        assert!(format!("{err:#}").contains("not cached"), "{err:#}");
+    }
+
+    /// Config mode + dry-run re-pin to an uncached artifact: explicit, honest error.
+    #[cfg(debug_assertions)]
+    #[test]
+    fn update_step_dry_run_repin_config_mode_uncached_bails_explicitly() {
+        use crate::audit_wizard_tests::{CacheDirGuard, DigestEnvGuard};
+        let _lock = env_test_lock();
+        let _digest_guard = DigestEnvGuard::set(&format!("sha256:{}", "b".repeat(64)));
+        let cache = tempdir().expect("cache");
+        let _cache_guard = CacheDirGuard::set(cache.path());
+        let (_work, args) = dry_run_update_fixture("config", Some("oci://ghcr.io/acme/comp:2"));
+        let err = handle_update_step(args, SchemaMode::Permissive, OutputFormat::Human, false)
+            .expect_err("config dry-run re-pin with uncached artifact must bail");
+        assert!(
+            format!("{err:#}").contains(
+                "dry-run cannot evaluate a config flow for a re-pinned component whose artifact is not cached; re-run without --dry-run or pull it first"
+            ),
+            "{err:#}"
+        );
+    }
+
+    /// The warning text for default mode is asserted on the helper that emits it; the
+    /// re-pin path itself is covered by the success test above.
+    #[cfg(debug_assertions)]
+    #[test]
+    fn update_step_payload_loader_skips_only_for_dry_run_repin() {
+        use crate::audit_wizard_tests::{CacheDirGuard, DigestEnvGuard};
+        let _lock = env_test_lock();
+        let _digest_guard = DigestEnvGuard::set(&format!("sha256:{}", "b".repeat(64)));
+        let cache = tempdir().expect("cache");
+        let _cache_guard = CacheDirGuard::set(cache.path());
+        use crate::{
+            ComponentSourceRefV1, DRY_RUN_UNCACHED_WARNING, load_component_payload_for_update,
+        };
+        assert!(
+            DRY_RUN_UNCACHED_WARNING
+                .ends_with("manifest defaults, questions and schema validation skipped")
+        );
+        let source = ComponentSourceRefV1::Oci {
+            r#ref: "oci://ghcr.io/acme/comp:2".to_string(),
+            digest: Some(format!("sha256:{}", "b".repeat(64))),
+        };
+        let flow = Path::new("flow.ygtc");
+        assert!(
+            load_component_payload_for_update(&source, flow, true)
+                .expect("dry-run re-pin skips")
+                .is_none()
+        );
+        assert!(load_component_payload_for_update(&source, flow, false).is_err());
+    }
+
     #[test]
     fn add_step_dry_run_does_not_write() {
         let dir = tempdir().expect("temp dir");
@@ -15060,8 +15286,22 @@ fn handle_update_step_with_qa_io(
             step_id
         )
     })?;
-    let component_payload =
-        load_component_payload_for_update(&sidecar_entry.source, &args.flow_path, args.dry_run)?;
+    // A dry-run re-pin only resolves the digest; the real run would fetch the artifact. In
+    // config mode the flow cannot be evaluated without the manifest, so say so explicitly.
+    if args.dry_run
+        && sidecar_changed
+        && args.mode == "config"
+        && pinned_digest_not_cached(&sidecar_entry.source)
+    {
+        anyhow::bail!(
+            "dry-run cannot evaluate a config flow for a re-pinned component whose artifact is not cached; re-run without --dry-run or pull it first"
+        );
+    }
+    let component_payload = load_component_payload_for_update(
+        &sidecar_entry.source,
+        &args.flow_path,
+        args.dry_run && sidecar_changed,
+    )?;
     let mut node = flow_ir
         .nodes
         .get(&step_id)
@@ -16897,17 +17137,20 @@ fn pinned_digest_not_cached(source: &ComponentSourceRefV1) -> bool {
     }
 }
 
-/// `load_component_payload` for `update-step`. A dry-run re-pin only resolves the digest
-/// (it must not fetch or write the cache), so the pinned artifact may legitimately be
-/// absent: skip manifest defaults with a warning instead of failing where the real run
-/// would succeed.
+const DRY_RUN_UNCACHED_WARNING: &str = "warning: dry-run: pinned artifact not cached; manifest defaults, questions and schema validation skipped";
+
+/// `load_component_payload` for `update-step`. A dry-run *re-pin* (`dry_run_repin`: the
+/// sidecar entry was replaced in this invocation) only resolves the digest (it must not
+/// fetch or write the cache), so the pinned artifact may legitimately be absent: skip
+/// manifest defaults with a warning instead of failing where the real run would succeed.
+/// An existing, un-repinned pin that is not cached fails in the real run too, so it errors.
 fn load_component_payload_for_update(
     source: &ComponentSourceRefV1,
     flow_path: &Path,
-    dry_run: bool,
+    dry_run_repin: bool,
 ) -> Result<Option<serde_json::Value>> {
-    if dry_run && pinned_digest_not_cached(source) {
-        eprintln!("warning: dry-run: pinned artifact not cached; manifest defaults not applied");
+    if dry_run_repin && pinned_digest_not_cached(source) {
+        eprintln!("{DRY_RUN_UNCACHED_WARNING}");
         return Ok(None);
     }
     load_component_payload(source, flow_path)
