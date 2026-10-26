@@ -12,7 +12,18 @@ pub struct CacheConfig {
 
 impl CacheConfig {
     pub fn disk_root(&self, engine_profile_id: &str) -> PathBuf {
-        self.root.join("v1").join(engine_profile_id)
+        // Profile ids look like `sha256:<hex>`; `:` is not a valid path character on Windows.
+        let dir: String = engine_profile_id
+            .chars()
+            .map(|ch| {
+                if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.') {
+                    ch
+                } else {
+                    '_'
+                }
+            })
+            .collect();
+        self.root.join("v1").join(dir)
     }
 }
 

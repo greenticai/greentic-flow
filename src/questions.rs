@@ -344,7 +344,9 @@ fn parse_bool(raw: &str) -> Result<bool> {
 }
 
 fn parse_choice(raw: &str, question: &Question) -> Result<Value> {
-    if let Ok(idx) = raw.parse::<usize>()
+    let literal = question.choices.iter().any(|c| display_value(c) == raw);
+    if !literal
+        && let Ok(idx) = raw.parse::<usize>()
         && idx >= 1
         && idx <= question.choices.len()
     {
@@ -946,5 +948,20 @@ mod tests {
                 .unwrap()
                 .contains("invalid integer")
         );
+    }
+
+    #[test]
+    fn parse_choice_prefers_literal_over_index() {
+        let question = Question {
+            id: "c".to_string(),
+            prompt: "C?".to_string(),
+            kind: QuestionKind::Choice,
+            required: true,
+            default: None,
+            choices: vec![json!("2"), json!("1")],
+            show_if: None,
+            writes_to: None,
+        };
+        assert_eq!(parse_choice("2", &question).expect("literal"), json!("2"));
     }
 }

@@ -37,6 +37,10 @@ pub struct NodeIr {
     pub err_map: Option<Value>,
     pub routing: Vec<Route>,
     pub telemetry: Option<Value>,
+    /// Node keys the IR does not model (`conversational`, `retry`, `timeout`, `when`,
+    /// `annotations`, `meta`, and the `operation` sibling of a component-keyed node).
+    /// Carried through verbatim so edits do not drop them.
+    pub extra: IndexMap<String, Value>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -56,8 +60,32 @@ pub struct Route {
     pub on_message: bool,
 }
 
+/// Reserved node keys that are not modelled by [`NodeIr`] fields and must survive a round-trip.
+const PRESERVED_NODE_KEYS: &[&str] = &[
+    "operation",
+    "conversational",
+    "retry",
+    "timeout",
+    "when",
+    "annotations",
+    "meta",
+];
+
 fn is_false(value: &bool) -> bool {
     !*value
+}
+
+impl NodeIr {
+    /// Change the node's operation key. A carried-over `operation` sibling belongs to the
+    /// previous component key, so it is dropped when the operation actually changes
+    /// (otherwise `to_doc` would emit two conflicting operations).
+    pub fn set_operation(&mut self, operation: impl Into<String>) {
+        let operation = operation.into();
+        if operation != self.operation {
+            self.extra.shift_remove("operation");
+        }
+        self.operation = operation;
+    }
 }
 
 impl FlowIr {
@@ -76,6 +104,18 @@ impl FlowIr {
             let in_map = node_doc.raw.get("in_map").cloned();
             let out_map = node_doc.raw.get("out_map").cloned();
             let err_map = node_doc.raw.get("err_map").cloned();
+            // The `component.exec` + `operation` form is normalised to the v2
+            // `<operation>: <payload>` shorthand on edit, so its sibling `operation`
+            // is not carried as an extra key.
+            let has_component_exec = node_doc.raw.contains_key("component.exec");
+            let extra: IndexMap<String, Value> = node_doc
+                .raw
+                .iter()
+                .filter(|(k, _)| PRESERVED_NODE_KEYS.contains(&k.as_str()))
+                // For the `component.exec` form the sibling `operation` is the IR operation.
+                .filter(|(k, _)| !(has_component_exec && k.as_str() == "operation"))
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect();
             nodes.insert(
                 id.clone(),
                 NodeIr {
@@ -91,6 +131,7 @@ impl FlowIr {
                         .telemetry
                         .clone()
                         .and_then(|t| serde_json::to_value(t).ok()),
+                    extra,
                 },
             );
         }
@@ -116,6 +157,9 @@ impl FlowIr {
         for (id, node_ir) in &self.nodes {
             let mut raw = IndexMap::new();
             raw.insert(node_ir.operation.clone(), node_ir.payload.clone());
+            for (k, v) in &node_ir.extra {
+                raw.entry(k.clone()).or_insert_with(|| v.clone());
+            }
             if !node_ir.output.is_object()
                 || !node_ir
                     .output

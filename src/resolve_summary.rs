@@ -79,6 +79,17 @@ pub fn build_flow_resolve_summary(
     })
 }
 
+/// Component id for nodes without manifest metadata: derived from the source, then the node id,
+/// then the literal `unknown`.
+fn fallback_component_id(source: &ComponentSourceRefV1, node_id: &str) -> Result<ComponentId> {
+    if let Some(id) =
+        component_id_from_source(source).or_else(|| ComponentId::from_str(node_id).ok())
+    {
+        return Ok(id);
+    }
+    ComponentId::from_str("unknown").map_err(|e| anyhow!("invalid fallback component id: {e}"))
+}
+
 fn summarize_node(
     flow_path: &Path,
     node_id: &str,
@@ -87,9 +98,7 @@ fn summarize_node(
     // ext:// nodes are declared by flow but resolved by packc at pack-build time.
     // No wasm artifact or manifest is available at this stage; return a deferred summary.
     if matches!(source, ComponentSourceRefV1::Ext { .. }) {
-        let component_id = component_id_from_source(source)
-            .or_else(|| ComponentId::from_str(node_id).ok())
-            .unwrap_or_else(|| ComponentId::from_str("unknown").expect("valid component id"));
+        let component_id = fallback_component_id(source, node_id)?;
         let (_, _, digest) = resolve_source(flow_path, source)?;
         return Ok(NodeResolveSummaryV1 {
             component_id,
@@ -133,9 +142,7 @@ fn summarize_node(
                     manifest,
                 });
             }
-            let component_id = component_id_from_source(source)
-                .or_else(|| ComponentId::from_str(node_id).ok())
-                .unwrap_or_else(|| ComponentId::from_str("unknown").expect("valid component id"));
+            let component_id = fallback_component_id(source, node_id)?;
             eprintln!(
                 "warning: component manifest metadata missing for node '{}'; summary will omit manifest",
                 node_id
@@ -287,7 +294,8 @@ fn resolve_remote(
                 reference
             )
         })?;
-        ensure_digest_matches_hint(reference, digest_hint, &descriptor.digest)?;
+        // Pin to the digest we looked up so a moved tag cannot swap the artifact.
+        ensure_digest_matches_hint(reference, Some(digest.as_str()), &descriptor.digest)?;
         let resolved = block_on_auto(client.fetch(&descriptor, CachePolicy))?.map_err(|e| {
             anyhow!(
                 "component reference {} not available locally: {e}",

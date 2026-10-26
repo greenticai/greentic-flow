@@ -266,6 +266,7 @@ pub fn plan_add_step(
         err_map: None,
         routing,
         telemetry: normalized.telemetry.clone(),
+        extra: IndexMap::new(),
     };
 
     Ok(AddStepPlan {
@@ -377,6 +378,7 @@ pub fn validate_flow(flow: &FlowIr, _catalog: &dyn ComponentCatalog) -> Vec<Diag
         for route in &node.routing {
             if let Some(to) = &route.to
                 && !flow.nodes.contains_key(to)
+                && to != "out"
             {
                 diags.push(Diagnostic {
                     code: "ROUTE_TARGET_MISSING",

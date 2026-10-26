@@ -116,19 +116,17 @@ Uses the embedded `schemas/ygtc.flow.schema.json` by default; add `--registry <a
 Or run everything: `LOCAL_CHECK_ONLINE=1 ci/local_check.sh`
 
 ## Environment
-- `OTEL_EXPORTER_OTLP_ENDPOINT` (default `http://localhost:4317`) targets your collector.
-- `RUST_LOG` controls log verbosity; e.g. `greentic_flow=info`.
-- `OTEL_RESOURCE_ATTRIBUTES=deployment.environment=dev` tags spans with the active environment.
+- The CLI does not install a tracing or OpenTelemetry subscriber, so `RUST_LOG` and `OTEL_*` variables have no effect on `greentic-flow` itself (library `tracing` events are not emitted by the binary).
 - `GREENTIC_FLOW_ALLOW_PROXY=1` lets remote asset/catalog fetches go through a proxy taken from the environment. By default the proxy environment is ignored so resolved DNS answers can be checked against private ranges and pinned (SSRF/DNS-rebinding protection). Fetches are https-only, so only `HTTPS_PROXY`/`https_proxy` and then `ALL_PROXY`/`all_proxy` are consulted (`HTTP_PROXY` is never used); within `HTTPS_PROXY`/`https_proxy` (and likewise `ALL_PROXY`/`all_proxy`) the first variable that is *set* wins, and an empty value means "no proxy" for that pair; an empty or unusable HTTPS value falls back to `ALL_PROXY`. The value must be an `http` or `https` URL (SOCKS is not supported and is ignored), a set `REQUEST_METHOD` (CGI) disables proxies, and `NO_PROXY`/`no_proxy` exclusions (`*`, exact host, domain suffix, optional port, and for IP-literal targets an exact IPv4/IPv6 address, bracketed IPv6, or CIDR such as `10.0.0.0/8` or `2001:db8::/32`) are honoured. The opt-in only takes effect when a proxy really applies to the request; otherwise the full default checks still run. When the proxy is used, static URL validation still applies but the private-address DNS check and DNS pinning are both skipped (left to the proxy) and a warning is printed to stderr.
 
 ## Maintenance Notes
 - Keep shared primitives flowing through `greentic-types` and `greentic-interfaces`.
-- Prefer zero-copy patterns and stay within safe Rust (`#![forbid(unsafe_code)]` is enabled).
+- Prefer zero-copy patterns and stay within safe Rust (the library uses `#![deny(unsafe_code)]` with two audited `#[allow(unsafe_code)]` sites: component-cache native deserialization in `src/cache/mod.rs` and `src/wizard_ops.rs`; the CLI binary additionally uses `unsafe` to set `GREENTIC_LOCALE` at startup).
 - Update the adapter registry fixtures under `tests/data/` when new adapters or operations are introduced.
 - Dependabot auto-merge is enabled for Cargo updates; repository settings must allow auto-merge and branch protections should list the required checks to gate merges.
 
 ## Releases & Publishing
 - Crate versions are sourced directly from each crate's `Cargo.toml`.
-- Every push to `master` compares the previous commit; if a crate version changed, a tag `<crate-name>-v<semver>` is created and pushed automatically.
-- The publish workflow runs on the tagged commit and attempts to publish all changed crates to crates.io using `katyo/publish-crates@v2`.
+- Every push to `main` runs `.github/workflows/tag-on-version-bump.yml` (a reusable workflow from `greenticai/.github`); when the crate version changed it creates and pushes a `v<semver>` tag.
+- `v*` tags trigger `.github/workflows/release-binaries.yml`, which builds the release binaries and then runs its `publish_crates` job to publish the crate to crates.io (via the shared `crates-publish.yml`). `flowcrates-v*` tags (or a manual dispatch) trigger `.github/workflows/crates-publish.yml`, which publishes the crate to crates.io.
 - Publishing is idempotent: if the version already exists on crates.io, the workflow succeeds without error.

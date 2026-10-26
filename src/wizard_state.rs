@@ -2,8 +2,12 @@ use crate::error::{FlowError, FlowErrorLocation, Result};
 use greentic_types::cbor::canonical;
 use serde::{Deserialize, Serialize};
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
+
+static TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WizardState {
@@ -48,20 +52,55 @@ pub fn wizard_state_path(flow_path: &Path, flow_id: &str) -> PathBuf {
         .join(format!("{}.cbor", sanitize_flow_id_for_file_name(flow_id)))
 }
 
-pub fn load_wizard_state(flow_path: &Path, flow_id: &str) -> Result<Option<WizardState>> {
+/// Why loading the wizard state cache failed; lets callers tell a corrupt cache from I/O errors.
+enum LoadError {
+    Read(FlowError),
+    Decode(String),
+}
+
+fn read_wizard_state(
+    flow_path: &Path,
+    flow_id: &str,
+) -> std::result::Result<Option<WizardState>, LoadError> {
     let path = wizard_state_path(flow_path, flow_id);
     if !path.exists() {
         return Ok(None);
     }
-    let bytes = fs::read(&path).map_err(|err| FlowError::Internal {
-        message: format!("read wizard state: {err}"),
-        location: FlowErrorLocation::new(None, None, None),
+    let bytes = fs::read(&path).map_err(|err| {
+        LoadError::Read(FlowError::Internal {
+            message: format!("read wizard state: {err}"),
+            location: FlowErrorLocation::new(None, None, None),
+        })
     })?;
-    let state: WizardState = canonical::from_cbor(&bytes).map_err(|err| FlowError::Internal {
-        message: format!("decode wizard state: {err}"),
-        location: FlowErrorLocation::new(None, None, None),
-    })?;
+    let state: WizardState =
+        canonical::from_cbor(&bytes).map_err(|err| LoadError::Decode(err.to_string()))?;
     Ok(Some(state))
+}
+
+pub fn load_wizard_state(flow_path: &Path, flow_id: &str) -> Result<Option<WizardState>> {
+    match read_wizard_state(flow_path, flow_id) {
+        Ok(state) => Ok(state),
+        Err(LoadError::Read(err)) => Err(err),
+        Err(LoadError::Decode(message)) => Err(FlowError::Internal {
+            message: format!("decode wizard state: {message}"),
+            location: FlowErrorLocation::new(None, None, None),
+        }),
+    }
+}
+
+/// The wizard state is a disposable cache: an undecodable file (e.g. truncated by an
+/// interrupted write) is discarded so mutating commands self-heal instead of failing forever.
+fn load_or_reset_wizard_state(flow_path: &Path, flow_id: &str) -> Result<Option<WizardState>> {
+    match read_wizard_state(flow_path, flow_id) {
+        Ok(state) => Ok(state),
+        Err(LoadError::Decode(message)) => {
+            eprintln!(
+                "warning: discarding corrupt wizard state cache (decode wizard state: {message})"
+            );
+            Ok(None)
+        }
+        Err(LoadError::Read(err)) => Err(err),
+    }
 }
 
 pub fn update_wizard_state(
@@ -71,12 +110,13 @@ pub fn update_wizard_state(
     mode: &str,
     locale: &str,
 ) -> Result<()> {
-    let mut state = load_wizard_state(flow_path, flow_id)?.unwrap_or_else(|| WizardState {
-        flow_id: flow_id.to_string(),
-        locale: locale.to_string(),
-        steps: Vec::new(),
-        last_updated: 0,
-    });
+    let mut state =
+        load_or_reset_wizard_state(flow_path, flow_id)?.unwrap_or_else(|| WizardState {
+            flow_id: flow_id.to_string(),
+            locale: locale.to_string(),
+            steps: Vec::new(),
+            last_updated: 0,
+        });
     let now = now_epoch_secs();
     state.locale = locale.to_string();
     state.last_updated = now;
@@ -94,7 +134,7 @@ pub fn update_wizard_state(
 }
 
 pub fn remove_wizard_step(flow_path: &Path, flow_id: &str, node_id: &str) -> Result<()> {
-    let Some(mut state) = load_wizard_state(flow_path, flow_id)? else {
+    let Some(mut state) = load_or_reset_wizard_state(flow_path, flow_id)? else {
         return Ok(());
     };
     let now = now_epoch_secs();
@@ -115,11 +155,26 @@ fn write_wizard_state(flow_path: &Path, state: &WizardState) -> Result<()> {
         message: format!("encode wizard state: {err}"),
         location: FlowErrorLocation::new(None, None, None),
     })?;
-    fs::write(&path, bytes).map_err(|err| FlowError::Internal {
-        message: format!("write wizard state: {err}"),
-        location: FlowErrorLocation::new(None, None, None),
-    })?;
+    // Write to a sibling temp file then rename so readers never observe a partial file.
+    // The name is unique per write (pid + counter) so concurrent writers never share a temp file.
+    let seq = TMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let tmp = path.with_extension(format!("cbor.tmp-{}-{seq}", std::process::id()));
+    let result = write_synced(&tmp, &bytes).and_then(|()| fs::rename(&tmp, &path));
+    if let Err(err) = result {
+        let _ = fs::remove_file(&tmp);
+        return Err(FlowError::Internal {
+            message: format!("write wizard state: {err}"),
+            location: FlowErrorLocation::new(None, None, None),
+        });
+    }
     Ok(())
+}
+
+/// Writes and fsyncs so a power loss after the rename cannot leave an empty/truncated file.
+fn write_synced(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let mut file = fs::File::create(path)?;
+    file.write_all(bytes)?;
+    file.sync_all()
 }
 
 fn now_epoch_secs() -> u64 {
@@ -132,6 +187,36 @@ fn now_epoch_secs() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn concurrent_writes_do_not_collide_and_corrupt_cache_heals() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let flow = dir.path().join("a.ygtc");
+        std::thread::scope(|scope| {
+            for i in 0..8 {
+                let flow = &flow;
+                scope.spawn(move || {
+                    for j in 0..20 {
+                        update_wizard_state(flow, "f", &format!("n{i}-{j}"), "default", "en")
+                            .expect("concurrent write");
+                    }
+                });
+            }
+        });
+        assert!(load_wizard_state(&flow, "f").expect("load").is_some());
+        let path = wizard_state_path(&flow, "f");
+        fs::write(&path, b"\xff\xff garbage").expect("corrupt");
+        assert!(load_wizard_state(&flow, "f").is_err());
+        update_wizard_state(&flow, "f", "n", "default", "en").expect("self-heal");
+        assert_eq!(
+            load_wizard_state(&flow, "f")
+                .expect("load")
+                .expect("some")
+                .steps
+                .len(),
+            1
+        );
+    }
 
     #[test]
     fn state_path_never_escapes_cache_dir() {

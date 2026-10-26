@@ -109,17 +109,95 @@ mod host {
         telemetry_logger: NoopTelemetryLogger,
         state_store: NoopStateStore,
         secrets_store: NoopSecretsStore,
-        limits: StoreLimits,
+        limits: WizardLimiter,
     }
 
     /// Fuel budget for a single wizard call into a component (guards against infinite loops).
     const WIZARD_FUEL: u64 = 10_000_000_000;
-    /// Upper bound on instances/tables/memories per store. Composed components instantiate many
-    /// nested core modules, so a tiny cap rejects valid components; total memory stays bounded by
-    /// `WIZARD_MAX_MEMORY_BYTES` and fuel.
+    /// Upper bound on instances/tables per store. Composed components instantiate many nested
+    /// core modules, so a tiny cap rejects valid components. Instances/tables are capped
+    /// generously; linear memory is bounded in total by `WizardLimiter`, and fuel bounds execution.
     const WIZARD_MAX_INSTANCES: usize = 1000;
-    /// Maximum linear memory a wizard component may allocate.
+    /// Maximum number of linear memories per store. Every nested core module of a composed
+    /// component may define its own memory, so this matches wasmtime's default store limit
+    /// (10,000) instead of a tiny cap; the total-bytes budget (`WIZARD_MAX_MEMORY_BYTES`) is what
+    /// actually bounds memory consumption.
+    const WIZARD_MAX_MEMORIES: usize = 10_000;
+    /// Maximum elements of any single table.
+    const WIZARD_MAX_TABLE_ELEMENTS: usize = 1_000_000;
+    /// Maximum linear memory a wizard component may allocate, summed over all of its memories
+    /// (wasmtime's `memory_size` limit alone applies to each memory individually).
     const WIZARD_MAX_MEMORY_BYTES: usize = 512 * 1024 * 1024;
+
+    /// Enforces a total linear-memory budget across all memories, delegating the rest of the
+    /// limits (per-memory size, instances, tables) to `StoreLimits`.
+    struct WizardLimiter {
+        inner: StoreLimits,
+        total_memory: usize,
+        /// `(current, desired)` of the most recent growth we approved and that wasmtime has not
+        /// yet reported as failed; used to refund the budget in `memory_grow_failed`.
+        pending_growth: Option<(usize, usize)>,
+    }
+
+    impl wasmtime::ResourceLimiter for WizardLimiter {
+        fn memory_growing(
+            &mut self,
+            current: usize,
+            desired: usize,
+            maximum: Option<usize>,
+        ) -> std::result::Result<bool, wasmtime::Error> {
+            self.pending_growth = None;
+            if !self.inner.memory_growing(current, desired, maximum)? {
+                return Ok(false);
+            }
+            let Some(total) = self
+                .total_memory
+                .checked_sub(current)
+                .and_then(|rest| rest.checked_add(desired))
+            else {
+                return Ok(false);
+            };
+            if total > WIZARD_MAX_MEMORY_BYTES {
+                return Ok(false);
+            }
+            self.total_memory = total;
+            self.pending_growth = Some((current, desired));
+            Ok(true)
+        }
+
+        fn memory_grow_failed(&mut self, _error: wasmtime::Error) -> wasmtime::Result<()> {
+            // Wasmtime may still fail a growth after approval (e.g. allocation failure); give the
+            // approved delta back so retried failures cannot exhaust the budget with no memory.
+            if let Some((current, desired)) = self.pending_growth.take() {
+                self.total_memory = self
+                    .total_memory
+                    .saturating_sub(desired)
+                    .saturating_add(current);
+            }
+            Ok(())
+        }
+
+        fn table_growing(
+            &mut self,
+            current: usize,
+            desired: usize,
+            maximum: Option<usize>,
+        ) -> std::result::Result<bool, wasmtime::Error> {
+            self.inner.table_growing(current, desired, maximum)
+        }
+
+        fn instances(&self) -> usize {
+            self.inner.instances()
+        }
+
+        fn tables(&self) -> usize {
+            self.inner.tables()
+        }
+
+        fn memories(&self) -> usize {
+            self.inner.memories()
+        }
+    }
     /// Fingerprint of the engine configuration; bump when `build_engine` changes so cached
     /// compiled artifacts from an incompatible configuration are not reused.
     const WIZARD_ENGINE_FINGERPRINT: &str = "wizard-fuel-v1";
@@ -290,12 +368,17 @@ mod host {
                 telemetry_logger: NoopTelemetryLogger,
                 state_store: NoopStateStore,
                 secrets_store: NoopSecretsStore,
-                limits: StoreLimitsBuilder::new()
-                    .memory_size(WIZARD_MAX_MEMORY_BYTES)
-                    .instances(WIZARD_MAX_INSTANCES)
-                    .tables(WIZARD_MAX_INSTANCES)
-                    .memories(WIZARD_MAX_INSTANCES)
-                    .build(),
+                limits: WizardLimiter {
+                    pending_growth: None,
+                    inner: StoreLimitsBuilder::new()
+                        .memory_size(WIZARD_MAX_MEMORY_BYTES)
+                        .table_elements(WIZARD_MAX_TABLE_ELEMENTS)
+                        .instances(WIZARD_MAX_INSTANCES)
+                        .tables(WIZARD_MAX_INSTANCES)
+                        .memories(WIZARD_MAX_MEMORIES)
+                        .build(),
+                    total_memory: 0,
+                },
             }
         }
     }
@@ -1298,6 +1381,75 @@ mod host {
                 matches!(key, ciborium::value::Value::Text(text) if text == "answers_cbor")
                     && matches!(value, ciborium::value::Value::Bytes(bytes) if bytes == &vec![0xbb])
             }));
+        }
+    }
+
+    #[cfg(test)]
+    mod limiter_tests {
+        use super::*;
+        use wasmtime::ResourceLimiter;
+
+        #[test]
+        fn memory_budget_is_total_across_memories() {
+            let mut state = HostState::new();
+            let mib = 1024 * 1024;
+            // Each memory individually is within the per-memory cap, but together they exceed it.
+            assert!(
+                state
+                    .limits
+                    .memory_growing(0, 300 * mib, None)
+                    .expect("first")
+            );
+            assert!(
+                !state
+                    .limits
+                    .memory_growing(0, 300 * mib, None)
+                    .expect("second"),
+                "second memory must be rejected once the total budget is exhausted"
+            );
+            // Growing the first memory within the remaining budget is still allowed.
+            assert!(
+                state
+                    .limits
+                    .memory_growing(300 * mib, 400 * mib, None)
+                    .expect("grow")
+            );
+        }
+
+        #[test]
+        fn failed_growth_refunds_budget() {
+            let mut state = HostState::new();
+            let mib = 1024 * 1024;
+            for _ in 0..5 {
+                assert!(
+                    state
+                        .limits
+                        .memory_growing(0, 300 * mib, None)
+                        .expect("grow")
+                );
+                state
+                    .limits
+                    .memory_grow_failed(wasmtime::Error::msg("os alloc failed"))
+                    .expect("refund");
+            }
+            // Budget must be intact after repeated failed growths.
+            assert!(
+                state
+                    .limits
+                    .memory_growing(0, 500 * mib, None)
+                    .expect("full budget")
+            );
+        }
+
+        #[test]
+        fn table_growth_is_bounded() {
+            let mut state = HostState::new();
+            assert!(
+                !state
+                    .limits
+                    .table_growing(0, usize::MAX / 2, None)
+                    .expect("table")
+            );
         }
     }
 }

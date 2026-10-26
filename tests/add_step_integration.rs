@@ -48,6 +48,7 @@ fn add_step_with_real_manifest_catalog() {
                 ..Route::default()
             }],
             telemetry: None,
+            extra: Default::default(),
         },
     );
     nodes.insert(
@@ -65,6 +66,7 @@ fn add_step_with_real_manifest_catalog() {
                 ..Route::default()
             }],
             telemetry: None,
+            extra: Default::default(),
         },
     );
 

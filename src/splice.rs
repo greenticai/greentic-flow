@@ -106,6 +106,12 @@ fn to_route_list(value: YamlValue, node_id: &str) -> Result<Vec<YamlValue>> {
     match value {
         YamlValue::Sequence(seq) => Ok(seq.elements),
         YamlValue::Null(_) => Ok(Vec::new()),
+        // Shorthand `routing: out|reply` expands to the equivalent route list.
+        YamlValue::String(ref s, _) if s == "out" || s == "reply" => {
+            let mut route = Mapping::new();
+            route.insert(yaml_string(s), YamlValue::Bool(true, None));
+            Ok(vec![YamlValue::Mapping(route)])
+        }
         _other => Err(FlowError::Routing {
             node_id: node_id.to_string(),
             message: "routing must be an array".to_string(),

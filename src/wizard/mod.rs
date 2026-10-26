@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use crate::model::{FlowDoc, NodeDoc};
@@ -246,6 +247,11 @@ impl FlowScaffoldWizardProvider {
     }
 }
 
+/// Executes a scaffold plan.
+///
+/// Files are created with `create_new`, so applying the same plan twice (or over existing files)
+/// fails with an error instead of overwriting; the operation is not idempotent. A failure part-way
+/// leaves already-created directories/files in place (no rollback).
 pub fn execute_plan(plan: &WizardPlan) -> Result<()> {
     for step in &plan.steps {
         match step {
@@ -260,7 +266,19 @@ pub fn execute_plan(plan: &WizardPlan) -> Result<()> {
                     fs::create_dir_all(parent)
                         .with_context(|| format!("create parent directory {}", parent.display()))?;
                 }
-                fs::write(path, content)
+                // `create_new` refuses to clobber an existing (possibly hand-authored) flow
+                // and closes the check-then-write race.
+                let mut file = fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(path)
+                    .with_context(|| {
+                        format!(
+                            "create scaffold flow {} (refusing to overwrite an existing file)",
+                            path.display()
+                        )
+                    })?;
+                file.write_all(content.as_bytes())
                     .with_context(|| format!("write scaffold flow {}", path.display()))?;
             }
             WizardPlanStep::ValidateFlow { path } => {
