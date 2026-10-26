@@ -180,6 +180,10 @@ pub fn compile_flow(doc: FlowDoc) -> Result<Flow> {
                     op_sibling = v.as_str().map(str::to_string);
                     continue;
                 }
+                // Schema-allowed node metadata; never the operation key.
+                "retry" | "timeout" | "when" | "annotations" | "meta" | "routing" | "telemetry" => {
+                    continue;
+                }
                 _ => {}
             }
             op_key = Some(k);
@@ -449,7 +453,7 @@ fn compile_routing(raw: &Value, nodes: &HashSet<String>, node_id: &str) -> Resul
             return Ok(Routing::Custom(raw.clone()));
         }
         if let Some(to) = &route.to {
-            if to == "out" || is_out {
+            if is_terminal_target(to, nodes) || is_out {
                 return Ok(Routing::End);
             }
             if !nodes.contains(to) {
@@ -521,9 +525,14 @@ fn compile_routing(raw: &Value, nodes: &HashSet<String>, node_id: &str) -> Resul
             })?;
             if let Some(status) = &route.status {
                 any_status = true;
-                on_status.insert(status.clone(), to_id);
-            } else {
-                default = Some(to_id);
+                // Duplicate status keys cannot be expressed as a Branch without
+                // dropping a route; keep the raw routing instead.
+                if on_status.insert(status.clone(), to_id).is_some() {
+                    return Ok(Routing::Custom(raw.clone()));
+                }
+            } else if default.replace(to_id).is_some() {
+                // Multiple unconditional routes: keep them all as Custom.
+                return Ok(Routing::Custom(raw.clone()));
             }
         }
         if any_status {

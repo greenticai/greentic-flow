@@ -966,7 +966,7 @@ struct UpdateStepArgs {
     /// Optional component reference (oci://, repo://, store://).
     #[arg(long = "component")]
     component: Option<String>,
-    /// Local wasm path for wizard ops (relative to the flow file).
+    /// Local wasm path for wizard ops (relative to the current directory; stored relative to the flow file).
     #[arg(long = "local-wasm")]
     local_wasm: Option<PathBuf>,
     /// Distributor URL for component-id resolution.
@@ -1054,7 +1054,7 @@ struct DeleteStepArgs {
     /// Optional component reference (oci://, repo://, store://).
     #[arg(long = "component")]
     component: Option<String>,
-    /// Local wasm path for wizard ops (relative to the flow file).
+    /// Local wasm path for wizard ops (relative to the current directory; stored relative to the flow file).
     #[arg(long = "local-wasm")]
     local_wasm: Option<PathBuf>,
     /// Distributor URL for component-id resolution.
@@ -2816,6 +2816,10 @@ fn read_input_line<R: Read + ?Sized>(reader: &mut R) -> Result<String> {
                 if reader.read(&mut seq)? == 0 {
                     continue;
                 }
+                if seq[0] == b'\n' {
+                    // ESC immediately followed by Enter still terminates the line.
+                    break;
+                }
                 if seq[0] != b'[' {
                     continue;
                 }
@@ -2823,6 +2827,7 @@ fn read_input_line<R: Read + ?Sized>(reader: &mut R) -> Result<String> {
                     continue;
                 }
                 match seq[0] {
+                    b'\n' => break,
                     b'C' if cursor < buf.len() => {
                         cursor += 1;
                     }
@@ -2833,9 +2838,12 @@ fn read_input_line<R: Read + ?Sized>(reader: &mut R) -> Result<String> {
                     b'F' => cursor = buf.len(),
                     b'3' => {
                         // Delete key: ESC [ 3 ~
-                        let _ = reader.read(&mut seq)?;
+                        let read = reader.read(&mut seq)?;
                         if cursor < buf.len() {
                             buf.remove(cursor);
+                        }
+                        if read > 0 && seq[0] == b'\n' {
+                            break;
                         }
                     }
                     _ => {}
@@ -2903,6 +2911,7 @@ fn read_input_line<R: Read + ?Sized>(reader: &mut R) -> Result<String> {
                                     }
                                     continue;
                                 }
+                                n if n > 0 => consumed.push(seq[0]),
                                 _ => {}
                             },
                             _ => {}
@@ -2910,6 +2919,8 @@ fn read_input_line<R: Read + ?Sized>(reader: &mut R) -> Result<String> {
                     }
                 }
                 // Not a recognized caret-encoded control sequence: keep literal bytes.
+                // A consumed newline is still the line terminator.
+                let ended_line = consumed.contains(&b'\n');
                 buf.insert(cursor, b'^');
                 cursor += 1;
                 for b in consumed {
@@ -2917,6 +2928,9 @@ fn read_input_line<R: Read + ?Sized>(reader: &mut R) -> Result<String> {
                         buf.insert(cursor, b);
                         cursor += 1;
                     }
+                }
+                if ended_line {
+                    break;
                 }
             }
             ch => {
@@ -3375,17 +3389,34 @@ fn read_component_answer_with_io<R: Read + ?Sized, W: Write + ?Sized>(
 fn read_component_answer_stdin(prompt: &str, kind: &QuestionKind) -> Result<String> {
     print!("{prompt}: ");
     io::stdout().flush().context("flush stdout")?;
+    let stdin = io::stdin();
+    let mut locked = stdin.lock();
+    read_component_answer_from(&mut locked, kind)
+}
+
+/// Reads one (possibly multi-line JSON) answer from `reader`.
+/// EOF is an error: treating it as an empty answer made required questions
+/// re-prompt forever and unbalanced JSON grow without bound.
+fn read_component_answer_from(reader: &mut dyn io::BufRead, kind: &QuestionKind) -> Result<String> {
     let mut line = String::new();
-    io::stdin()
+    if reader
         .read_line(&mut line)
-        .context("read interactive answer")?;
+        .context("read interactive answer")?
+        == 0
+    {
+        return Err(anyhow::Error::new(WizardEof));
+    }
     let mut raw = line.trim_end().to_string();
     while needs_multiline_json_capture(kind, &raw) {
         raw.push('\n');
         line.clear();
-        io::stdin()
+        if reader
             .read_line(&mut line)
-            .context("read interactive answer")?;
+            .context("read interactive answer")?
+            == 0
+        {
+            return Err(anyhow::Error::new(WizardEof));
+        }
         raw.push_str(line.trim_end());
     }
     Ok(raw)
@@ -4876,9 +4907,13 @@ fn wizard_add_flow_action_with_io<R: Read, W: Write>(
     }
     let flow_path = created.remove(0);
     let doc = load_ygtc_from_path(&flow_path)?;
+    let flow_record = wizard_flow_record_path(pack_dir, &flow_path)?;
+    // Same pack.yaml registration as plan replay (execute_add_flow_plan_action), so an
+    // interactive session and its replay produce identical packs.
+    upsert_pack_flow_entry(pack_dir, &flow_record, Some(&doc.id))?;
     Ok(Some(WizardPlanAction {
         action: "add-flow".to_string(),
-        flow: Some(wizard_flow_record_path(pack_dir, &flow_path)?),
+        flow: Some(flow_record),
         flow_id: Some(doc.id),
         flow_type: Some(doc.flow_type),
         ..WizardPlanAction::default()
@@ -5696,6 +5731,8 @@ fn wizard_delete_flow_action_with_io<R: Read, W: Write>(
     let flow = wizard_flow_record_path(pack_dir, flow_path)?;
     wizard_delete_flow_with_io(flow_path, reader, writer)?;
     if existed && !flow_path.exists() {
+        // Mirror execute_delete_flow_plan_action: drop the pack.yaml registration too.
+        remove_pack_flow_entry(pack_dir, &flow)?;
         return Ok(Some(WizardPlanAction {
             action: "delete-flow".to_string(),
             flow: Some(flow),
@@ -7021,8 +7058,14 @@ fn upsert_pack_component_entry(
 
     let components_key = ystr("components");
     let components_value = root_map.entry(components_key).or_insert_with(yseq);
-    if !components_value.is_sequence() {
+    if components_value.is_null() {
         *components_value = yseq();
+    }
+    if !components_value.is_sequence() {
+        anyhow::bail!(
+            "{}: `components` must be a sequence; refusing to overwrite it",
+            pack_yaml_path.display()
+        );
     }
     let components = components_value
         .as_sequence_mut()
@@ -7062,24 +7105,42 @@ fn upsert_pack_component_entry(
         if !matches {
             continue;
         }
-        component_map.insert(id_key.clone(), id_value.clone());
-        component_map.insert(version_key.clone(), ystr("0.1.0"));
-        component_map.insert(world_key.clone(), ystr(&world));
-        component_map.insert(supports_key.clone(), yseq_with([ystr(supports_label)]));
-        component_map.insert(
-            profiles_key.clone(),
-            serde_yaml_bw::Value::Mapping(serde_yaml_bw::Mapping::from_iter([
-                (ystr("default"), ystr("default")),
-                (ystr("supported"), yseq_with([ystr("default")])),
-            ])),
-        );
-        component_map.insert(
-            capabilities_key.clone(),
-            serde_yaml_bw::Value::Mapping(serde_yaml_bw::Mapping::from_iter([
-                (ystr("wasi"), ymap()),
-                (ystr("host"), ymap()),
-            ])),
-        );
+        // Existing entries are hand-maintained: only fill in what is missing and
+        // register this flow kind; never reset version/world/capabilities.
+        component_map
+            .entry(id_key.clone())
+            .or_insert_with(|| id_value.clone());
+        component_map
+            .entry(version_key.clone())
+            .or_insert_with(|| ystr("0.1.0"));
+        component_map
+            .entry(world_key.clone())
+            .or_insert_with(|| ystr(&world));
+        let supports = component_map
+            .entry(supports_key.clone())
+            .or_insert_with(yseq);
+        if let Some(seq) = supports.as_sequence_mut() {
+            let label_value = ystr(supports_label);
+            if !seq.iter().any(|item| item == &label_value) {
+                seq.push(label_value);
+            }
+        }
+        component_map
+            .entry(profiles_key.clone())
+            .or_insert_with(|| {
+                serde_yaml_bw::Value::Mapping(serde_yaml_bw::Mapping::from_iter([
+                    (ystr("default"), ystr("default")),
+                    (ystr("supported"), yseq_with([ystr("default")])),
+                ]))
+            });
+        component_map
+            .entry(capabilities_key.clone())
+            .or_insert_with(|| {
+                serde_yaml_bw::Value::Mapping(serde_yaml_bw::Mapping::from_iter([
+                    (ystr("wasi"), ymap()),
+                    (ystr("host"), ymap()),
+                ]))
+            });
         component_map.insert(wasm_key.clone(), wasm_value.clone());
         component_map
             .entry(operations_key.clone())
@@ -7119,7 +7180,7 @@ fn upsert_pack_component_entry(
     if !rendered.ends_with('\n') {
         rendered.push('\n');
     }
-    fs::write(&pack_yaml_path, rendered)
+    write_flow_file(&pack_yaml_path, &rendered, true, false)
         .with_context(|| format!("write {}", pack_yaml_path.display()))?;
     Ok(())
 }
@@ -7224,6 +7285,7 @@ fn build_add_flow_relative_path(
         );
     }
     let file_name = ensure_ygtc_name(flow_name)?;
+    validate_storage_segment("flow name", &file_name)?;
     let path = match scope {
         "global" => PathBuf::from("flows")
             .join("global")
@@ -7234,6 +7296,7 @@ fn build_add_flow_relative_path(
                 .map(str::trim)
                 .filter(|v| !v.is_empty())
                 .ok_or_else(|| anyhow!("{}", wizard_t("wizard.error.tenant_id_required")))?;
+            validate_storage_segment("tenant id", tenant)?;
             let team_segment = match team_scope {
                 Some("all-teams") | None => "all-teams".to_string(),
                 Some("specific-team") => {
@@ -7241,6 +7304,7 @@ fn build_add_flow_relative_path(
                         .map(str::trim)
                         .filter(|v| !v.is_empty())
                         .ok_or_else(|| anyhow!("{}", wizard_t("wizard.error.team_id_required")))?;
+                    validate_storage_segment("team id", team)?;
                     team.to_string()
                 }
                 Some(other) => {
@@ -7483,6 +7547,12 @@ fn handle_doctor(args: DoctorArgs, schema_mode: SchemaMode) -> Result<()> {
 
     let mut failures = 0usize;
     for target in &args.targets {
+        if !target.exists() {
+            // A typo'd path or unexpanded glob must not pass the gate silently.
+            failures += 1;
+            eprintln!("ERR {}: path not found", target.display());
+            continue;
+        }
         let mut failed_files = Vec::new();
         lint_path(target, &lint_ctx, true, &mut failures, &mut failed_files)?;
         let contract_targets = if target.is_dir() {
@@ -13888,6 +13958,33 @@ fn wizard_header(component: &str, mode: &str) -> String {
     format!("== {component} ({mode}) ==")
 }
 
+/// Human header goes to stdout normally, but to stderr in `--format json` so the JSON
+/// payload on stdout stays machine-parseable.
+fn print_wizard_header(format: OutputFormat, component: &str, mode: &str) {
+    write_wizard_header(
+        &mut io::stdout().lock(),
+        &mut io::stderr().lock(),
+        format,
+        component,
+        mode,
+    );
+}
+
+fn write_wizard_header(
+    out: &mut dyn Write,
+    err: &mut dyn Write,
+    format: OutputFormat,
+    component: &str,
+    mode: &str,
+) {
+    let header = wizard_header(component, mode);
+    if matches!(format, OutputFormat::Json) {
+        writeln!(err, "{header}").ok();
+    } else {
+        writeln!(out, "{header}").ok();
+    }
+}
+
 fn print_json_payload_with_optional_diagnostic(
     mut payload: serde_json::Value,
     diagnostic: Option<&serde_json::Value>,
@@ -14236,7 +14333,7 @@ struct AddStepArgs {
     /// Remote component reference (oci://, repo://, store://, etc.) for sidecar binding.
     #[arg(long = "component")]
     component_ref: Option<String>,
-    /// Local wasm path for sidecar binding (relative to the flow file).
+    /// Local wasm path for sidecar binding (relative to the current directory; stored relative to the flow file).
     #[arg(long = "local-wasm")]
     local_wasm: Option<PathBuf>,
     /// Distributor URL for component-id resolution.
@@ -14292,10 +14389,10 @@ struct BindComponentArgs {
     #[arg(long = "step")]
     step: String,
     /// Remote component reference (oci://, repo://, store://, etc.).
-    #[arg(long = "component")]
+    #[arg(long = "component", conflicts_with = "local_wasm")]
     component_ref: Option<String>,
-    /// Local wasm path (relative to the flow file).
-    #[arg(long = "local-wasm")]
+    /// Local wasm path (relative to the current directory; stored relative to the flow file).
+    #[arg(long = "local-wasm", conflicts_with = "component_ref")]
     local_wasm: Option<PathBuf>,
     /// Pin the component (resolve tag to digest or hash local wasm).
     #[arg(long = "pin")]
@@ -14569,10 +14666,7 @@ fn handle_add_step_with_qa_io(
             }
             if !qa_spec.questions.is_empty() {
                 qa_runner::warn_unknown_keys(&answers, &qa_spec, &catalog, &locale);
-                println!(
-                    "{}",
-                    wizard_header(&component_identity, wizard_mode.as_str())
-                );
+                print_wizard_header(format, &component_identity, wizard_mode.as_str());
                 answers = run_component_qa_with_qa_lib(
                     &qa_spec,
                     &catalog,
@@ -14849,7 +14943,7 @@ fn handle_add_step_with_qa_io(
                 let questions = questions_from_manifest(manifest_path, "default")?;
                 if !questions.is_empty() {
                     warn_unknown_keys(&answers, &questions);
-                    println!("{}", wizard_header(&component_identity, "default"));
+                    print_wizard_header(format, &component_identity, "default");
                     if has_answer_inputs {
                         validate_required(&questions, &answers)?;
                     } else {
@@ -14900,7 +14994,7 @@ fn handle_add_step_with_qa_io(
             let questions = questions_from_config_flow_text(&config_flow)?;
             if !questions.is_empty() {
                 warn_unknown_keys(&answers, &questions);
-                println!("{}", wizard_header(&component_identity, "config"));
+                print_wizard_header(format, &component_identity, "config");
                 if has_answer_inputs {
                     validate_required(&questions, &answers)?;
                 } else {
@@ -15104,10 +15198,7 @@ fn handle_update_step_with_qa_io(
         }
         if !qa_spec.questions.is_empty() {
             qa_runner::warn_unknown_keys(&answers, &qa_spec, &catalog, &locale);
-            println!(
-                "{}",
-                wizard_header(&component_identity, wizard_mode.as_str())
-            );
+            print_wizard_header(format, &component_identity, wizard_mode.as_str());
             answers = run_component_qa_with_qa_lib(
                 &qa_spec,
                 &catalog,
@@ -15330,7 +15421,7 @@ fn handle_update_step_with_qa_io(
         let questions = questions_from_config_flow_text(&config_flow)?;
         if !questions.is_empty() {
             warn_unknown_keys(&answers, &questions);
-            println!("{}", wizard_header(&component_identity, "config"));
+            print_wizard_header(format, &component_identity, "config");
             if args.non_interactive {
                 validate_required(&questions, &base_answers)?;
             } else {
@@ -15384,7 +15475,7 @@ fn handle_update_step_with_qa_io(
                 let mut base_answers = extract_answers_from_payload(&questions, &payload);
                 warn_unknown_keys(&answers, &questions);
                 base_answers.extend(answers.clone());
-                println!("{}", wizard_header(&component_identity, "default"));
+                print_wizard_header(format, &component_identity, "default");
                 if args.non_interactive {
                     validate_required(&questions, &base_answers)?;
                 } else {
@@ -15550,10 +15641,7 @@ fn handle_delete_step(args: DeleteStepArgs, format: OutputFormat, backup: bool) 
         wizard_ops::merge_default_answers(&qa_spec, &mut answers);
         if !qa_spec.questions.is_empty() {
             qa_runner::warn_unknown_keys(&answers, &qa_spec, &catalog, &locale);
-            println!(
-                "{}",
-                wizard_header(&component_identity, wizard_mode.as_str())
-            );
+            print_wizard_header(format, &component_identity, wizard_mode.as_str());
             answers = run_component_qa_with_qa_lib(
                 &qa_spec,
                 &catalog,
@@ -16139,14 +16227,39 @@ fn validate_oci_reference(reference: &str) -> Result<()> {
     if host.is_empty() || repo.is_empty() {
         anyhow::bail!("oci:// references must be in the form oci://<host>/<repo>");
     }
-    if host == "localhost"
-        || host.starts_with("localhost:")
-        || host.starts_with("127.")
-        || host.starts_with("0.")
+    if host.contains('@') || host.contains('\\') {
+        anyhow::bail!("oci:// registry host must not contain credentials or backslashes");
+    }
+    // Strip an optional port (and IPv6 brackets), lowercase and drop a trailing dot.
+    let bare_host = if let Some(inner) = host.strip_prefix('[') {
+        inner.split(']').next().unwrap_or("")
+    } else if host.matches(':').count() == 1 {
+        host.split(':').next().unwrap_or("")
+    } else {
+        host
+    };
+    let bare_host = bare_host.trim_end_matches('.').to_ascii_lowercase();
+    if bare_host.is_empty() {
+        anyhow::bail!("oci:// references must include a public registry host");
+    }
+    if let Ok(ip) = bare_host.parse::<IpAddr>() {
+        if is_private_or_local_ip(ip) {
+            anyhow::bail!("oci:// references must use a public registry host");
+        }
+        return Ok(());
+    }
+    let last_label = bare_host.rsplit('.').next().unwrap_or("");
+    if bare_host == "localhost"
+        || bare_host.ends_with(".localhost")
+        || bare_host.ends_with(".local")
+        || bare_host.ends_with(".internal")
+        // A numeric / hex-prefixed TLD is an obfuscated IPv4 literal (e.g. 2130706433, 0x7f.1).
+        || last_label.chars().all(|c| c.is_ascii_digit())
+        || last_label.starts_with("0x")
     {
         anyhow::bail!("oci:// references must use a public registry host");
     }
-    if !host.contains('.') {
+    if !bare_host.contains('.') {
         anyhow::bail!("oci:// references must include a public registry host");
     }
     Ok(())
@@ -16202,17 +16315,22 @@ fn validate_sidecar_source(source: &ComponentSourceRefV1, flow_path: &Path) -> R
 
 fn compute_local_digest(path: &Path) -> Result<String> {
     let data = fs::read(path).with_context(|| format!("read wasm at {}", path.display()))?;
+    Ok(compute_bytes_digest(&data))
+}
+
+/// Digest of bytes already in memory; use this instead of re-reading the file so the
+/// recorded digest always matches the bytes actually used (no TOCTOU).
+fn compute_bytes_digest(data: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(data);
     let digest_bytes = hasher.finalize();
-    let digest = format!(
+    format!(
         "sha256:{}",
         digest_bytes
             .iter()
             .map(|byte| format!("{byte:02x}"))
             .collect::<String>()
-    );
-    Ok(digest)
+    )
 }
 
 /// Computes the sidecar entry for `update-step --component/--local-wasm`. Replacing the
@@ -16427,8 +16545,13 @@ fn trim_sha256_prefix(digest: &str) -> &str {
 }
 
 fn cached_component_manifest_from_digest(digest: &str) -> Option<PathBuf> {
-    let trimmed = trim_sha256_prefix(digest);
-    let (prefix, rest) = trimmed.split_at(trimmed.len().min(2));
+    let trimmed = trim_sha256_prefix(digest.trim());
+    // The digest comes from an untrusted sidecar: only a bare sha256 hex string may be
+    // used to build cache paths (no separators, `..`, or multi-byte characters).
+    if trimmed.len() != 64 || !trimmed.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    let (prefix, rest) = trimmed.split_at(2);
     let cache_root = distribution_cache_root();
     let candidates = [
         cache_root
@@ -16576,7 +16699,7 @@ fn resolve_wizard_component(
         let (abs_path, uri_path) = normalize_local_wasm_path(local, flow_path)?;
         let bytes =
             fs::read(&abs_path).with_context(|| format!("read wasm at {}", abs_path.display()))?;
-        let digest = Some(compute_local_digest(&abs_path)?);
+        let digest = Some(compute_bytes_digest(&bytes));
         let source = ComponentSourceRefV1::Local {
             path: uri_path,
             digest: digest.clone(),
@@ -16642,8 +16765,8 @@ fn resolve_wizard_component(
         let source = if reference.starts_with("file://") {
             let local_path = reference.trim_start_matches("file://");
             let path = PathBuf::from(local_path);
-            let (abs_path, uri_path) = normalize_local_wasm_path(&path, flow_path)?;
-            let digest = Some(compute_local_digest(&abs_path)?);
+            let (_, uri_path) = normalize_local_wasm_path(&path, flow_path)?;
+            let digest = Some(compute_bytes_digest(&resolved.bytes));
             ComponentSourceRefV1::Local {
                 path: uri_path,
                 digest,
@@ -16766,7 +16889,7 @@ fn resolve_fixture_bytes(reference: &str, root: &Path) -> Result<ResolvedRefByte
         }
         let bytes =
             fs::read(&wasm_path).with_context(|| format!("read {}", wasm_path.display()))?;
-        let digest = Some(compute_local_digest(&wasm_path)?);
+        let digest = Some(compute_bytes_digest(&bytes));
         return Ok(ResolvedRefBytes { bytes, digest });
     }
 
@@ -16783,7 +16906,7 @@ fn resolve_fixture_bytes(reference: &str, root: &Path) -> Result<ResolvedRefByte
         );
     }
     let bytes = fs::read(path).with_context(|| format!("read {}", path.display()))?;
-    let digest = Some(compute_local_digest(path)?);
+    let digest = Some(compute_bytes_digest(&bytes));
     Ok(ResolvedRefBytes { bytes, digest })
 }
 
@@ -17218,4 +17341,238 @@ fn load_component_payload(
         }
     }
     Ok(None)
+}
+
+#[cfg(test)]
+mod audit_r11_tests {
+    use super::*;
+    use std::io::Cursor;
+
+    #[test]
+    fn r11_component_answer_eof_is_an_error_not_an_empty_answer() {
+        let mut empty = Cursor::new(Vec::<u8>::new());
+        let err =
+            read_component_answer_from(&mut empty, &QuestionKind::Text).expect_err("EOF must fail");
+        assert!(err.is::<WizardEof>());
+    }
+
+    #[test]
+    fn r11_component_answer_eof_inside_multiline_json_terminates() {
+        let kind = QuestionKind::InlineJson { schema: None };
+        let mut reader = Cursor::new(b"{\n".to_vec());
+        let err = read_component_answer_from(&mut reader, &kind).expect_err("EOF must fail");
+        assert!(err.is::<WizardEof>());
+    }
+
+    #[test]
+    fn r11_component_answer_reads_balanced_multiline_json() {
+        let kind = QuestionKind::InlineJson { schema: None };
+        let mut reader = Cursor::new(b"{\n\"a\": 1\n}\n".to_vec());
+        let raw = read_component_answer_from(&mut reader, &kind).expect("read");
+        assert!(
+            serde_json::from_str::<serde_json::Value>(&raw).is_ok(),
+            "{raw}"
+        );
+    }
+
+    fn two_lines(input: &[u8]) -> (String, String) {
+        let mut reader = Cursor::new(input.to_vec());
+        let first = read_input_line(&mut reader).expect("first line");
+        let second = read_input_line(&mut reader).expect("second line");
+        (first, second)
+    }
+
+    #[test]
+    fn r11_read_input_line_keeps_newline_after_trailing_caret() {
+        assert_eq!(two_lines(b"ab^\nnext\n"), ("ab^".into(), "next".into()));
+    }
+
+    #[test]
+    fn r11_read_input_line_keeps_newline_after_caret_bracket() {
+        assert_eq!(two_lines(b"ab^[\nnext\n"), ("ab^[".into(), "next".into()));
+        assert_eq!(two_lines(b"ab^[[\nnext\n"), ("ab^[[".into(), "next".into()));
+    }
+
+    #[test]
+    fn r11_read_input_line_keeps_newline_after_escape() {
+        assert_eq!(two_lines(b"ab\x1b\nnext\n"), ("ab".into(), "next".into()));
+        assert_eq!(two_lines(b"ab\x1b[\nnext\n"), ("ab".into(), "next".into()));
+    }
+
+    #[test]
+    fn r11_wizard_header_goes_to_stderr_in_json_mode() {
+        let (mut out, mut err) = (Vec::new(), Vec::new());
+        write_wizard_header(&mut out, &mut err, OutputFormat::Json, "c", "default");
+        assert!(out.is_empty());
+        assert_eq!(String::from_utf8_lossy(&err), "== c (default) ==\n");
+        let (mut out, mut err) = (Vec::new(), Vec::new());
+        write_wizard_header(&mut out, &mut err, OutputFormat::Human, "c", "default");
+        assert!(err.is_empty());
+        assert_eq!(String::from_utf8_lossy(&out), "== c (default) ==\n");
+    }
+
+    #[test]
+    fn r11_upsert_pack_component_preserves_existing_metadata() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        fs::write(
+            dir.path().join("pack.yaml"),
+            "components:\n- id: foo\n  version: 1.4.2\n  world: real:world/x\n  supports: [messaging]\n  capabilities:\n    wasi: {a: 1}\n    host: {}\n  wasm: components/old.wasm\n  operations: []\n",
+        )
+        .expect("pack.yaml");
+        upsert_pack_component_entry(
+            dir.path(),
+            "foo",
+            Path::new("components/foo.wasm"),
+            "events",
+        )
+        .expect("upsert");
+        let doc: serde_json::Value = serde_yaml_bw::from_str(
+            &fs::read_to_string(dir.path().join("pack.yaml")).expect("read"),
+        )
+        .expect("parse");
+        let entry = &doc["components"][0];
+        assert_eq!(entry["version"], "1.4.2");
+        assert_eq!(entry["world"], "real:world/x");
+        assert_eq!(entry["capabilities"]["wasi"]["a"], 1);
+        assert_eq!(entry["wasm"], "components/foo.wasm");
+        let supports: Vec<_> = entry["supports"]
+            .as_array()
+            .expect("supports")
+            .iter()
+            .map(|v| v.as_str().unwrap_or_default().to_string())
+            .collect();
+        assert_eq!(supports, vec!["messaging".to_string(), "event".to_string()]);
+    }
+
+    #[test]
+    fn r11_upsert_pack_component_rejects_non_sequence_components() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let original = "components:\n  foo: bar\n";
+        fs::write(dir.path().join("pack.yaml"), original).expect("pack.yaml");
+        let err = upsert_pack_component_entry(
+            dir.path(),
+            "foo",
+            Path::new("components/foo.wasm"),
+            "messaging",
+        )
+        .expect_err("must refuse");
+        assert!(err.to_string().contains("must be a sequence"), "{err:#}");
+        assert_eq!(
+            fs::read_to_string(dir.path().join("pack.yaml")).expect("read"),
+            original
+        );
+    }
+
+    #[test]
+    fn r11_cached_manifest_rejects_malformed_sidecar_digest() {
+        // Multi-byte char straddling byte 2 used to panic in split_at.
+        assert!(cached_component_manifest_from_digest("sha256:a\u{e9}").is_none());
+        assert!(cached_component_manifest_from_digest("sha256:../../x").is_none());
+        assert!(cached_component_manifest_from_digest("/abs/dir").is_none());
+        assert!(cached_component_manifest_from_digest("").is_none());
+    }
+
+    #[test]
+    fn r11_oci_reference_rejects_private_and_obfuscated_hosts() {
+        for bad in [
+            "oci://10.0.0.5/x",
+            "oci://192.168.1.1/x",
+            "oci://169.254.169.254/x",
+            "oci://localhost./x",
+            "oci://LOCALHOST/x",
+            "oci://foo.localhost/x",
+            "oci://127.0.0.1:5000/x",
+            "oci://[::1]/x",
+            "oci://2130706433/x",
+            "oci://0x7f.1/x",
+            "oci://user@host.example.com/x",
+        ] {
+            assert!(
+                validate_oci_reference(bad).is_err(),
+                "{bad} must be rejected"
+            );
+        }
+        for good in [
+            "oci://ghcr.io/org/comp:1",
+            "oci://registry.example.com:5000/x",
+            "oci://127.example.com/x",
+        ] {
+            validate_oci_reference(good).unwrap_or_else(|e| panic!("{good}: {e:#}"));
+        }
+    }
+
+    #[test]
+    fn r11_bytes_digest_matches_file_digest() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("a.wasm");
+        fs::write(&path, b"\0asm hello").expect("write");
+        assert_eq!(
+            compute_local_digest(&path).expect("digest"),
+            compute_bytes_digest(b"\0asm hello")
+        );
+    }
+
+    #[test]
+    fn r11_add_flow_path_rejects_unsafe_segments() {
+        assert!(
+            build_add_flow_relative_path("global", None, None, None, "messaging", "../../x")
+                .is_err()
+        );
+        assert!(
+            build_add_flow_relative_path("global", None, None, None, "messaging", "/tmp/x")
+                .is_err()
+        );
+        assert!(
+            build_add_flow_relative_path("tenant", Some("../t"), None, None, "messaging", "x")
+                .is_err()
+        );
+        assert!(
+            build_add_flow_relative_path(
+                "tenant",
+                Some("t"),
+                Some("specific-team"),
+                Some("a/b"),
+                "messaging",
+                "x"
+            )
+            .is_err()
+        );
+    }
+
+    fn pack_flow_files(pack_dir: &Path) -> Vec<String> {
+        let doc: serde_json::Value =
+            serde_yaml_bw::from_str(&fs::read_to_string(pack_dir.join("pack.yaml")).expect("read"))
+                .expect("parse");
+        doc["flows"]
+            .as_array()
+            .map(|flows| {
+                flows
+                    .iter()
+                    .filter_map(|f| f["file"].as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn r11_interactive_add_and_delete_flow_maintain_pack_yaml() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        fs::write(dir.path().join("pack.yaml"), "name: p\nflows: []\n").expect("pack.yaml");
+        let mut input = Cursor::new("1\n1\nwelcome\n");
+        let mut output = Vec::new();
+        let action = wizard_add_flow_action_with_io(dir.path(), &mut input, &mut output)
+            .expect("add")
+            .expect("action");
+        let rel = action.flow.clone().expect("flow");
+        assert_eq!(pack_flow_files(dir.path()), vec![rel.clone()]);
+
+        let mut input = Cursor::new("2\n");
+        let mut output = Vec::new();
+        let flow_path = dir.path().join(&rel);
+        let deleted =
+            wizard_delete_flow_action_with_io(dir.path(), &flow_path, &mut input, &mut output)
+                .expect("delete");
+        assert!(deleted.is_some());
+        assert!(pack_flow_files(dir.path()).is_empty());
+    }
 }

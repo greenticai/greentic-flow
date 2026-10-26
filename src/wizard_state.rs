@@ -64,6 +64,19 @@ pub fn load_wizard_state(flow_path: &Path, flow_id: &str) -> Result<Option<Wizar
     Ok(Some(state))
 }
 
+/// The wizard state is a disposable cache: an undecodable file (e.g. truncated by an
+/// interrupted write) is discarded so mutating commands self-heal instead of failing forever.
+fn load_or_reset_wizard_state(flow_path: &Path, flow_id: &str) -> Result<Option<WizardState>> {
+    match load_wizard_state(flow_path, flow_id) {
+        Ok(state) => Ok(state),
+        Err(FlowError::Internal { message, .. }) if message.starts_with("decode wizard state") => {
+            eprintln!("warning: discarding corrupt wizard state cache ({message})");
+            Ok(None)
+        }
+        Err(err) => Err(err),
+    }
+}
+
 pub fn update_wizard_state(
     flow_path: &Path,
     flow_id: &str,
@@ -71,12 +84,13 @@ pub fn update_wizard_state(
     mode: &str,
     locale: &str,
 ) -> Result<()> {
-    let mut state = load_wizard_state(flow_path, flow_id)?.unwrap_or_else(|| WizardState {
-        flow_id: flow_id.to_string(),
-        locale: locale.to_string(),
-        steps: Vec::new(),
-        last_updated: 0,
-    });
+    let mut state =
+        load_or_reset_wizard_state(flow_path, flow_id)?.unwrap_or_else(|| WizardState {
+            flow_id: flow_id.to_string(),
+            locale: locale.to_string(),
+            steps: Vec::new(),
+            last_updated: 0,
+        });
     let now = now_epoch_secs();
     state.locale = locale.to_string();
     state.last_updated = now;
@@ -94,7 +108,7 @@ pub fn update_wizard_state(
 }
 
 pub fn remove_wizard_step(flow_path: &Path, flow_id: &str, node_id: &str) -> Result<()> {
-    let Some(mut state) = load_wizard_state(flow_path, flow_id)? else {
+    let Some(mut state) = load_or_reset_wizard_state(flow_path, flow_id)? else {
         return Ok(());
     };
     let now = now_epoch_secs();
@@ -115,10 +129,16 @@ fn write_wizard_state(flow_path: &Path, state: &WizardState) -> Result<()> {
         message: format!("encode wizard state: {err}"),
         location: FlowErrorLocation::new(None, None, None),
     })?;
-    fs::write(&path, bytes).map_err(|err| FlowError::Internal {
-        message: format!("write wizard state: {err}"),
-        location: FlowErrorLocation::new(None, None, None),
-    })?;
+    // Write to a sibling temp file then rename so readers never observe a partial file.
+    let tmp = path.with_extension(format!("cbor.tmp-{}", std::process::id()));
+    let result = fs::write(&tmp, bytes).and_then(|()| fs::rename(&tmp, &path));
+    if let Err(err) = result {
+        let _ = fs::remove_file(&tmp);
+        return Err(FlowError::Internal {
+            message: format!("write wizard state: {err}"),
+            location: FlowErrorLocation::new(None, None, None),
+        });
+    }
     Ok(())
 }
 

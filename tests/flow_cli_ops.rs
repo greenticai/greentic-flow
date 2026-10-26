@@ -2590,6 +2590,7 @@ fn wizard_answers_plan_copies_adaptive_card_asset_from_local_file() {
     .unwrap();
 
     cargo_bin_cmd!("greentic-flow")
+        .env("GREENTIC_CACHE_DIR", dir.path().join("component-cache"))
         .arg("wizard")
         .arg(&local_pack)
         .arg("--answers")
@@ -2646,6 +2647,7 @@ fn wizard_answers_plan_copies_adaptive_card_asset_from_remote_url() {
     .unwrap();
 
     cargo_bin_cmd!("greentic-flow")
+        .env("GREENTIC_CACHE_DIR", dir.path().join("component-cache"))
         .arg("wizard")
         .arg(&remote_pack)
         .arg("--answers")
@@ -2725,6 +2727,7 @@ fn wizard_answers_plan_registers_referenced_asset_in_pack_yaml() {
     .unwrap();
 
     cargo_bin_cmd!("greentic-flow")
+        .env("GREENTIC_CACHE_DIR", dir.path().join("component-cache"))
         .arg("wizard")
         .arg(&pack_dir)
         .arg("--answers")
@@ -2800,6 +2803,7 @@ fn add_step_local_wasm_setup_rejects_required_runtime_input() {
     .unwrap();
 
     cargo_bin_cmd!("greentic-flow")
+        .env("GREENTIC_CACHE_DIR", dir.path().join("component-cache"))
         .arg("add-step")
         .arg("component-llm-openai")
         .arg("--flow")
@@ -2880,6 +2884,7 @@ fn wizard_answers_plan_registers_local_wasm_component_in_pack_yaml() {
     .unwrap();
 
     cargo_bin_cmd!("greentic-flow")
+        .env("GREENTIC_CACHE_DIR", dir.path().join("component-cache"))
         .arg("wizard")
         .arg(&pack_dir)
         .arg("--answers")
@@ -2960,6 +2965,7 @@ fn wizard_answers_plan_add_step_persists_mapping_aliases() {
     .unwrap();
 
     cargo_bin_cmd!("greentic-flow")
+        .env("GREENTIC_CACHE_DIR", dir.path().join("component-cache"))
         .arg("wizard")
         .arg(&pack_dir)
         .arg("--answers")
@@ -3013,6 +3019,7 @@ fn wizard_answers_plan_update_step_persists_mapping_aliases() {
     .unwrap();
 
     cargo_bin_cmd!("greentic-flow")
+        .env("GREENTIC_CACHE_DIR", dir.path().join("component-cache"))
         .arg("wizard")
         .arg(&pack_dir)
         .arg("--answers")
@@ -3053,6 +3060,7 @@ fn wizard_answers_plan_update_step_persists_mapping_aliases() {
     .unwrap();
 
     cargo_bin_cmd!("greentic-flow")
+        .env("GREENTIC_CACHE_DIR", dir.path().join("component-cache"))
         .arg("wizard")
         .arg(&pack_dir)
         .arg("--answers")
@@ -3134,6 +3142,7 @@ nodes:
     .unwrap();
 
     cargo_bin_cmd!("greentic-flow")
+        .env("GREENTIC_CACHE_DIR", dir.path().join("component-cache"))
         .arg("wizard")
         .arg(&pack_dir)
         .arg("--answers")
@@ -3216,6 +3225,7 @@ nodes:
     .unwrap();
 
     cargo_bin_cmd!("greentic-flow")
+        .env("GREENTIC_CACHE_DIR", dir.path().join("component-cache"))
         .arg("wizard")
         .arg(&pack_dir)
         .arg("--answers")
@@ -3295,6 +3305,7 @@ nodes:
     .unwrap();
 
     cargo_bin_cmd!("greentic-flow")
+        .env("GREENTIC_CACHE_DIR", dir.path().join("component-cache"))
         .arg("wizard")
         .arg(&pack_dir)
         .arg("--answers")
@@ -3377,6 +3388,7 @@ nodes:
     .unwrap();
 
     cargo_bin_cmd!("greentic-flow")
+        .env("GREENTIC_CACHE_DIR", dir.path().join("component-cache"))
         .arg("wizard")
         .arg(&pack_dir)
         .arg("--answers")
@@ -3481,6 +3493,7 @@ fn wizard_answers_plan_two_phase_llm_handle_message_authoring() {
     .unwrap();
 
     cargo_bin_cmd!("greentic-flow")
+        .env("GREENTIC_CACHE_DIR", dir.path().join("component-cache"))
         .arg("wizard")
         .arg(&pack_dir)
         .arg("--answers")
@@ -3633,6 +3646,7 @@ fn wizard_answers_plan_deep_research_slice_preserves_orchestration() {
     .unwrap();
 
     cargo_bin_cmd!("greentic-flow")
+        .env("GREENTIC_CACHE_DIR", dir.path().join("component-cache"))
         .arg("wizard")
         .arg(&pack_dir)
         .arg("--answers")

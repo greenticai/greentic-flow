@@ -128,6 +128,14 @@ impl DiskCache {
             self.warn_untrusted_once();
             return Ok(None);
         }
+        // A directory repaired from a loose mode may still hold files planted by
+        // someone else; only entries owned by us and not group/world writable are used.
+        if (paths.meta_path.exists() && !entry_file_trusted(&paths.meta_path))
+            || (paths.artifact_path.exists() && !entry_file_trusted(&paths.artifact_path))
+        {
+            self.delete_entry(&paths)?;
+            return Ok(None);
+        }
         if !paths.meta_path.exists() {
             if paths.artifact_path.exists() {
                 let _ = fs::remove_file(&paths.artifact_path);
@@ -202,11 +210,11 @@ impl DiskCache {
         let tmp_artifact = paths.tmp_path("artifact");
         let tmp_meta = paths.tmp_path("meta");
         let result = (|| -> Result<()> {
-            fs::write(&tmp_artifact, bytes)
+            write_private_file(&tmp_artifact, bytes)
                 .with_context(|| format!("failed to write {}", tmp_artifact.display()))?;
             let meta_json =
                 serde_json::to_vec_pretty(meta).context("failed to serialize cache metadata")?;
-            fs::write(&tmp_meta, meta_json)
+            write_private_file(&tmp_meta, meta_json)
                 .with_context(|| format!("failed to write {}", tmp_meta.display()))?;
             // The metadata file is the commit marker (readers check it first), so
             // the artifact must be in place before the metadata.
@@ -353,7 +361,7 @@ impl DiskCache {
         let tmp = paths.tmp_path("meta");
         let json = serde_json::to_vec_pretty(&meta)?;
         let _ = create_private_dir_all(&paths.tmp_dir);
-        fs::write(&tmp, json)?;
+        write_private_file(&tmp, json)?;
         if let Err(err) = fs::rename(&tmp, &paths.meta_path) {
             let _ = fs::remove_file(&tmp);
             return Err(err.into());
@@ -412,6 +420,39 @@ impl DiskPaths {
 }
 
 /// Create `path` (and parents) with owner-only permissions on unix.
+/// Cache entries are loaded as native code: require a regular file owned by the
+/// current user that is not group/world writable. Unix only.
+fn entry_file_trusted(path: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let euid = rustix::process::geteuid().as_raw();
+        match fs::symlink_metadata(path) {
+            Ok(meta) => meta.is_file() && meta.uid() == euid && meta.mode() & 0o022 == 0,
+            Err(_) => false,
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        true
+    }
+}
+
+/// Write `bytes` to `path`, creating it with mode `0600` on Unix.
+fn write_private_file(path: &Path, bytes: impl AsRef<[u8]>) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(path)?;
+    file.write_all(bytes.as_ref())
+}
+
 fn create_private_dir_all(path: &Path) -> std::io::Result<()> {
     #[cfg(unix)]
     {

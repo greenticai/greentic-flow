@@ -95,7 +95,7 @@ impl LintJsonOutput {
     }
 
     pub fn into_string(self) -> String {
-        serde_json::to_string(&self).expect("lint output serialization")
+        serde_json::to_string(&self).unwrap_or_else(|_| r#"{"ok":false,"errors":[]}"#.to_string())
     }
 }
 

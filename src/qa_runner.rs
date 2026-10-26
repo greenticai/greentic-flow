@@ -383,6 +383,9 @@ fn parse_answer(kind: &QuestionKind, raw: &str) -> Result<Value> {
     match kind {
         QuestionKind::Text => Ok(Value::String(trimmed.to_string())),
         QuestionKind::Number => {
+            if let Ok(int) = trimmed.parse::<i64>() {
+                return Ok(Value::Number(Number::from(int)));
+            }
             let number: f64 = trimmed.parse().map_err(|err| FlowError::Internal {
                 message: format!("invalid number: {err}"),
                 location: FlowErrorLocation::new(None, None, None),
@@ -410,7 +413,11 @@ fn parse_answer(kind: &QuestionKind, raw: &str) -> Result<Value> {
         }
         QuestionKind::AssetRef { .. } => Ok(Value::String(trimmed.to_string())),
         QuestionKind::Choice { options } => {
-            if let Ok(idx) = trimmed.parse::<usize>()
+            // An exact option value wins over a numeric index so options like ["2", "1"]
+            // stay addressable by their literal value.
+            let literal = options.iter().any(|opt| opt.value == trimmed);
+            if !literal
+                && let Ok(idx) = trimmed.parse::<usize>()
                 && idx > 0
                 && idx <= options.len()
             {
@@ -723,5 +730,27 @@ Ada
             message.contains("answers failed validation"),
             "unexpected error: {message}"
         );
+    }
+
+    #[test]
+    fn parse_answer_number_keeps_integers_and_literal_choice_wins() {
+        let parsed = parse_answer(&QuestionKind::Number, "5").expect("int");
+        assert!(parsed.is_i64(), "{parsed:?}");
+        let parsed = parse_answer(&QuestionKind::Number, "5.5").expect("float");
+        assert_eq!(parsed, json!(5.5));
+
+        let kind = QuestionKind::Choice {
+            options: vec![
+                ChoiceOption {
+                    value: "2".to_string(),
+                    label: text("a", "A"),
+                },
+                ChoiceOption {
+                    value: "1".to_string(),
+                    label: text("b", "B"),
+                },
+            ],
+        };
+        assert_eq!(parse_answer(&kind, "2").expect("literal"), json!("2"));
     }
 }

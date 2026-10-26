@@ -81,8 +81,19 @@ fn skip_if_single_cpu(test: &str) -> bool {
 
 const SAMPLES: usize = 5;
 
+/// The scaling tests compare 1-thread vs 2-thread per-op time, so they must not run
+/// concurrently with each other on libtest's parallel threads.
+static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn serial_guard() -> std::sync::MutexGuard<'static, ()> {
+    SERIAL
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 #[test]
 fn compile_flow_scaling_should_not_collapse_under_concurrency() {
+    let _serial = serial_guard();
     if skip_if_single_cpu("compile_flow_scaling") {
         return;
     }
@@ -102,6 +113,7 @@ fn compile_flow_scaling_should_not_collapse_under_concurrency() {
 
 #[test]
 fn bundle_validation_scaling_should_not_collapse_under_concurrency() {
+    let _serial = serial_guard();
     if skip_if_single_cpu("bundle_validation_scaling") {
         return;
     }

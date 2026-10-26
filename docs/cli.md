@@ -262,7 +262,7 @@ greentic-flow doctor-answers --schema answers.schema.json --answers answers.json
 - `--json` emits `{ "ok": true|false, "errors": [...] }`.
 
 ## Output reference
-- add-step/update-step/delete-step/bind-component print a summary line; flows are written unless `--dry-run`/`--validate-only`.
+- add-step/update-step/delete-step/bind-component print a summary line. add-step writes unless `--dry-run`/`--validate-only` and update-step unless `--dry-run`; delete-step writes the flow only with `--write` (otherwise prints to stdout) and bind-component writes the sidecar only with `--write`.
 - Sidecar (`*.ygtc.resolve.json`): schema_version=1; `nodes.{id}.source` contains `kind` (`local` or `remote`), `path` or `reference`, and optional `digest` when `--pin` is used.
 - doctor `--json` output matches `LintJsonOutput` (ok flag, diagnostics, bundle metadata).
 - Wizard JSON outputs may include `diagnostics` for non-fatal compatibility notices.
