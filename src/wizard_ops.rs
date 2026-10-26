@@ -134,9 +134,6 @@ mod host {
     struct WizardLimiter {
         inner: StoreLimits,
         total_memory: usize,
-        /// `(current, desired)` of the most recent growth we approved and that wasmtime has not
-        /// yet reported as failed; used to refund the budget in `memory_grow_failed`.
-        pending_growth: Option<(usize, usize)>,
     }
 
     impl wasmtime::ResourceLimiter for WizardLimiter {
@@ -146,7 +143,6 @@ mod host {
             desired: usize,
             maximum: Option<usize>,
         ) -> std::result::Result<bool, wasmtime::Error> {
-            self.pending_growth = None;
             if !self.inner.memory_growing(current, desired, maximum)? {
                 return Ok(false);
             }
@@ -161,20 +157,7 @@ mod host {
                 return Ok(false);
             }
             self.total_memory = total;
-            self.pending_growth = Some((current, desired));
             Ok(true)
-        }
-
-        fn memory_grow_failed(&mut self, _error: wasmtime::Error) -> wasmtime::Result<()> {
-            // Wasmtime may still fail a growth after approval (e.g. allocation failure); give the
-            // approved delta back so retried failures cannot exhaust the budget with no memory.
-            if let Some((current, desired)) = self.pending_growth.take() {
-                self.total_memory = self
-                    .total_memory
-                    .saturating_sub(desired)
-                    .saturating_add(current);
-            }
-            Ok(())
         }
 
         fn table_growing(
@@ -369,7 +352,6 @@ mod host {
                 state_store: NoopStateStore,
                 secrets_store: NoopSecretsStore,
                 limits: WizardLimiter {
-                    pending_growth: None,
                     inner: StoreLimitsBuilder::new()
                         .memory_size(WIZARD_MAX_MEMORY_BYTES)
                         .table_elements(WIZARD_MAX_TABLE_ELEMENTS)
@@ -1417,27 +1399,28 @@ mod host {
         }
 
         #[test]
-        fn failed_growth_refunds_budget() {
+        fn failed_growth_never_raises_the_budget() {
+            // wasmtime can report `memory_grow_failed` without a preceding `memory_growing`
+            // (growth past the memory type's own maximum), so the limiter must not refund
+            // anything: a spurious callback may never let a component exceed the total budget.
             let mut state = HostState::new();
             let mib = 1024 * 1024;
-            for _ in 0..5 {
-                assert!(
-                    state
-                        .limits
-                        .memory_growing(0, 300 * mib, None)
-                        .expect("grow")
-                );
-                state
-                    .limits
-                    .memory_grow_failed(wasmtime::Error::msg("os alloc failed"))
-                    .expect("refund");
-            }
-            // Budget must be intact after repeated failed growths.
             assert!(
                 state
                     .limits
-                    .memory_growing(0, 500 * mib, None)
-                    .expect("full budget")
+                    .memory_growing(0, 400 * mib, None)
+                    .expect("grow")
+            );
+            state
+                .limits
+                .memory_grow_failed(wasmtime::Error::msg("past the type maximum"))
+                .expect("callback");
+            assert!(
+                !state
+                    .limits
+                    .memory_growing(0, 400 * mib, None)
+                    .expect("second memory"),
+                "total budget must still account for the first 400 MiB"
             );
         }
 

@@ -419,7 +419,6 @@ impl DiskPaths {
     }
 }
 
-/// Create `path` (and parents) with owner-only permissions on unix.
 /// Cache entries are loaded as native code: require a regular file owned by the
 /// current user that is not group/world writable. Unix only.
 fn entry_file_trusted(path: &Path) -> bool {
@@ -453,6 +452,7 @@ fn write_private_file(path: &Path, bytes: impl AsRef<[u8]>) -> std::io::Result<(
     file.write_all(bytes.as_ref())
 }
 
+/// Create `path` (and parents) with owner-only permissions on unix.
 fn create_private_dir_all(path: &Path) -> std::io::Result<()> {
     #[cfg(unix)]
     {

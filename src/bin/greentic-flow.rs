@@ -3612,7 +3612,7 @@ fn run_component_qa_with_qa_lib(
                     if let Some(io) = qa_io.as_deref_mut() {
                         writeln!(io.writer, "{message}").ok();
                     } else {
-                        println!("{message}");
+                        eprintln!("{message}");
                     }
                 }
             }
@@ -13805,11 +13805,17 @@ fn write_flow_file(requested_path: &Path, content: &str, force: bool, backup: bo
         std::process::id(),
         TMP_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     ));
+    // Keep the existing file mode (e.g. 0600) instead of resetting to the umask default.
+    // The mode is applied before any content is written so it never sits in a wider file.
+    let existing_permissions = fs::metadata(path).ok().map(|meta| meta.permissions());
     let write_result = fs::OpenOptions::new()
         .write(true)
         .create_new(true)
         .open(&tmp_path)
         .and_then(|mut file| {
+            if let Some(permissions) = existing_permissions {
+                file.set_permissions(permissions)?;
+            }
             file.write_all(content.as_bytes())?;
             file.sync_all()
         });
@@ -13819,13 +13825,6 @@ fn write_flow_file(requested_path: &Path, content: &str, force: bool, backup: bo
             let _ = fs::remove_file(&tmp_path);
         }
         return Err(err).with_context(|| format!("failed to write {}", tmp_path.display()));
-    }
-    // Keep the existing file mode (e.g. 0600) instead of resetting to the umask default.
-    if let Ok(meta) = fs::metadata(path)
-        && let Err(err) = fs::set_permissions(&tmp_path, meta.permissions())
-    {
-        let _ = fs::remove_file(&tmp_path);
-        return Err(err).with_context(|| format!("failed to set mode on {}", tmp_path.display()));
     }
     if let Err(err) = fs::rename(&tmp_path, path) {
         let _ = fs::remove_file(&tmp_path);
