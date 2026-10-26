@@ -128,5 +128,5 @@ Or run everything: `LOCAL_CHECK_ONLINE=1 ci/local_check.sh`
 ## Releases & Publishing
 - Crate versions are sourced directly from each crate's `Cargo.toml`.
 - Every push to `main` runs `.github/workflows/tag-on-version-bump.yml` (a reusable workflow from `greenticai/.github`); when the crate version changed it creates and pushes a `v<semver>` tag.
-- `v*` tags trigger `.github/workflows/release-binaries.yml` (release binaries). `flowcrates-v*` tags (or a manual dispatch) trigger `.github/workflows/crates-publish.yml`, which publishes the crate to crates.io.
+- `v*` tags trigger `.github/workflows/release-binaries.yml`, which builds the release binaries and then runs its `publish_crates` job to publish the crate to crates.io (via the shared `crates-publish.yml`). `flowcrates-v*` tags (or a manual dispatch) trigger `.github/workflows/crates-publish.yml`, which publishes the crate to crates.io.
 - Publishing is idempotent: if the version already exists on crates.io, the workflow succeeds without error.

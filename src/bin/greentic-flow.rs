@@ -2776,7 +2776,11 @@ struct WizardEof;
 
 impl std::fmt::Display for WizardEof {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "wizard input exhausted")
+        write!(
+            f,
+            "no more input for the interactive question (input exhausted); \
+             use --answers or --non-interactive"
+        )
     }
 }
 
@@ -3387,8 +3391,9 @@ fn read_component_answer_with_io<R: Read + ?Sized, W: Write + ?Sized>(
 }
 
 fn read_component_answer_stdin(prompt: &str, kind: &QuestionKind) -> Result<String> {
-    print!("{prompt}: ");
-    io::stdout().flush().context("flush stdout")?;
+    // Prompts go to stderr so `--format json` stdout stays machine-parseable.
+    eprint!("{prompt}: ");
+    io::stderr().flush().context("flush stderr")?;
     let stdin = io::stdin();
     let mut locked = stdin.lock();
     read_component_answer_from(&mut locked, kind)
@@ -3492,7 +3497,7 @@ fn run_component_qa_with_qa_lib(
         if let Some(io) = qa_io.as_deref_mut() {
             writeln!(io.writer, "{message}").ok();
         } else {
-            println!("{message}");
+            eprintln!("{message}");
         }
     }
 
@@ -3559,14 +3564,14 @@ fn run_component_qa_with_qa_lib(
             }
         } else {
             if let Some(description) = question.get("description").and_then(|v| v.as_str()) {
-                println!("{title} ({description})");
+                eprintln!("{title} ({description})");
             } else {
-                println!("{title}");
+                eprintln!("{title}");
             }
             if let Some(choices) = question.get("choices").and_then(|v| v.as_array()) {
                 for (idx, choice) in choices.iter().enumerate() {
                     if let Some(value) = choice.as_str() {
-                        println!("  {}. {}", idx + 1, value);
+                        eprintln!("  {}. {}", idx + 1, value);
                     }
                 }
             }
@@ -3591,7 +3596,7 @@ fn run_component_qa_with_qa_lib(
                     if let Some(io) = qa_io.as_deref_mut() {
                         writeln!(io.writer, "{err}").ok();
                     } else {
-                        println!("{err}");
+                        eprintln!("{err}");
                     }
                     continue;
                 }
@@ -13753,7 +13758,21 @@ fn backup_path(path: &Path) -> PathBuf {
     PathBuf::from(os)
 }
 
-fn write_flow_file(path: &Path, content: &str, force: bool, backup: bool) -> Result<()> {
+fn write_flow_file(requested_path: &Path, content: &str, force: bool, backup: bool) -> Result<()> {
+    // Write through a symlink (shared/generated files) instead of replacing the link with
+    // a regular file, matching what a plain `fs::write` does.
+    let resolved_path =
+        if fs::symlink_metadata(requested_path).is_ok_and(|meta| meta.file_type().is_symlink()) {
+            fs::canonicalize(requested_path).with_context(|| {
+                format!(
+                    "resolve symlink {} (dangling symlink?)",
+                    requested_path.display()
+                )
+            })?
+        } else {
+            requested_path.to_path_buf()
+        };
+    let path = resolved_path.as_path();
     if path.exists() && !force {
         anyhow::bail!(
             "refusing to overwrite existing file {}; pass --force to replace it",
@@ -13800,6 +13819,13 @@ fn write_flow_file(path: &Path, content: &str, force: bool, backup: bool) -> Res
             let _ = fs::remove_file(&tmp_path);
         }
         return Err(err).with_context(|| format!("failed to write {}", tmp_path.display()));
+    }
+    // Keep the existing file mode (e.g. 0600) instead of resetting to the umask default.
+    if let Ok(meta) = fs::metadata(path)
+        && let Err(err) = fs::set_permissions(&tmp_path, meta.permissions())
+    {
+        let _ = fs::remove_file(&tmp_path);
+        return Err(err).with_context(|| format!("failed to set mode on {}", tmp_path.display()));
     }
     if let Err(err) = fs::rename(&tmp_path, path) {
         let _ = fs::remove_file(&tmp_path);
@@ -15254,7 +15280,7 @@ fn handle_update_step_with_qa_io(
         let config_json = wizard_ops::cbor_to_json(&config_cbor)?;
         ensure_wizard_config_not_error(&component_identity, wizard_mode, &config_json)?;
         node.payload = config_json;
-        node.operation = new_operation.clone();
+        node.set_operation(new_operation.clone());
         apply_mapping_aliases_to_node(
             &mut node,
             args.in_map.as_ref(),
@@ -15517,7 +15543,7 @@ fn handle_update_step_with_qa_io(
         node.routing.clone()
     };
 
-    node.operation = new_operation;
+    node.set_operation(new_operation);
     node.payload = new_payload;
     apply_mapping_aliases_to_node(
         &mut node,
@@ -17574,5 +17600,36 @@ mod audit_r11_tests {
                 .expect("delete");
         assert!(deleted.is_some());
         assert!(pack_flow_files(dir.path()).is_empty());
+    }
+    #[test]
+    fn r12_eof_message_is_not_wizard_specific() {
+        let msg = WizardEof.to_string();
+        assert!(!msg.contains("wizard"), "{msg}");
+        assert!(msg.contains("--answers"), "{msg}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn r12_write_flow_file_writes_through_symlink_and_keeps_mode() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let real = dir.path().join("real.yaml");
+        fs::write(&real, "a: 1\n").expect("seed");
+        fs::set_permissions(&real, fs::Permissions::from_mode(0o600)).expect("chmod");
+        let link = dir.path().join("pack.yaml");
+        std::os::unix::fs::symlink(&real, &link).expect("symlink");
+
+        write_flow_file(&link, "a: 2\n", true, false).expect("write");
+
+        assert!(
+            fs::symlink_metadata(&link)
+                .expect("meta")
+                .file_type()
+                .is_symlink(),
+            "symlink must be preserved"
+        );
+        assert_eq!(fs::read_to_string(&real).expect("read"), "a: 2\n");
+        let mode = fs::metadata(&real).expect("meta").permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
     }
 }

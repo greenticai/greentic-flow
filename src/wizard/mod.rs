@@ -247,6 +247,11 @@ impl FlowScaffoldWizardProvider {
     }
 }
 
+/// Executes a scaffold plan.
+///
+/// Files are created with `create_new`, so applying the same plan twice (or over existing files)
+/// fails with an error instead of overwriting; the operation is not idempotent. A failure part-way
+/// leaves already-created directories/files in place (no rollback).
 pub fn execute_plan(plan: &WizardPlan) -> Result<()> {
     for step in &plan.steps {
         match step {

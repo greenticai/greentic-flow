@@ -360,6 +360,8 @@ fn is_terminal_target(to: &str, nodes: &HashSet<String>) -> bool {
     to == "out" && !nodes.contains(to)
 }
 
+/// Note: multiple unconditional or duplicate-status routes compile to `Routing::Custom`
+/// (previously a last-wins `Branch` that silently dropped routes); consumers must handle fan-out.
 fn compile_routing(raw: &Value, nodes: &HashSet<String>, node_id: &str) -> Result<Routing> {
     #[derive(serde::Deserialize)]
     struct RouteDoc {

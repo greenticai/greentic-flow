@@ -75,6 +75,19 @@ fn is_false(value: &bool) -> bool {
     !*value
 }
 
+impl NodeIr {
+    /// Change the node's operation key. A carried-over `operation` sibling belongs to the
+    /// previous component key, so it is dropped when the operation actually changes
+    /// (otherwise `to_doc` would emit two conflicting operations).
+    pub fn set_operation(&mut self, operation: impl Into<String>) {
+        let operation = operation.into();
+        if operation != self.operation {
+            self.extra.shift_remove("operation");
+        }
+        self.operation = operation;
+    }
+}
+
 impl FlowIr {
     pub fn from_doc(doc: FlowDoc) -> Result<Self> {
         let schema_version = doc.schema_version;
