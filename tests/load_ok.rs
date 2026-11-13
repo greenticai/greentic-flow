@@ -287,6 +287,20 @@ fn a_bare_media_create_node_keeps_its_op_key_as_the_component_id() {
 }
 
 #[test]
+fn a_bare_knowledge_search_node_keeps_its_op_key_as_the_component_id() {
+    // `knowledge.search` is dispatched natively by the runner. Lowered to
+    // `component.exec` it would lose the component id and never run.
+    let body = "    knowledge.search:\n      query: \"refund policy\"\n      knowledge_base: \"faq\"\n      top_k: 3\n      output: passages\n";
+    let (component, operation, mapping) = lower_single_step(body);
+    assert_eq!(component, "knowledge.search");
+    assert_eq!(operation, None);
+    assert_eq!(mapping.pointer("/query"), Some(&json!("refund policy")));
+    assert_eq!(mapping.pointer("/knowledge_base"), Some(&json!("faq")));
+    assert_eq!(mapping.pointer("/top_k"), Some(&json!(3)));
+    assert_eq!(mapping.pointer("/output"), Some(&json!("passages")));
+}
+
+#[test]
 fn a_sibling_less_approval_call_keeps_its_op_key_with_no_operation() {
     // The designer emits `approval.call` WITHOUT a sibling `operation`. It used to
     // lower to component.exec/approval.call; it now lowers to the shape the
@@ -312,6 +326,8 @@ fn only_exact_runtime_native_kinds_are_exempt_from_component_exec() {
         "a2aa",
         "media.create.extra",
         "media.creator",
+        "knowledge.search.extra",
+        "knowledge.searcher",
     ] {
         let body = format!("    {key}:\n      a: 1\n");
         let (component, operation, _) = lower_single_step(&body);
